@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
 from backend.core.exceptions import NotFoundAppError, ValidationAppError
-from backend.db.models import UploadSession
+from backend.db.models import UploadSession, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
 from backend.schemas.uploads import UploadInitRequest
 from backend.services.preprocess import PreprocessService
@@ -56,6 +56,7 @@ class UploadApplicationService:
         )
         return await self.uploads.create_session(
             project_id=payload.project_id,
+            created_by_user_id=None,
             creative_id=payload.creative_id,
             creative_version_id=payload.creative_version_id,
             upload_token=secrets.token_urlsafe(24),
@@ -92,6 +93,7 @@ class UploadApplicationService:
 
         upload_session = await self.uploads.create_session(
             project_id=project_id,
+            created_by_user_id=None,
             creative_id=creative_id,
             creative_version_id=creative_version_id,
             upload_token=secrets.token_urlsafe(24),
@@ -141,6 +143,7 @@ class UploadApplicationService:
             )
             artifact = await self.uploads.create_stored_artifact(
                 project_id=project_id,
+                created_by_user_id=None,
                 creative_id=creative_id,
                 creative_version_id=creative_version_id,
                 artifact_kind=artifact_kind,
@@ -156,6 +159,7 @@ class UploadApplicationService:
                     "extracted_metadata": preprocess_result.extracted_metadata,
                     "modality": preprocess_result.modality,
                 },
+                upload_status=UploadStatus.STORED,
             )
             await self.uploads.mark_stored(upload_session, artifact.id)
             await self.session.commit()

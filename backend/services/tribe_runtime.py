@@ -4,6 +4,7 @@ import importlib
 import os
 import shutil
 import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,10 @@ from backend.core.exceptions import (
     UnsupportedModalityAppError,
     ValidationAppError,
 )
+from backend.core.logging import get_logger
 from backend.services.text_preprocess import TextPreprocessService
+
+logger = get_logger(__name__)
 
 SUPPORTED_TRIBE_MODALITIES = frozenset({"video", "audio", "text"})
 UNSUPPORTED_TRIBE_MODALITIES = {
@@ -138,6 +142,18 @@ class TribeRuntime:
 
             self.validate_environment()
             self._authenticate_huggingface()
+            load_started_at = time.perf_counter()
+            logger.info(
+                "Initializing shared TRIBE model.",
+                extra={
+                    "event": "tribe_model_init_started",
+                    "extra_fields": {
+                        "repo_id": self.model_repo_id,
+                        "checkpoint_name": self.checkpoint_name,
+                        "device": self.device,
+                    },
+                },
+            )
 
             try:
                 tribe_module = importlib.import_module("tribev2")
@@ -158,6 +174,18 @@ class TribeRuntime:
             self.__class__._shared_module = tribe_module
             self.__class__._shared_model = model
             self.__class__._resolved_device = self._resolve_loaded_device(model)
+            logger.info(
+                "Shared TRIBE model initialized.",
+                extra={
+                    "event": "tribe_model_init_finished",
+                    "extra_fields": {
+                        "repo_id": self.model_repo_id,
+                        "checkpoint_name": self.checkpoint_name,
+                        "resolved_device": self._get_resolved_device(),
+                        "duration_seconds": round(time.perf_counter() - load_started_at, 3),
+                    },
+                },
+            )
 
     def infer(self, payload: TribeRuntimeInput) -> TribeRuntimeOutput:
         self.assert_supported_modality(payload.modality)
@@ -167,6 +195,7 @@ class TribeRuntime:
         temp_text_path: Path | None = None
 
         try:
+            inference_started_at = time.perf_counter()
             if payload.modality == "video":
                 events = self._prepare_video_events(model=model, payload=payload)
             elif payload.modality == "audio":
@@ -177,12 +206,24 @@ class TribeRuntime:
                 raise UnsupportedModalityAppError(f"Unsupported TRIBE modality: {payload.modality}")
 
             predictions, segments = self._predict(model=model, events=events)
-            return self._postprocess_predictions(
+            output = self._postprocess_predictions(
                 payload=payload,
                 events=events,
                 predictions=predictions,
                 segments=segments,
             )
+            logger.info(
+                "TRIBE runtime inference completed.",
+                extra={
+                    "event": "tribe_runtime_infer_finished",
+                    "extra_fields": {
+                        "modality": payload.modality,
+                        "duration_seconds": round(time.perf_counter() - inference_started_at, 3),
+                        "segment_count": int(output.reduced_feature_vector.get("segment_count", 0)),
+                    },
+                },
+            )
+            return output
         finally:
             if temp_text_path is not None and temp_text_path.exists():
                 temp_text_path.unlink(missing_ok=True)

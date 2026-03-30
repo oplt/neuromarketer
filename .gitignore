@@ -357,3 +357,5 @@ Thumbs.db
 
 TODO.txt
 
+!frontend/src/lib/
+!frontend/src/lib/*.ts

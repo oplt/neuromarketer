@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.errors import register_exception_handlers
 from backend.api.middleware import RequestContextMiddleware
+from backend.api.router.analysis import router as analysis_router
 from backend.api.router.auth import router as auth_router
 from backend.api.router.creative_versions import router as creative_versions_router
 from backend.api.router.predict import router as predict_router
@@ -46,6 +47,7 @@ app.add_middleware(
 register_exception_handlers(app)
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
+app.include_router(analysis_router, prefix=settings.api_v1_prefix)
 app.include_router(predict_router, prefix=settings.api_v1_prefix)
 app.include_router(uploads_router, prefix=settings.api_v1_prefix)
 app.include_router(creative_versions_router, prefix=settings.api_v1_prefix)

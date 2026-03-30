@@ -5,10 +5,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-import boto3
-from botocore.config import Config
-
-from backend.core.config import settings
+from backend.services.storage import build_s3_client
 
 
 @dataclass(slots=True)
@@ -27,15 +24,7 @@ class LoadedAsset:
 
 class AssetLoader:
     def __init__(self) -> None:
-        self.s3_client = boto3.client(
-            "s3",
-            region_name=settings.aws_region,
-            endpoint_url=settings.s3_endpoint_url,
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            aws_session_token=settings.aws_session_token,
-            config=Config(signature_version="s3v4"),
-        )
+        self.s3_client = build_s3_client()
 
     def load(self, *, storage_uri: str, mime_type: str | None = None) -> LoadedAsset:
         if storage_uri.startswith("s3://"):

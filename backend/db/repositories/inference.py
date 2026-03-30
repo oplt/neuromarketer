@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.db.models import (
+    AnalysisResultRecord,
     InferenceJob,
     JobMetric,
     JobStatus,
@@ -64,6 +65,8 @@ class InferenceRepository:
         result = await self.session.execute(
             select(InferenceJob)
             .options(
+                selectinload(InferenceJob.metrics),
+                selectinload(InferenceJob.analysis_result_record),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.scores),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.visualizations),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.timeline_points),
@@ -93,7 +96,10 @@ class InferenceRepository:
     async def acquire_job(self, job_id: UUID, *, stale_after_seconds: int) -> InferenceJob | None:
         result = await self.session.execute(
             select(InferenceJob)
-            .options(selectinload(InferenceJob.prediction))
+            .options(
+                selectinload(InferenceJob.prediction),
+                selectinload(InferenceJob.analysis_result_record),
+            )
             .where(InferenceJob.id == job_id)
             .with_for_update()
         )
@@ -231,6 +237,42 @@ class InferenceRepository:
 
     async def get_prediction_result_for_job(self, job_id: UUID) -> PredictionResult | None:
         result = await self.session.execute(select(PredictionResult).where(PredictionResult.job_id == job_id))
+        return result.scalar_one_or_none()
+
+    async def replace_analysis_result(
+        self,
+        *,
+        job: InferenceJob,
+        summary_json: dict,
+        metrics_json: list[dict],
+        timeline_json: list[dict],
+        segments_json: list[dict],
+        visualizations_json: dict,
+        recommendations_json: list[dict],
+    ) -> AnalysisResultRecord:
+        existing = await self.get_analysis_result_for_job(job.id)
+        if existing is not None:
+            await self.session.delete(existing)
+            await self.session.flush()
+
+        record = AnalysisResultRecord(
+            job_id=job.id,
+            summary_json=summary_json,
+            metrics_json=metrics_json,
+            timeline_json=timeline_json,
+            segments_json=segments_json,
+            visualizations_json=visualizations_json,
+            recommendations_json=recommendations_json,
+        )
+        self.session.add(record)
+        await self.session.flush()
+        await self.session.refresh(record)
+        return record
+
+    async def get_analysis_result_for_job(self, job_id: UUID) -> AnalysisResultRecord | None:
+        result = await self.session.execute(
+            select(AnalysisResultRecord).where(AnalysisResultRecord.job_id == job_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_latest_prediction_snapshots(

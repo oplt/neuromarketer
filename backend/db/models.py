@@ -491,6 +491,9 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     prediction: Mapped[Optional["PredictionResult"]] = relationship(
         back_populates="job", cascade="all, delete-orphan", uselist=False
     )
+    analysis_result_record: Mapped[Optional["AnalysisResultRecord"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan", uselist=False
+    )
     metrics: Mapped[list["JobMetric"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -555,6 +558,26 @@ class PredictionResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     suggestions: Mapped[list["OptimizationSuggestion"]] = relationship(
         back_populates="prediction_result", cascade="all, delete-orphan"
     )
+
+
+class AnalysisResultRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "analysis_results"
+    __table_args__ = (
+        UniqueConstraint("job_id", name="uq_analysis_result_job"),
+        Index("ix_analysis_results_job_created_at", "job_id", "created_at"),
+    )
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("inference_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    summary_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    metrics_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    timeline_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    segments_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    visualizations_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    recommendations_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    job: Mapped["InferenceJob"] = relationship(back_populates="analysis_result_record")
 
 
 class PredictionScore(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -888,6 +911,7 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "stored_artifacts"
     __table_args__ = (
         Index("ix_stored_artifacts_project_kind", "project_id", "artifact_kind"),
+        Index("ix_stored_artifacts_user_status", "created_by_user_id", "upload_status"),
         Index("ix_stored_artifacts_storage_key", "storage_key"),
         UniqueConstraint("bucket_name", "storage_key", name="uq_artifact_bucket_key"),
     )
@@ -896,6 +920,11 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     creative_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
@@ -917,6 +946,11 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    upload_status: Mapped[UploadStatus] = mapped_column(
+        Enum(UploadStatus, name="upload_status"),
+        nullable=False,
+        default=UploadStatus.PENDING,
+    )
 
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
@@ -925,6 +959,7 @@ class UploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "upload_sessions"
     __table_args__ = (
         Index("ix_upload_sessions_project_status", "project_id", "status"),
+        Index("ix_upload_sessions_user_status", "created_by_user_id", "status"),
         UniqueConstraint("upload_token", name="uq_upload_sessions_token"),
     )
 
@@ -932,6 +967,11 @@ class UploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True),
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
+    )
+    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
     )
     creative_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),

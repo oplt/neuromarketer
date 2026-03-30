@@ -12,7 +12,6 @@ import {
   Box,
   Button,
   Chip,
-  Divider,
   LinearProgress,
   List,
   ListItemButton,
@@ -23,6 +22,9 @@ import {
   Typography,
 } from '@mui/material'
 import type { AuthSession, DashboardTab } from '../lib/session'
+import AccountPage from './AccountPage'
+import AnalysisPage from './AnalysisPage'
+import ProfilePage from './ProfilePage'
 import './dashboard-page.css'
 
 type DashboardPageProps = {
@@ -36,6 +38,7 @@ const menuItems = [
   { id: 'home', label: 'Home', icon: HomeRounded },
   { id: 'account', label: 'Account', icon: ManageAccountsRounded },
   { id: 'profile', label: 'Profile', icon: PersonRounded },
+  { id: 'analysis', label: 'Analysis', icon: AutoGraphRounded },
 ] as const satisfies ReadonlyArray<{
   id: DashboardTab
   label: string
@@ -73,12 +76,6 @@ const queueItems = [
   { name: 'Spring launch hero cut', status: 'Running', eta: '09 min', score: 'Attention +12%' },
   { name: 'Retention email narrative', status: 'Queued', eta: '14 min', score: 'Memory watch' },
   { name: 'Social proof static set', status: 'Ready', eta: 'Ready', score: 'Compare candidates' },
-]
-
-const profileActivity = [
-  'Updated profile details and workspace presentation settings',
-  'Reviewed three prediction jobs this morning',
-  'Opened compare flow for the spring launch set',
 ]
 
 function DashboardPage({
@@ -185,9 +182,7 @@ function DashboardPage({
             </Stack>
           </Paper>
 
-          {activeTab === 'home' ? <HomeTab /> : null}
-          {activeTab === 'account' ? <AccountTab session={session} /> : null}
-          {activeTab === 'profile' ? <ProfileTab session={session} /> : null}
+          {renderActivePage(activeTab, session)}
         </Box>
       </Box>
     </Box>
@@ -283,94 +278,17 @@ function HomeTab() {
   )
 }
 
-function AccountTab({ session }: { session: AuthSession }) {
-  return (
-    <Box className="dashboard-grid dashboard-grid--content">
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack spacing={2}>
-          <Typography variant="h6">Account overview</Typography>
-          <Typography color="text.secondary" variant="body2">
-            Keep this tab operational rather than noisy: workspace identity, billing posture, and
-            platform usage belong here.
-          </Typography>
-          <Divider />
-          <DetailRow label="Workspace" value={session.organizationName || 'Primary workspace'} />
-          <DetailRow label="Plan" value="Growth preview" />
-          <DetailRow label="API access" value="Ready for org-scoped keys" />
-          <DetailRow label="Object storage" value="S3-compatible uploads enabled" />
-        </Stack>
-      </Paper>
-
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack spacing={2}>
-          <Typography variant="h6">Usage posture</Typography>
-          <Typography color="text.secondary" variant="body2">
-            The account tab can grow into billing and enterprise controls later. For now it should
-            still look like a real admin destination.
-          </Typography>
-          <LinearProgress sx={{ height: 10, borderRadius: 999 }} value={58} variant="determinate" />
-          <DetailRow label="Prediction capacity" value="58% of monthly allocation" />
-          <DetailRow label="Active projects" value="7" />
-          <DetailRow label="Webhook endpoints" value="Planned next" />
-        </Stack>
-      </Paper>
-    </Box>
-  )
-}
-
-function ProfileTab({ session }: { session: AuthSession }) {
-  return (
-    <Box className="dashboard-grid dashboard-grid--content">
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack spacing={2}>
-          <Stack alignItems="center" direction="row" spacing={2}>
-            <Avatar sx={{ bgcolor: 'primary.main', width: 68, height: 68 }}>
-              {session.fullName.charAt(0).toUpperCase()}
-            </Avatar>
-            <Box>
-              <Typography variant="h6">{session.fullName}</Typography>
-              <Typography color="text.secondary" variant="body2">
-                {session.email}
-              </Typography>
-            </Box>
-          </Stack>
-          <Divider />
-          <DetailRow label="Role" value="Owner" />
-          <DetailRow label="Default workspace" value={session.organizationName || 'Primary workspace'} />
-          <DetailRow label="Profile status" value="Active" />
-        </Stack>
-      </Paper>
-
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack spacing={2}>
-          <Typography variant="h6">Recent activity</Typography>
-          <Stack spacing={1.25}>
-            {profileActivity.map((item) => (
-              <Box className="activity-row" key={item}>
-                <CheckCircleRounded color="primary" fontSize="small" />
-                <Typography color="text.secondary" variant="body2">
-                  {item}
-                </Typography>
-              </Box>
-            ))}
-          </Stack>
-        </Stack>
-      </Paper>
-    </Box>
-  )
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <Stack alignItems="center" direction="row" justifyContent="space-between" spacing={2}>
-      <Typography color="text.secondary" variant="body2">
-        {label}
-      </Typography>
-      <Typography sx={{ textAlign: 'right' }} variant="subtitle2">
-        {value}
-      </Typography>
-    </Stack>
-  )
+function renderActivePage(tab: DashboardTab, session: AuthSession) {
+  if (tab === 'account') {
+    return <AccountPage session={session} />
+  }
+  if (tab === 'profile') {
+    return <ProfilePage session={session} />
+  }
+  if (tab === 'analysis') {
+    return <AnalysisPage session={session} />
+  }
+  return <HomeTab />
 }
 
 function getDashboardTitle(tab: DashboardTab): string {
@@ -379,6 +297,9 @@ function getDashboardTitle(tab: DashboardTab): string {
   }
   if (tab === 'profile') {
     return 'Profile'
+  }
+  if (tab === 'analysis') {
+    return 'Analysis'
   }
   return 'Home'
 }
@@ -389,6 +310,9 @@ function getDashboardSubtitle(tab: DashboardTab): string {
   }
   if (tab === 'profile') {
     return 'Personal details and recent activity inside the workspace.'
+  }
+  if (tab === 'analysis') {
+    return 'Upload video, audio, or text assets and stage them for multimodal review.'
   }
   return 'Creative prediction activity, queue health, and immediate operating context.'
 }

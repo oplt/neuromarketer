@@ -33,15 +33,25 @@ type HomePageProps = {
 
 type AuthResponse = {
   detail?: string
+  error?: {
+    message?: string
+  }
   message?: string
   user?: {
+    id?: string
     email: string
     full_name?: string | null
   }
   organization?: {
+    id?: string
     name?: string
     slug?: string
   } | null
+  default_project?: {
+    id?: string
+    name?: string
+  } | null
+  session_token?: string | null
 }
 
 const signInFields: AuthField[] = [
@@ -142,8 +152,9 @@ function HomePage({ onSignedIn }: HomePageProps) {
     event: FormEvent<HTMLFormElement>,
   ) => {
     event.preventDefault()
-    setIsSubmitting(true)
     setAuthFeedback(null)
+
+    setIsSubmitting(true)
 
     try {
       const endpoint = mode === 'signup' ? '/api/v1/auth/signup' : '/api/v1/auth/signin'
@@ -169,7 +180,7 @@ function HomePage({ onSignedIn }: HomePageProps) {
 
       const body = (await response.json().catch(() => null)) as AuthResponse | null
       if (!response.ok) {
-        throw new Error(body?.detail || 'Request failed.')
+        throw new Error(body?.error?.message || body?.detail || 'Request failed.')
       }
 
       if (mode === 'signup') {
@@ -191,10 +202,14 @@ function HomePage({ onSignedIn }: HomePageProps) {
       }
 
       onSignedIn({
+        userId: body?.user?.id,
         email: body?.user?.email || signInValues.email.trim(),
         fullName: body?.user?.full_name || 'Workspace member',
         organizationName: body?.organization?.name,
         organizationSlug: body?.organization?.slug,
+        defaultProjectId: body?.default_project?.id,
+        defaultProjectName: body?.default_project?.name,
+        sessionToken: body?.session_token || undefined,
       })
       setSignInValues({
         email: signInValues.email.trim(),
@@ -274,87 +289,67 @@ function HomePage({ onSignedIn }: HomePageProps) {
         </section>
 
         <aside className="landing-page__auth-column">
-          <div className="auth-shell">
-            <div className="auth-shell__copy">
-              <span className="auth-shell__eyebrow">Workspace access</span>
-              <h2>Open the dashboard and keep work moving.</h2>
-              <p>
-                Sign in to land on the operating dashboard, or create an account and come back
-                through the same entry point.
-              </p>
-            </div>
-
-            <div className="auth-switch" aria-label="Authentication mode switch">
-              <button
-                className={!isSignUpActive ? 'is-active' : ''}
-                onClick={() => setIsSignUpActive(false)}
-                type="button"
-              >
-                Sign in
-              </button>
-              <button
-                className={isSignUpActive ? 'is-active' : ''}
-                onClick={() => setIsSignUpActive(true)}
-                type="button"
-              >
-                Sign up
-              </button>
-            </div>
-
+          <div className="landing-page__auth-stack">
             {authFeedback ? (
-              <div className={`auth-feedback auth-feedback--${authFeedback.type}`}>
+              <div className={`codepen-auth__feedback codepen-auth__feedback--${authFeedback.type}`}>
                 {authFeedback.message}
               </div>
             ) : null}
 
-            <div className={`auth-card ${isSignUpActive ? 'right-panel-active' : ''}`}>
-              <div className={`auth-pane auth-pane--signup ${isSignUpActive ? 'is-mobile-active' : ''}`}>
+            <div className={`codepen-auth ${isSignUpActive ? 'right-panel-active' : ''}`}>
+              <div className="codepen-auth__form-container codepen-auth__sign-up-container">
                 <AuthForm
-                  buttonLabel="Create account"
+                  buttonLabel="Sign Up"
                   fields={signUpFields}
                   isSubmitting={isSubmitting}
                   onFieldChange={handleSignUpChange}
                   onSubmit={(event) => handleSubmit('signup', event)}
-                  subtitle="Provision a workspace for creative testing and optimization."
-                  title="Create workspace access"
+                  title="Create Account"
                   values={signUpValues}
-                >
-                  <p className="auth-form__legal">By continuing, you agree to the platform terms.</p>
-                </AuthForm>
+                />
               </div>
 
-              <div className={`auth-pane auth-pane--signin ${!isSignUpActive ? 'is-mobile-active' : ''}`}>
+              <div className="codepen-auth__form-container codepen-auth__sign-in-container">
                 <AuthForm
-                  buttonLabel="Open dashboard"
+                  buttonLabel="Sign In"
                   fields={signInFields}
                   isSubmitting={isSubmitting}
                   onFieldChange={handleSignInChange}
                   onSubmit={(event) => handleSubmit('signin', event)}
-                  subtitle="Go straight into your account, profile, and creative home view."
                   title="Sign in"
                   values={signInValues}
                 >
-                  <button className="auth-link" type="button">
+                  <button className="codepen-auth__link" type="button">
                     Forgot your password?
                   </button>
                 </AuthForm>
               </div>
 
-              <div className="auth-overlay" aria-hidden="true">
-                <div className="auth-overlay__panel auth-overlay__panel--left">
-                  <h2>Already inside the platform?</h2>
-                  <p>Sign in and jump straight to your dashboard home and active creative queue.</p>
-                  <button className="ghost-button" onClick={() => setIsSignUpActive(false)} type="button">
-                    Sign In
-                  </button>
-                </div>
+              <div className="codepen-auth__overlay-container" aria-hidden="true">
+                <div className="codepen-auth__overlay">
+                  <div className="codepen-auth__overlay-panel codepen-auth__overlay-left">
+                    <h1>Already have an account?</h1>
+                    <p>Login to access your dashboard and experience the power of the web.</p>
+                    <button
+                      className="codepen-auth__ghost-button"
+                      onClick={() => setIsSignUpActive(false)}
+                      type="button"
+                    >
+                      Sign In
+                    </button>
+                  </div>
 
-                <div className="auth-overlay__panel auth-overlay__panel--right">
-                  <h2>Need a new workspace?</h2>
-                  <p>Create the account here, then return to the same entry and continue inside.</p>
-                  <button className="ghost-button" onClick={() => setIsSignUpActive(true)} type="button">
-                    Sign Up
-                  </button>
+                  <div className="codepen-auth__overlay-panel codepen-auth__overlay-right">
+                    <h1>Don&apos;t have an account?</h1>
+                    <p>Create an account and let&apos;s begin a new journey.</p>
+                    <button
+                      className="codepen-auth__ghost-button"
+                      onClick={() => setIsSignUpActive(true)}
+                      type="button"
+                    >
+                      Sign Up
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -367,7 +362,6 @@ function HomePage({ onSignedIn }: HomePageProps) {
 
 type AuthFormProps = {
   title: string
-  subtitle: string
   buttonLabel: string
   fields: AuthField[]
   values: Record<string, string>
@@ -379,7 +373,6 @@ type AuthFormProps = {
 
 function AuthForm({
   title,
-  subtitle,
   buttonLabel,
   fields,
   values,
@@ -389,32 +382,30 @@ function AuthForm({
   children,
 }: AuthFormProps) {
   return (
-    <form className="auth-form" onSubmit={onSubmit}>
-      <div className="auth-form__header">
-        <span className="auth-form__eyebrow">NeuroMarketer</span>
-        <h2>{title}</h2>
-        <p className="auth-form__subtitle">{subtitle}</p>
-      </div>
+    <form className="codepen-auth__form" onSubmit={onSubmit}>
+      <h1>{title}</h1>
 
-      <div className="auth-form__fields">
+      <div className="codepen-auth__fields">
         {fields.map((field) => (
-          <label className="auth-field" htmlFor={field.id} key={field.id}>
-            <span className="auth-field__label">{field.label}</span>
-            <input
-              autoComplete={field.autoComplete}
-              id={field.id}
-              onChange={(event) => onFieldChange(field.name, event.target.value)}
-              placeholder={field.placeholder}
-              type={field.type}
-              value={values[field.name] ?? ''}
-            />
-          </label>
+          <input
+            aria-label={field.label}
+            autoComplete={field.autoComplete}
+            className="codepen-auth__input"
+            id={field.id}
+            key={field.id}
+            name={field.name}
+            onChange={(event) => onFieldChange(field.name, event.target.value)}
+            placeholder={field.placeholder}
+            required
+            type={field.type}
+            value={values[field.name] ?? ''}
+          />
         ))}
       </div>
 
       {children}
 
-      <button className="auth-submit" disabled={isSubmitting} type="submit">
+      <button className="codepen-auth__submit" disabled={isSubmitting} type="submit">
         {isSubmitting ? 'Please wait...' : buttonLabel}
       </button>
     </form>

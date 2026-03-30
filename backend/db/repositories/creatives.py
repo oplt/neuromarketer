@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Creative, CreativeStatus, CreativeVersion, Project, StoredArtifact
+from backend.db.models import AssetType, Creative, CreativeStatus, CreativeVersion, Project, StoredArtifact
 
 
 class CreativeRepository:
@@ -34,6 +34,30 @@ class CreativeRepository:
         )
         current_max = result.scalar_one()
         return int(current_max or 0) + 1
+
+    async def create_creative(
+        self,
+        *,
+        project_id: UUID,
+        created_by_user_id: UUID | None,
+        name: str,
+        asset_type: AssetType,
+        tags: list[str] | None = None,
+        metadata_json: dict | None = None,
+    ) -> Creative:
+        creative = Creative(
+            project_id=project_id,
+            created_by_user_id=created_by_user_id,
+            name=name,
+            asset_type=asset_type,
+            status=CreativeStatus.DRAFT,
+            tags=tags or [],
+            metadata_json=metadata_json or {},
+        )
+        self.session.add(creative)
+        await self.session.flush()
+        await self.session.refresh(creative)
+        return creative
 
     async def create_version_from_artifact(
         self,

@@ -46,10 +46,17 @@ class AuthOrganizationRead(BaseModel):
     slug: str
 
 
+class AuthProjectRead(BaseModel):
+    id: UUID
+    name: str
+
+
 class AuthResponse(BaseModel):
     message: str
     user: AuthUserRead
     organization: AuthOrganizationRead | None = None
+    default_project: AuthProjectRead | None = None
+    session_token: str | None = None
 
     @classmethod
     def from_user_and_org(
@@ -58,6 +65,8 @@ class AuthResponse(BaseModel):
         message: str,
         user: Any,
         organization: Any | None,
+        default_project: Any | None = None,
+        session_token: str | None = None,
     ) -> "AuthResponse":
         return cls(
             message=message,
@@ -75,6 +84,15 @@ class AuthResponse(BaseModel):
                 if organization is not None
                 else None
             ),
+            default_project=(
+                AuthProjectRead(
+                    id=default_project.id,
+                    name=default_project.name,
+                )
+                if default_project is not None
+                else None
+            ),
+            session_token=session_token,
         )
 
 

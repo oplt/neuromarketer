@@ -41,6 +41,9 @@ from backend.schemas.schemas import (
     ProjectCreate,
 )
 
+DEFAULT_PROJECT_NAME = "Default Analysis Project"
+DEFAULT_PROJECT_DESCRIPTION = "System-created project used by the Analysis workspace."
+
 
 # ---------------------------------------------------------------------
 # Auth / users
@@ -79,7 +82,7 @@ async def create_user_with_workspace(
     email: str,
     full_name: str,
     password: str,
-) -> tuple[User, Organization]:
+) -> tuple[User, Organization, Project]:
     normalized_email = email.strip().lower()
     cleaned_name = full_name.strip()
     name_parts = cleaned_name.split(maxsplit=1)
@@ -108,12 +111,25 @@ async def create_user_with_workspace(
         user=user,
         role=OrgRole.OWNER,
     )
+    project = Project(
+        organization=organization,
+        created_by_user=user,
+        name=DEFAULT_PROJECT_NAME,
+        description=DEFAULT_PROJECT_DESCRIPTION,
+        settings={"system_managed": True, "surface": "analysis"},
+    )
 
-    db.add_all([user, organization, membership])
+    db.add_all([user, organization, membership, project])
     await db.commit()
     await db.refresh(user)
     await db.refresh(organization)
-    return user, organization
+    await db.refresh(project)
+    return user, organization, project
+
+
+async def get_user_by_id(db: AsyncSession, user_id: UUID) -> User | None:
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()
 
 
 async def get_primary_organization_for_user(
@@ -128,6 +144,42 @@ async def get_primary_organization_for_user(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_default_project_for_organization(
+    db: AsyncSession,
+    organization_id: UUID,
+) -> Project | None:
+    result = await db.execute(
+        select(Project)
+        .where(Project.organization_id == organization_id)
+        .order_by(Project.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_or_create_default_project_for_organization(
+    db: AsyncSession,
+    *,
+    organization_id: UUID,
+    created_by_user_id: UUID | None,
+) -> Project:
+    existing = await get_default_project_for_organization(db, organization_id)
+    if existing is not None:
+        return existing
+
+    project = Project(
+        organization_id=organization_id,
+        created_by_user_id=created_by_user_id,
+        name=DEFAULT_PROJECT_NAME,
+        description=DEFAULT_PROJECT_DESCRIPTION,
+        settings={"system_managed": True, "surface": "analysis"},
+    )
+    db.add(project)
+    await db.commit()
+    await db.refresh(project)
+    return project
 
 
 # ---------------------------------------------------------------------

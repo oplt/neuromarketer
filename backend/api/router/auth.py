@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.security import verify_password
+from backend.core.security import create_session_token, verify_password
 from backend.db.repositories import crud
 from backend.db.session import get_db
 from backend.schemas.schemas import (
@@ -27,7 +27,7 @@ async def sign_up(
             detail="An account with this email already exists.",
         )
 
-    user, organization = await crud.create_user_with_workspace(
+    user, organization, default_project = await crud.create_user_with_workspace(
         db,
         email=payload.email,
         full_name=payload.full_name,
@@ -37,6 +37,12 @@ async def sign_up(
         message="Account created successfully.",
         user=user,
         organization=organization,
+        default_project=default_project,
+        session_token=create_session_token(
+            user_id=user.id,
+            organization_id=organization.id,
+            email=user.email,
+        ),
     )
 
 
@@ -53,8 +59,25 @@ async def sign_in(
         )
 
     organization = await crud.get_primary_organization_for_user(db, user.id)
+    default_project = None
+    if organization is not None:
+        default_project = await crud.get_or_create_default_project_for_organization(
+            db,
+            organization_id=organization.id,
+            created_by_user_id=user.id,
+        )
     return AuthResponse.from_user_and_org(
         message="Signed in successfully.",
         user=user,
         organization=organization,
+        default_project=default_project,
+        session_token=(
+            create_session_token(
+                user_id=user.id,
+                organization_id=organization.id,
+                email=user.email,
+            )
+            if organization is not None
+            else None
+        ),
     )

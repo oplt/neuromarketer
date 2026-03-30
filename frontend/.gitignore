@@ -348,6 +348,9 @@ build/
 .DS_Store
 Thumbs.db
 
+!src/lib/
+!src/lib/*.ts
+
 
 # IDE
 .idea/
