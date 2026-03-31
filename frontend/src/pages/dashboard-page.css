@@ -159,6 +159,28 @@
   border-top: 1px solid rgba(24, 34, 48, 0.08);
 }
 
+.analysis-asset-library {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-asset-library__item {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.82);
+  transition: border-color 160ms ease, transform 160ms ease, background-color 160ms ease;
+}
+
+.analysis-asset-library__item.is-selected {
+  border-color: rgba(20, 184, 166, 0.28);
+  background: linear-gradient(180deg, rgba(20, 184, 166, 0.08), rgba(255, 255, 255, 0.96));
+}
+
+.analysis-asset-library__item:hover {
+  transform: translateY(-1px);
+}
+
 .analysis-dropzone {
   border: 1.5px dashed rgba(59, 91, 219, 0.28);
   border-radius: 22px;
@@ -334,6 +356,55 @@
   gap: 10px;
 }
 
+.analysis-evaluation-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.analysis-evaluation-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.analysis-evaluation-card {
+  align-self: start;
+}
+
+.analysis-evaluation-score-grid,
+.analysis-evaluation-summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px;
+}
+
+.analysis-evaluation-pill,
+.analysis-evaluation-summary-card,
+.analysis-evaluation-scorecard-tile,
+.analysis-evaluation-item,
+.analysis-evaluation-list__item {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.82);
+}
+
+.analysis-evaluation-pill.is-risk {
+  background: linear-gradient(180deg, rgba(220, 38, 38, 0.08), rgba(255, 255, 255, 0.96));
+}
+
+.analysis-evaluation-scorecard-grid,
+.analysis-evaluation-list {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-evaluation-item {
+  display: grid;
+  gap: 10px;
+}
+
 .analysis-priority-chip {
   text-transform: capitalize;
   font-weight: 800 !important;
@@ -365,6 +436,8 @@
     grid-template-columns: 1fr;
   }
 
+  .analysis-evaluation-grid,
+  .analysis-evaluation-mode-grid,
   .analysis-interval-grid {
     grid-template-columns: 1fr;
   }

@@ -30,7 +30,8 @@ import {
   type DragEvent,
   type SetStateAction,
 } from 'react'
-import { apiRequest, uploadToSignedUrl } from '../lib/api'
+import AnalysisEvaluationSection from '../components/analysis/AnalysisEvaluationSection'
+import { apiRequest, uploadToApi, uploadToSignedUrl } from '../lib/api'
 import type { AuthSession } from '../lib/session'
 
 type AnalysisPageProps = {
@@ -63,6 +64,10 @@ type AnalysisAsset = {
   checksum?: string | null
   upload_status: string
   created_at: string
+}
+
+type AnalysisAssetListResponse = {
+  items: AnalysisAsset[]
 }
 
 type AnalysisUploadSession = {
@@ -343,6 +348,15 @@ function AnalysisPage({ session }: AnalysisPageProps) {
   })
   const [analysisJob, setAnalysisJob] = useState<AnalysisJob | null>(null)
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
+  const [assetLibrary, setAssetLibrary] = useState<AnalysisAsset[]>([])
+  const [isLoadingAssetLibrary, setIsLoadingAssetLibrary] = useState(false)
+  const [hasLoadedAssetLibrary, setHasLoadedAssetLibrary] = useState(false)
+  const [assetLibraryError, setAssetLibraryError] = useState<string | null>(null)
+  const [assetLibraryRefreshNonce, setAssetLibraryRefreshNonce] = useState(0)
+  const selectedAssetStorageKey = buildSelectedAssetStorageKey(session.defaultProjectId || session.email)
+  const [activeLibraryAssetId, setActiveLibraryAssetId] = useState<string | null>(() =>
+    readSelectedAnalysisAssetId(buildSelectedAssetStorageKey(session.defaultProjectId || session.email)),
+  )
 
   const sessionToken = session.sessionToken
   const currentMediaOption = mediaTypeOptions.find((option) => option.kind === selectedMediaType) ?? mediaTypeOptions[0]
@@ -390,6 +404,55 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     }
   })
 
+  const loadAssetLibrary = useEffectEvent(async () => {
+    if (!sessionToken) {
+      setAssetLibrary([])
+      setAssetLibraryError(null)
+      setIsLoadingAssetLibrary(false)
+      setHasLoadedAssetLibrary(true)
+      return
+    }
+
+    setIsLoadingAssetLibrary(true)
+    try {
+      const response = await apiRequest<AnalysisAssetListResponse>(
+        `/api/v1/analysis/assets?media_type=${encodeURIComponent(selectedMediaType)}&limit=12`,
+        {
+          sessionToken,
+        },
+      )
+      setAssetLibrary(response.items)
+      setAssetLibraryError(null)
+
+      const preferredAssetId = activeLibraryAssetId || readSelectedAnalysisAssetId(selectedAssetStorageKey)
+      const preferredAsset =
+        preferredAssetId != null
+          ? response.items.find((asset) => asset.id === preferredAssetId && asset.upload_status === 'uploaded')
+          : null
+      const hasLocalDraft = selectedMediaType === 'text' ? Boolean(textContent.trim()) : Boolean(selectedFile)
+
+      if (preferredAsset && !hasLocalDraft && uploadState.stage !== 'uploading' && analysisJob == null) {
+        setActiveLibraryAssetId(preferredAsset.id)
+        setUploadState((current) =>
+          current.asset?.id === preferredAsset.id && current.stage === 'uploaded'
+            ? current
+            : {
+                stage: 'uploaded',
+                progressPercent: 100,
+                validationErrors: [],
+                asset: preferredAsset,
+              },
+        )
+      }
+      setHasLoadedAssetLibrary(true)
+    } catch (error) {
+      setAssetLibraryError(error instanceof Error ? error.message : 'Unable to load uploaded analysis assets.')
+      setHasLoadedAssetLibrary(true)
+    } finally {
+      setIsLoadingAssetLibrary(false)
+    }
+  })
+
   useEffect(() => {
     const loadConfig = async () => {
       if (!sessionToken) {
@@ -415,6 +478,10 @@ function AnalysisPage({ session }: AnalysisPageProps) {
   }, [sessionToken])
 
   useEffect(() => {
+    void loadAssetLibrary()
+  }, [assetLibraryRefreshNonce, selectedMediaType, sessionToken])
+
+  useEffect(() => {
     if (!analysisJob || !sessionToken) {
       return
     }
@@ -432,7 +499,7 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [analysisJob, analysisResult, pollAnalysisJob, sessionToken])
+  }, [analysisJob, analysisResult, sessionToken])
 
   const handleMediaTypeChange = (nextMediaType: MediaType) => {
     if (nextMediaType === selectedMediaType) {
@@ -443,6 +510,7 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     setSelectedFile(null)
     setTextContent('')
     setTextFilename('analysis-notes.txt')
+    setActiveLibraryAssetId(null)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
   }
 
@@ -453,6 +521,7 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     }
     event.target.value = ''
     setSelectedFile(file)
+    setActiveLibraryAssetId(null)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
   }
 
@@ -467,6 +536,7 @@ function AnalysisPage({ session }: AnalysisPageProps) {
       const nextTextContent = await file.text()
       setTextContent(nextTextContent)
       setTextFilename(ensureTxtFilename(file.name))
+      setActiveLibraryAssetId(null)
       resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
     } catch {
       setBannerMessage({
@@ -486,7 +556,32 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     }
 
     setSelectedFile(file)
+    setActiveLibraryAssetId(null)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
+  }
+
+  const handleSelectUploadedAsset = (asset: AnalysisAsset) => {
+    if (asset.upload_status !== 'uploaded') {
+      return
+    }
+
+    setSelectedFile(null)
+    setTextContent('')
+    setTextFilename(ensureTxtFilename(asset.original_filename || 'analysis-notes.txt'))
+    setAnalysisJob(null)
+    setAnalysisResult(null)
+    setActiveLibraryAssetId(asset.id)
+    storeSelectedAnalysisAssetId(selectedAssetStorageKey, asset.id)
+    setUploadState({
+      stage: 'uploaded',
+      progressPercent: 100,
+      validationErrors: [],
+      asset,
+    })
+    setBannerMessage({
+      type: 'info',
+      message: `${asset.original_filename || 'Uploaded asset'} is selected from your stored media library.`,
+    })
   }
 
   const handleUpload = async () => {
@@ -529,6 +624,7 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     setBannerMessage(null)
     setAnalysisJob(null)
     setAnalysisResult(null)
+    setActiveLibraryAssetId(null)
     setUploadState({
       stage: 'uploading',
       progressPercent: 0,
@@ -547,30 +643,64 @@ function AnalysisPage({ session }: AnalysisPageProps) {
         },
       })
 
-      await uploadToSignedUrl({
-        file: uploadSource.file,
-        url: initResponse.upload_url,
-        contentType: uploadSource.mimeType,
-        onProgress: (progressPercent) => {
-          setUploadState((current) => ({
-            ...current,
-            stage: 'uploading',
-            progressPercent,
-            validationErrors: [],
-          }))
-        },
-      })
+      let completedResponse: AnalysisUploadCompleteResponse
+      let usedBackendFallback = false
 
-      const completedResponse = await apiRequest<AnalysisUploadCompleteResponse>(
-        `/api/v1/analysis/uploads/${initResponse.upload_session.id}/complete`,
-        {
-          method: 'POST',
+      try {
+        await uploadToSignedUrl({
+          file: uploadSource.file,
+          url: initResponse.upload_url,
+          contentType: uploadSource.mimeType,
+          onProgress: (progressPercent) => {
+            setUploadState((current) => ({
+              ...current,
+              stage: 'uploading',
+              progressPercent,
+              validationErrors: [],
+            }))
+          },
+        })
+
+        completedResponse = await apiRequest<AnalysisUploadCompleteResponse>(
+          `/api/v1/analysis/uploads/${initResponse.upload_session.id}/complete`,
+          {
+            method: 'POST',
+            sessionToken,
+            body: {
+              upload_token: initResponse.upload_session.upload_token,
+            },
+          },
+        )
+      } catch (directUploadError) {
+        usedBackendFallback = true
+        setBannerMessage({
+          type: 'info',
+          message: 'Direct browser upload was blocked. Retrying through the backend upload proxy.',
+        })
+        completedResponse = await uploadToApi<AnalysisUploadCompleteResponse>({
+          path: `/api/v1/analysis/uploads/${initResponse.upload_session.id}/fallback`,
           sessionToken,
-          body: {
+          file: uploadSource.file,
+          fileName: uploadSource.fileName,
+          fields: {
             upload_token: initResponse.upload_session.upload_token,
           },
-        },
-      )
+          onProgress: (progressPercent) => {
+            setUploadState((current) => ({
+              ...current,
+              stage: 'uploading',
+              progressPercent,
+              validationErrors: [],
+            }))
+          },
+        }).catch((fallbackError) => {
+          const directMessage =
+            directUploadError instanceof Error ? directUploadError.message : 'Direct upload failed.'
+          const fallbackMessage =
+            fallbackError instanceof Error ? fallbackError.message : 'Backend upload failed.'
+          throw new Error(`${directMessage} Fallback upload also failed: ${fallbackMessage}`)
+        })
+      }
 
       setUploadState({
         stage: 'uploaded',
@@ -579,9 +709,14 @@ function AnalysisPage({ session }: AnalysisPageProps) {
         asset: completedResponse.asset,
         uploadSession: completedResponse.upload_session,
       })
+      setActiveLibraryAssetId(completedResponse.asset.id)
+      storeSelectedAnalysisAssetId(selectedAssetStorageKey, completedResponse.asset.id)
+      setAssetLibrary((current) => mergeLatestAnalysisAsset(current, completedResponse.asset))
       setBannerMessage({
-        type: 'success',
-        message: 'Upload completed. The asset is ready to queue for analysis.',
+        type: usedBackendFallback ? 'info' : 'success',
+        message: usedBackendFallback
+          ? 'Upload completed through the backend proxy. The asset is ready to queue for analysis.'
+          : 'Upload completed. The asset is ready to queue for analysis.',
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Upload failed.'
@@ -644,6 +779,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     analysisResult,
     uploadState,
   })
+  const analysisCompleted = Boolean(analysisResult && (!analysisJob || analysisJob.status === 'completed'))
+  const evaluationJobId = analysisResult?.job_id ?? analysisJob?.id ?? null
 
   return (
     <Stack spacing={3}>
@@ -765,9 +902,20 @@ function AnalysisPage({ session }: AnalysisPageProps) {
 
               <SelectedSourceSummary
                 mediaType={selectedMediaType}
+                selectedAsset={uploadState.asset}
                 selectedFile={selectedFile}
                 textContent={textContent}
                 textFilename={textFilename}
+              />
+
+              <UploadedMediaLibrary
+                activeAssetId={activeLibraryAssetId}
+                assets={assetLibrary}
+                errorMessage={assetLibraryError}
+                hasLoaded={hasLoadedAssetLibrary}
+                isLoading={isLoadingAssetLibrary}
+                onReload={() => setAssetLibraryRefreshNonce((current) => current + 1)}
+                onSelectAsset={handleSelectUploadedAsset}
               />
 
               {uploadState.stage === 'uploading' ? (
@@ -855,6 +1003,10 @@ function AnalysisPage({ session }: AnalysisPageProps) {
               <DetailRow label="Workspace" value={session.organizationName || 'Primary workspace'} />
               <DetailRow label="Project" value={session.defaultProjectName || 'Default Analysis Project'} />
               <DetailRow label="Selected media" value={currentMediaOption.title} />
+              <DetailRow
+                label="Selected asset"
+                value={uploadState.asset?.original_filename || uploadState.asset?.object_key || 'No stored asset selected'}
+              />
               <DetailRow label="Upload status" value={uploadState.asset?.upload_status || uploadState.stage} />
               <DetailRow
                 label="Stored object"
@@ -1018,21 +1170,44 @@ function AnalysisPage({ session }: AnalysisPageProps) {
           </Stack>
         </Paper>
       </Box>
+
+      <AnalysisEvaluationSection
+        analysisCompleted={analysisCompleted}
+        jobId={evaluationJobId}
+        sessionToken={sessionToken || null}
+      />
     </Stack>
   )
 }
 
 function SelectedSourceSummary({
   mediaType,
+  selectedAsset,
   selectedFile,
   textContent,
   textFilename,
 }: {
   mediaType: MediaType
+  selectedAsset?: AnalysisAsset
   selectedFile: File | null
   textContent: string
   textFilename: string
 }) {
+  if (selectedAsset && mediaType === selectedAsset.media_type && !selectedFile && !textContent.trim()) {
+    return (
+      <Box className="analysis-upload-card__file">
+        <Box>
+          <Typography variant="subtitle2">{selectedAsset.original_filename || 'Stored analysis asset'}</Typography>
+          <Typography color="text.secondary" variant="body2">
+            Ready from uploaded media library
+            {selectedAsset.size_bytes ? ` · ${formatFileSize(selectedAsset.size_bytes)}` : ''}
+          </Typography>
+        </Box>
+        <Chip color="success" label="Uploaded asset" size="small" variant="outlined" />
+      </Box>
+    )
+  }
+
   if (mediaType === 'text') {
     return (
       <Box className="analysis-upload-card__file">
@@ -1057,6 +1232,99 @@ function SelectedSourceSummary({
       </Box>
       <Chip label={selectedFile?.type || mediaType.toUpperCase()} size="small" variant="outlined" />
     </Box>
+  )
+}
+
+function UploadedMediaLibrary({
+  activeAssetId,
+  assets,
+  errorMessage,
+  hasLoaded,
+  isLoading,
+  onReload,
+  onSelectAsset,
+}: {
+  activeAssetId: string | null
+  assets: AnalysisAsset[]
+  errorMessage: string | null
+  hasLoaded: boolean
+  isLoading: boolean
+  onReload: () => void
+  onSelectAsset: (asset: AnalysisAsset) => void
+}) {
+  return (
+    <Stack spacing={1.5}>
+      <Stack alignItems={{ xs: 'stretch', sm: 'center' }} direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" spacing={1.5}>
+        <Box>
+          <Typography variant="subtitle2">Uploaded media</Typography>
+          <Typography color="text.secondary" variant="body2">
+            `Choose file` can only browse your local device. Reuse anything already stored in Cloudflare R2 from this list.
+          </Typography>
+        </Box>
+        <Button onClick={onReload} size="small" variant="text">
+          Refresh list
+        </Button>
+      </Stack>
+
+      {errorMessage ? <Alert severity="error">{errorMessage}</Alert> : null}
+
+      {isLoading && assets.length === 0 ? (
+        <Box className="analysis-empty-state">
+          <Typography color="text.secondary" variant="body2">
+            Loading uploaded assets…
+          </Typography>
+        </Box>
+      ) : null}
+
+      {!isLoading && hasLoaded && assets.length === 0 ? (
+        <Box className="analysis-empty-state">
+          <Typography color="text.secondary" variant="body2">
+            No uploaded media is available for this input type yet.
+          </Typography>
+        </Box>
+      ) : null}
+
+      {assets.length > 0 ? (
+        <Box className="analysis-asset-library">
+          {assets.map((asset) => {
+            const isSelected = asset.id === activeAssetId
+            const isReady = asset.upload_status === 'uploaded'
+            return (
+              <Box className={`analysis-asset-library__item ${isSelected ? 'is-selected' : ''}`} key={asset.id}>
+                <Stack
+                  alignItems={{ xs: 'stretch', md: 'center' }}
+                  direction={{ xs: 'column', md: 'row' }}
+                  justifyContent="space-between"
+                  spacing={1.5}
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography sx={{ wordBreak: 'break-word' }} variant="subtitle2">
+                      {asset.original_filename || asset.object_key}
+                    </Typography>
+                    <Typography color="text.secondary" sx={{ wordBreak: 'break-word' }} variant="body2">
+                      {formatFileSize(asset.size_bytes || 0)} · uploaded {formatTimestamp(asset.created_at)}
+                    </Typography>
+                    <Typography color="text.secondary" sx={{ wordBreak: 'break-word' }} variant="caption">
+                      {asset.object_key}
+                    </Typography>
+                  </Box>
+                  <Stack alignItems={{ xs: 'stretch', md: 'center' }} direction={{ xs: 'column', md: 'row' }} spacing={1}>
+                    <Button
+                      disabled={!isReady}
+                      onClick={() => onSelectAsset(asset)}
+                      size="small"
+                      variant={isSelected ? 'contained' : 'outlined'}
+                    >
+                      {isSelected ? 'Selected' : 'Use asset'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Box>
+            )
+          })}
+        </Box>
+      ) : null}
+    </Stack>
   )
 }
 
@@ -1343,6 +1611,28 @@ function resetWorkflowState(
   setBannerMessage(null)
 }
 
+function mergeLatestAnalysisAsset(currentAssets: AnalysisAsset[], nextAsset: AnalysisAsset) {
+  return [nextAsset, ...currentAssets.filter((asset) => asset.id !== nextAsset.id)].slice(0, 12)
+}
+
+function buildSelectedAssetStorageKey(scope: string) {
+  return `neuromarketer.analysis.selected-asset.${scope}`
+}
+
+function readSelectedAnalysisAssetId(storageKey: string) {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  return window.sessionStorage.getItem(storageKey)
+}
+
+function storeSelectedAnalysisAssetId(storageKey: string, assetId: string) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.sessionStorage.setItem(storageKey, assetId)
+}
+
 function validateCurrentInput({
   config,
   mediaType,
@@ -1611,6 +1901,14 @@ function formatSignedValue(value: number) {
 
 function formatZoneLabel(value: string) {
   return value.replaceAll('_', ' ')
+}
+
+function formatTimestamp(value: string) {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    return value
+  }
+  return parsed.toLocaleString()
 }
 
 export default AnalysisPage

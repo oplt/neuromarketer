@@ -117,12 +117,36 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("TRIBE_HF_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
     )
+    tribe_video_feature_frequency_hz: float | None = Field(
+        default=None,
+        validation_alias="TRIBE_VIDEO_FEATURE_FREQUENCY_HZ",
+    )
+    tribe_video_max_imsize: int | None = Field(
+        default=None,
+        validation_alias="TRIBE_VIDEO_MAX_IMSIZE",
+    )
     tribe_preload_on_worker_startup: bool = Field(default=True, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP")
     tribe_validate_binaries_on_worker_startup: bool = Field(
         default=True,
         validation_alias="TRIBE_VALIDATE_BINARIES_ON_WORKER_STARTUP",
     )
     tribe_enable_roi_summary: bool = Field(default=False, validation_alias="TRIBE_ENABLE_ROI_SUMMARY")
+
+    llm_provider: Literal["ollama", "openai_compatible", "vllm", "lm_studio"] = Field(
+        default="ollama",
+        validation_alias="LLM_PROVIDER",
+    )
+    llm_base_url: str = Field(default="http://localhost:11434", validation_alias="LLM_BASE_URL")
+    llm_model: str = Field(default="gemma3:27b", validation_alias="LLM_MODEL")
+    llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
+    llm_timeout_seconds: int = Field(default=120, validation_alias="LLM_TIMEOUT_SECONDS")
+    llm_max_tokens: int = Field(default=2_000, validation_alias="LLM_MAX_TOKENS")
+    llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
+    llm_top_p: float = Field(default=0.9, validation_alias="LLM_TOP_P")
+    llm_processing_stale_after_seconds: int = Field(
+        default=900,
+        validation_alias="LLM_PROCESSING_STALE_AFTER_SECONDS",
+    )
 
     @field_validator("cors_allow_origins", mode="before")
     @classmethod

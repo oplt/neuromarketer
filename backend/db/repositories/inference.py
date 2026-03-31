@@ -67,6 +67,7 @@ class InferenceRepository:
             .options(
                 selectinload(InferenceJob.metrics),
                 selectinload(InferenceJob.analysis_result_record),
+                selectinload(InferenceJob.llm_evaluations),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.scores),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.visualizations),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.timeline_points),
@@ -78,6 +79,18 @@ class InferenceRepository:
 
     async def get_job(self, job_id: UUID) -> InferenceJob | None:
         result = await self.session.execute(select(InferenceJob).where(InferenceJob.id == job_id))
+        return result.scalar_one_or_none()
+
+    async def get_job_for_analysis_evaluation(self, job_id: UUID) -> InferenceJob | None:
+        result = await self.session.execute(
+            select(InferenceJob)
+            .options(
+                selectinload(InferenceJob.analysis_result_record),
+                selectinload(InferenceJob.creative_version),
+                selectinload(InferenceJob.llm_evaluations),
+            )
+            .where(InferenceJob.id == job_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_prediction_result_full(self, prediction_result_id: UUID) -> PredictionResult | None:

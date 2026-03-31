@@ -34,6 +34,10 @@ class AnalysisAssetRead(BaseModel):
     created_at: datetime
 
 
+class AnalysisAssetListResponse(BaseModel):
+    items: list[AnalysisAssetRead] = Field(default_factory=list)
+
+
 class AnalysisUploadSessionRead(BaseModel):
     id: UUID
     upload_token: str

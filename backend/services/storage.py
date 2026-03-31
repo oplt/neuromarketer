@@ -12,6 +12,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from backend.core.config import settings
+from backend.core.exceptions import ConfigurationAppError
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -58,14 +59,28 @@ def resolve_object_storage_settings() -> ObjectStorageSettings:
 
     if use_r2:
         endpoint_url = (
-            settings.r2_endpoint_url
-            or (f"https://{settings.r2_account_id}.r2.cloudflarestorage.com" if settings.r2_account_id else None)
+            f"https://{settings.r2_account_id}.r2.cloudflarestorage.com"
+            if settings.r2_account_id
+            else settings.r2_endpoint_url
         )
         region = "auto"
-        access_key_id = settings.r2_access_key_id or access_key_id
-        secret_access_key = settings.r2_secret_access_key or secret_access_key
-        public_base_url = settings.r2_public_base_url or public_base_url
-        bucket_name = settings.r2_bucket_name or bucket_name
+        access_key_id = settings.r2_access_key_id
+        secret_access_key = settings.r2_secret_access_key
+        public_base_url = settings.r2_public_base_url
+        bucket_name = settings.r2_bucket_name
+
+        if not endpoint_url or not bucket_name or not access_key_id or not secret_access_key:
+            raise ConfigurationAppError(
+                "Cloudflare R2 is enabled but the bucket, endpoint, or S3-compatible access keys are missing."
+            )
+        if access_key_id.startswith("cfat_") or secret_access_key.startswith("cfat_"):
+            raise ConfigurationAppError(
+                "Cloudflare R2 credentials are misconfigured. Use an R2 S3 Access Key ID and Secret Access Key, not a Cloudflare API token."
+            )
+        if len(access_key_id) != 32:
+            raise ConfigurationAppError(
+                "Cloudflare R2 access key ID is invalid. R2 S3 Access Key IDs are 32 characters long."
+            )
 
     return ObjectStorageSettings(
         bucket_name=bucket_name,
@@ -74,7 +89,7 @@ def resolve_object_storage_settings() -> ObjectStorageSettings:
         public_base_url=public_base_url,
         access_key_id=access_key_id,
         secret_access_key=secret_access_key,
-        session_token=settings.aws_session_token,
+        session_token=None if use_r2 else settings.aws_session_token,
         provider="cloudflare-r2" if use_r2 else "s3-compatible",
     )
 
@@ -172,16 +187,27 @@ class ObjectStorageService:
             def tell(self) -> int:
                 return self.inner.tell()
 
+            def close(self) -> None:
+                self.inner.close()
+
         wrapper = HashingFileWrapper(fileobj)
         extra_args: dict[str, str] | None = {"ContentType": content_type} if content_type else None
 
-        self.client.upload_fileobj(
-            Fileobj=wrapper,
-            Bucket=bucket_name,
-            Key=storage_key,
-            ExtraArgs=extra_args,
-            Config=self.transfer_config,
-        )
+        try:
+            self.client.upload_fileobj(
+                Fileobj=wrapper,
+                Bucket=bucket_name,
+                Key=storage_key,
+                ExtraArgs=extra_args,
+                Config=self.transfer_config,
+            )
+        except ClientError as exc:
+            error = exc.response.get("Error", {})
+            code = str(error.get("Code") or "Unknown")
+            message = str(error.get("Message") or "Object storage upload failed.")
+            if self.provider == "cloudflare-r2":
+                raise ConfigurationAppError(f"Cloudflare R2 upload failed: {message} ({code}).") from exc
+            raise
 
         return UploadedObject(
             bucket_name=bucket_name,

@@ -72,13 +72,58 @@ class TribeRuntime:
     def __init__(self) -> None:
         self.model_repo_id = settings.tribe_model_repo_id
         self.checkpoint_name = settings.tribe_checkpoint_name
-        self.cache_folder = Path(settings.tribe_cache_folder)
+        self.cache_folder = self._resolve_cache_folder(Path(settings.tribe_cache_folder).expanduser())
         self.device = settings.tribe_device
         self.feature_cluster = settings.tribe_feature_cluster
         self.hf_token = settings.tribe_hf_token
         self.enable_roi_summary = settings.tribe_enable_roi_summary
         self.text_preprocessor = TextPreprocessService()
         self.model_name = self.model_repo_id
+
+    def _resolve_cache_folder(self, configured_path: Path) -> Path:
+        candidates = self._candidate_cache_folders(configured_path)
+        errors: list[str] = []
+
+        for candidate in candidates:
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                errors.append(f"{candidate}: {exc}")
+                continue
+
+            if os.access(candidate, os.W_OK):
+                if candidate != configured_path:
+                    logger.warning(
+                        "Configured TRIBE cache folder is unavailable. Using fallback cache folder.",
+                        extra={
+                            "event": "tribe_cache_folder_fallback",
+                            "extra_fields": {
+                                "configured_path": str(configured_path),
+                                "resolved_path": str(candidate),
+                            },
+                        },
+                    )
+                return candidate
+
+            errors.append(f"{candidate}: not writable")
+
+        raise ConfigurationAppError(
+            "TRIBE cache folder could not be initialized. "
+            + "; ".join(errors)
+        )
+
+    def _candidate_cache_folders(self, configured_path: Path) -> list[Path]:
+        project_cache = Path(__file__).resolve().parents[2] / "cache" / "tribev2"
+        temp_cache = Path(tempfile.gettempdir()) / "neuromarketer" / "tribev2"
+        candidates = [configured_path, project_cache, temp_cache]
+        resolved: list[Path] = []
+
+        for candidate in candidates:
+            normalized = candidate.resolve(strict=False)
+            if normalized not in resolved:
+                resolved.append(normalized)
+
+        return resolved
 
     @classmethod
     def is_supported_modality(cls, modality: str) -> bool:
@@ -150,7 +195,7 @@ class TribeRuntime:
                     "extra_fields": {
                         "repo_id": self.model_repo_id,
                         "checkpoint_name": self.checkpoint_name,
-                        "device": self.device,
+                        "device": self._get_requested_device(),
                     },
                 },
             )
@@ -158,12 +203,14 @@ class TribeRuntime:
             try:
                 tribe_module = importlib.import_module("tribev2")
                 model_cls = getattr(tribe_module, "TribeModel")
+                requested_device = self._get_requested_device()
                 model = model_cls.from_pretrained(
                     self.model_repo_id,
                     checkpoint_name=self.checkpoint_name,
                     cache_folder=str(self.cache_folder),
                     cluster=self.feature_cluster,
-                    device=self.device,
+                    device=requested_device,
+                    config_update=self._build_runtime_config_update(requested_device),
                 )
             except Exception as exc:
                 raise ConfigurationAppError(
@@ -252,7 +299,9 @@ class TribeRuntime:
         try:
             predictions, segments = model.predict(events=events)
         except Exception as exc:
-            raise ValidationAppError("TRIBE v2 prediction failed for the prepared events payload.") from exc
+            raise ValidationAppError(
+                f"TRIBE v2 prediction failed for the prepared events payload: {exc}"
+            ) from exc
 
         array = np.asarray(predictions, dtype=np.float32)
         if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] == 0:
@@ -560,12 +609,39 @@ class TribeRuntime:
         return model
 
     def _get_resolved_device(self) -> str:
-        return self.__class__._resolved_device or self.device
+        return self.__class__._resolved_device or self._get_requested_device()
 
     def _resolve_loaded_device(self, model: Any) -> str:
         inner_model = getattr(model, "_model", None)
         device = getattr(inner_model, "device", None)
-        return str(device) if device is not None else self.device
+        return str(device) if device is not None else self._get_requested_device()
+
+    def _get_requested_device(self) -> str:
+        requested = (self.device or "auto").strip().lower()
+        if requested != "auto":
+            return requested
+
+        try:
+            import torch
+        except Exception:
+            return "cpu"
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _build_runtime_config_update(self, requested_device: str) -> dict[str, Any]:
+        config_update: dict[str, Any] = {
+            "data.text_feature.device": requested_device,
+            "data.audio_feature.device": requested_device,
+            "data.image_feature.image.device": requested_device,
+            "data.video_feature.image.device": requested_device,
+        }
+
+        if settings.tribe_video_feature_frequency_hz is not None:
+            config_update["data.video_feature.frequency"] = settings.tribe_video_feature_frequency_hz
+        if settings.tribe_video_max_imsize is not None:
+            config_update["data.video_feature.max_imsize"] = settings.tribe_video_max_imsize
+
+        return config_update
 
     def _require_local_file(self, local_path: str | None, *, suffix_hint: str) -> Path:
         if not local_path:

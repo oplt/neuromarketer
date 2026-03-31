@@ -76,12 +76,20 @@ class TribeRuntimeTests(unittest.TestCase):
     def test_load_caches_model_per_process(self, *_: object) -> None:
         runtime = TribeRuntime()
 
-        with patch("backend.services.tribe_runtime.importlib.import_module", side_effect=self._import_module):
+        with (
+            patch("backend.services.tribe_runtime.importlib.import_module", side_effect=self._import_module),
+            patch.object(TribeRuntime, "_get_requested_device", autospec=True, return_value="cpu"),
+        ):
             runtime.load()
             runtime.load()
 
         self.assertEqual(len(_FakeTribeModel.from_pretrained_calls), 1)
         self.assertEqual(_FakeTribeModel.from_pretrained_calls[0]["checkpoint_dir"], runtime.model_repo_id)
+        self.assertEqual(_FakeTribeModel.from_pretrained_calls[0]["device"], "cpu")
+        self.assertEqual(
+            _FakeTribeModel.from_pretrained_calls[0]["config_update"]["data.video_feature.image.device"],
+            "cpu",
+        )
 
     @patch.object(TribeRuntime, "validate_environment", autospec=True, return_value=None)
     @patch.object(TribeRuntime, "_authenticate_huggingface", autospec=True, return_value=None)
@@ -113,6 +121,24 @@ class TribeRuntimeTests(unittest.TestCase):
 
         with self.assertRaises(UnsupportedModalityAppError):
             runtime.infer(TribeRuntimeInput(modality="image", local_path="/tmp/fake.png"))
+
+    def test_auto_device_falls_back_to_cpu_when_cuda_is_unavailable(self) -> None:
+        runtime = TribeRuntime()
+
+        with patch("torch.cuda.is_available", return_value=False):
+            self.assertEqual(runtime._get_requested_device(), "cpu")
+
+    def test_runtime_config_update_includes_cpu_speed_overrides(self) -> None:
+        runtime = TribeRuntime()
+
+        with (
+            patch.object(runtime_module.settings, "tribe_video_feature_frequency_hz", 0.5),
+            patch.object(runtime_module.settings, "tribe_video_max_imsize", 480),
+        ):
+            config_update = runtime._build_runtime_config_update("cpu")
+
+        self.assertEqual(config_update["data.video_feature.frequency"], 0.5)
+        self.assertEqual(config_update["data.video_feature.max_imsize"], 480)
 
 
 if __name__ == "__main__":

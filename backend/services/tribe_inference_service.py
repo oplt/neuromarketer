@@ -23,9 +23,14 @@ class TribeInferenceExecution:
 
 class TribeInferenceService:
     def __init__(self) -> None:
-        self.asset_loader = AssetLoader()
+        self.asset_loader: AssetLoader | None = None
         self.preprocess = PreprocessService()
         self.runtime = get_shared_tribe_runtime()
+
+    def _asset_loader(self) -> AssetLoader:
+        if self.asset_loader is None:
+            self.asset_loader = AssetLoader()
+        return self.asset_loader
 
     def resolve_modality(self, creative_version: CreativeVersion) -> str:
         preprocessing_summary = creative_version.preprocessing_summary or {}
@@ -137,7 +142,7 @@ class TribeInferenceService:
                 },
             },
         )
-        loaded_asset = self.asset_loader.load(
+        loaded_asset = self._asset_loader().load(
             storage_uri=str(creative_version.source_uri),
             mime_type=creative_version.mime_type,
         )

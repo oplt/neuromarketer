@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import StoredArtifact, UploadSession, UploadStatus
@@ -110,6 +110,26 @@ class UploadRepository:
     async def get_stored_artifact(self, artifact_id: UUID) -> StoredArtifact | None:
         result = await self.session.execute(select(StoredArtifact).where(StoredArtifact.id == artifact_id))
         return result.scalar_one_or_none()
+
+    async def list_analysis_artifacts(
+        self,
+        *,
+        project_id: UUID,
+        created_by_user_id: UUID,
+        limit: int,
+    ) -> list[StoredArtifact]:
+        result = await self.session.execute(
+            select(StoredArtifact)
+            .where(
+                StoredArtifact.project_id == project_id,
+                StoredArtifact.created_by_user_id == created_by_user_id,
+                StoredArtifact.artifact_kind == "analysis_source",
+                StoredArtifact.upload_status == UploadStatus.STORED,
+            )
+            .order_by(desc(StoredArtifact.created_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def mark_stored(self, upload_session: UploadSession, uploaded_artifact_id: UUID) -> UploadSession:
         upload_session.status = UploadStatus.STORED

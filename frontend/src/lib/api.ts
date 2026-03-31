@@ -87,6 +87,63 @@ export function uploadToSignedUrl({
   })
 }
 
+type UploadToApiOptions = {
+  path: string
+  sessionToken: string
+  file: Blob
+  fileName: string
+  fields?: Record<string, string>
+  onProgress?: (progressPercent: number) => void
+}
+
+export function uploadToApi<T>({
+  path,
+  sessionToken,
+  file,
+  fileName,
+  fields,
+  onProgress,
+}: UploadToApiOptions): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    request.open('POST', buildApiUrl(path))
+    request.setRequestHeader('Authorization', `Bearer ${sessionToken}`)
+
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) {
+        return
+      }
+      onProgress?.(Math.round((event.loaded / event.total) * 100))
+    }
+
+    request.onerror = () => reject(new Error('Backend upload failed.'))
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        try {
+          resolve(JSON.parse(request.responseText) as T)
+        } catch {
+          reject(new Error('Backend upload succeeded but returned invalid JSON.'))
+        }
+        return
+      }
+
+      try {
+        const parsedBody = JSON.parse(request.responseText) as { detail?: string; error?: { message?: string } }
+        reject(new Error(parsedBody.error?.message || parsedBody.detail || `Backend upload failed with status ${request.status}.`))
+      } catch {
+        reject(new Error(`Backend upload failed with status ${request.status}.`))
+      }
+    }
+
+    const formData = new FormData()
+    Object.entries(fields || {}).forEach(([key, value]) => {
+      formData.append(key, value)
+    })
+    formData.append('file', file, fileName)
+    request.send(formData)
+  })
+}
+
 function buildApiUrl(path: string) {
   if (/^https?:\/\//.test(path)) {
     return path

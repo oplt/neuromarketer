@@ -494,6 +494,9 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     analysis_result_record: Mapped[Optional["AnalysisResultRecord"]] = relationship(
         back_populates="job", cascade="all, delete-orphan", uselist=False
     )
+    llm_evaluations: Mapped[list["LLMEvaluationRecord"]] = relationship(
+        back_populates="job", cascade="all, delete-orphan"
+    )
     metrics: Mapped[list["JobMetric"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
@@ -578,6 +581,32 @@ class AnalysisResultRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     recommendations_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     job: Mapped["InferenceJob"] = relationship(back_populates="analysis_result_record")
+
+
+class LLMEvaluationRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "llm_evaluations"
+    __table_args__ = (
+        UniqueConstraint("job_id", "mode", name="uq_llm_evaluations_job_mode"),
+        Index("ix_llm_evaluations_job_status", "job_id", "status"),
+        Index("ix_llm_evaluations_user_created_at", "user_id", "created_at"),
+    )
+
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("inference_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_provider: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    model_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    input_snapshot_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    evaluation_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    job: Mapped["InferenceJob"] = relationship(back_populates="llm_evaluations")
 
 
 class PredictionScore(UUIDPrimaryKeyMixin, TimestampMixin, Base):

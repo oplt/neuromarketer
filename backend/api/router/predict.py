@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.application.services.comparison import ComparisonApplicationService
 from backend.application.services.optimization import OptimizationApplicationService
 from backend.application.services.predictions import PredictionApplicationService
-from backend.core.exceptions import AppError
 from backend.db.session import get_db
 from backend.schemas.schemas import (
     CompareItemResponse,
@@ -19,7 +18,7 @@ from backend.schemas.schemas import (
     PredictRequest,
     PredictResponse,
 )
-from backend.tasks import process_prediction_job_task
+from backend.tasks import dispatch_prediction_job
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
@@ -31,16 +30,7 @@ async def predict(
 ) -> PredictResponse:
     service = PredictionApplicationService(db)
     job = await service.create_prediction_job(payload)
-    try:
-        process_prediction_job_task.delay(str(job.id))
-    except Exception as exc:
-        await service.mark_job_failed(job.id, f"Job dispatch failed: {exc}")
-        await db.commit()
-        raise AppError(
-            "Prediction job could not be queued.",
-            code="queue_unavailable",
-            status_code=503,
-        ) from exc
+    await dispatch_prediction_job(job.id)
     hydrated_job = await service.get_job(job.id)
     return PredictResponse(
         job=hydrated_job,

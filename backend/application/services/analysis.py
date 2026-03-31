@@ -15,6 +15,7 @@ from backend.db.models import AssetType, InferenceJob, JobStatus, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
 from backend.schemas.analysis import (
     AnalysisAssetRead,
+    AnalysisAssetListResponse,
     AnalysisConfigResponse,
     AnalysisJobRead,
     AnalysisJobStatusResponse,
@@ -38,7 +39,12 @@ class AnalysisApplicationService:
         self.uploads = UploadRepository(session)
         self.predictions = PredictionApplicationService(session)
         self.preprocess = PreprocessService()
-        self.storage = ObjectStorageService()
+        self.storage: ObjectStorageService | None = None
+
+    def _storage(self) -> ObjectStorageService:
+        if self.storage is None:
+            self.storage = ObjectStorageService()
+        return self.storage
 
     def get_config(self) -> AnalysisConfigResponse:
         return AnalysisConfigResponse(
@@ -51,6 +57,27 @@ class AnalysisApplicationService:
                 "text": settings.analysis_allowed_text_mime_types,
             },
         )
+
+    async def list_assets(
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+        media_type: str | None,
+        limit: int,
+    ) -> AnalysisAssetListResponse:
+        assets = await self.uploads.list_analysis_artifacts(
+            project_id=project_id,
+            created_by_user_id=user_id,
+            limit=limit,
+        )
+        if media_type is not None:
+            assets = [
+                asset
+                for asset in assets
+                if str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type)) == media_type
+            ]
+        return AnalysisAssetListResponse(items=[self._build_asset_read(asset) for asset in assets])
 
     async def create_upload_session(
         self,
@@ -71,7 +98,8 @@ class AnalysisApplicationService:
             },
         )
         asset_id = uuid4()
-        storage_key = self.storage.build_analysis_object_key(
+        storage = self._storage()
+        storage_key = storage.build_analysis_object_key(
             user_id=str(user_id),
             asset_id=str(asset_id),
             original_filename=payload.original_filename,
@@ -83,9 +111,9 @@ class AnalysisApplicationService:
             creative_id=creative.id,
             creative_version_id=None,
             artifact_kind="analysis_source",
-            bucket_name=self.storage.bucket_name,
+            bucket_name=storage.bucket_name,
             storage_key=storage_key,
-            storage_uri=f"s3://{self.storage.bucket_name}/{storage_key}",
+            storage_uri=f"s3://{storage.bucket_name}/{storage_key}",
             original_filename=payload.original_filename,
             mime_type=payload.mime_type,
             file_size_bytes=payload.size_bytes,
@@ -102,7 +130,7 @@ class AnalysisApplicationService:
             creative_id=creative.id,
             creative_version_id=None,
             upload_token=self._build_upload_token(),
-            bucket_name=self.storage.bucket_name,
+            bucket_name=storage.bucket_name,
             storage_key=storage_key,
             original_filename=payload.original_filename,
             mime_type=payload.mime_type,
@@ -117,7 +145,7 @@ class AnalysisApplicationService:
         await self.session.refresh(asset)
         await self.session.refresh(upload_session)
 
-        upload_url = self.storage.generate_presigned_put_url(
+        upload_url = storage.generate_presigned_put_url(
             bucket_name=upload_session.bucket_name,
             storage_key=upload_session.storage_key,
             expires_in_seconds=settings.upload_presign_expires_seconds,
@@ -154,16 +182,11 @@ class AnalysisApplicationService:
         upload_session_id: UUID,
         upload_token: str,
     ) -> AnalysisUploadCompleteResponse:
-        upload_session = await self.uploads.get_upload_session(upload_session_id)
-        if upload_session is None or upload_session.created_by_user_id != user_id:
-            raise NotFoundAppError("Upload session not found.")
-        if upload_session.upload_token != upload_token:
-            raise ValidationAppError("Upload session token is invalid.")
-
-        asset_id = self._extract_asset_id(upload_session.metadata_json)
-        asset = await self.uploads.get_stored_artifact(asset_id)
-        if asset is None or asset.created_by_user_id != user_id:
-            raise NotFoundAppError("Uploaded asset not found.")
+        upload_session, asset = await self._get_owned_upload_context(
+            user_id=user_id,
+            upload_session_id=upload_session_id,
+            upload_token=upload_token,
+        )
 
         if upload_session.status == UploadStatus.STORED and asset.upload_status == UploadStatus.STORED:
             return AnalysisUploadCompleteResponse(
@@ -174,7 +197,7 @@ class AnalysisApplicationService:
         try:
             await self.uploads.mark_uploading(upload_session)
             await self.uploads.mark_artifact_uploading(asset)
-            object_head = self.storage.head_object(
+            object_head = self._storage().head_object(
                 bucket_name=asset.bucket_name,
                 storage_key=asset.storage_key,
             )
@@ -188,74 +211,238 @@ class AnalysisApplicationService:
                 mime_type=object_head.content_type or asset.mime_type,
                 file_size_bytes=object_head.file_size_bytes,
             )
-            merged_metadata = {
-                **(asset.metadata_json or {}),
-                "upload_etag": object_head.etag,
-                "preprocessing_summary": preprocess_result.preprocessing_summary,
-                "extracted_metadata": preprocess_result.extracted_metadata,
-                "modality": preprocess_result.modality,
-            }
-            await self.uploads.mark_artifact_stored(
-                asset,
-                creative_version_id=None,
-                mime_type=object_head.content_type or asset.mime_type,
-                file_size_bytes=object_head.file_size_bytes,
+            return await self._finalize_uploaded_asset(
+                user_id=user_id,
+                upload_session=upload_session,
+                asset=asset,
+                resolved_mime_type=object_head.content_type or asset.mime_type,
+                resolved_file_size_bytes=object_head.file_size_bytes,
                 sha256=asset.sha256,
-                metadata_json=merged_metadata,
+                preprocess_result=preprocess_result,
+                upload_etag=object_head.etag,
+                upload_source="direct_object_storage",
             )
-            creative_version = await self.creatives.create_version_from_artifact(asset)
-            await self.uploads.mark_artifact_stored(
-                asset,
-                creative_version_id=creative_version.id,
-                mime_type=asset.mime_type,
-                file_size_bytes=asset.file_size_bytes,
-                sha256=asset.sha256,
-                metadata_json=asset.metadata_json,
+        except Exception as exc:
+            await self._mark_upload_failed(
+                user_id=user_id,
+                upload_session_id=upload_session_id,
+                asset_id=asset.id,
+                error_message=str(exc),
             )
-            upload_session.creative_version_id = creative_version.id
-            await self.uploads.mark_stored(upload_session, asset.id)
-            await self.session.commit()
-            await self.session.refresh(upload_session)
-            await self.session.refresh(asset)
-            logger.info(
-                "Analysis upload completed and confirmed.",
-                extra={
-                    "event": "analysis_upload_completed",
-                    "extra_fields": {
-                        "user_id": str(user_id),
-                        "asset_id": str(asset.id),
-                        "creative_version_id": str(creative_version.id),
-                        "media_type": str((asset.metadata_json or {}).get("media_type") or "unknown"),
-                        "size_bytes": asset.file_size_bytes,
-                    },
-                },
-            )
+            raise
+
+    async def upload_via_backend(
+        self,
+        *,
+        user_id: UUID,
+        upload_session_id: UUID,
+        upload_token: str,
+        file: UploadFile,
+    ) -> AnalysisUploadCompleteResponse:
+        upload_session, asset = await self._get_owned_upload_context(
+            user_id=user_id,
+            upload_session_id=upload_session_id,
+            upload_token=upload_token,
+        )
+
+        if upload_session.status == UploadStatus.STORED and asset.upload_status == UploadStatus.STORED:
             return AnalysisUploadCompleteResponse(
                 upload_session=self._build_upload_session_read(upload_session),
                 asset=self._build_asset_read(asset),
             )
-        except Exception as exc:
-            await self.session.rollback()
-            persisted_session = await self.uploads.get_upload_session(upload_session_id)
-            persisted_asset = await self.uploads.get_stored_artifact(asset_id)
-            if persisted_session is not None:
-                await self.uploads.mark_failed(persisted_session, str(exc))
-            if persisted_asset is not None:
-                await self.uploads.mark_artifact_failed(persisted_asset, str(exc))
+
+        content_type = file.content_type or asset.mime_type
+        self._validate_asset_mime_type(asset=asset, mime_type=content_type)
+
+        uploaded_object: UploadedObject | None = None
+        try:
+            await self.uploads.mark_uploading(upload_session)
+            await self.uploads.mark_artifact_uploading(asset)
             await self.session.commit()
-            logger.exception(
-                "Analysis upload completion failed.",
+
+            await file.seek(0)
+            uploaded_object = await run_in_threadpool(
+                self._storage().upload_fileobj,
+                fileobj=file.file,
+                bucket_name=asset.bucket_name,
+                storage_key=asset.storage_key,
+                content_type=content_type,
+            )
+            if uploaded_object.file_size_bytes > settings.upload_max_size_bytes:
+                await run_in_threadpool(
+                    self._storage().delete_object,
+                    bucket_name=uploaded_object.bucket_name,
+                    storage_key=uploaded_object.storage_key,
+                )
+                uploaded_object = None
+                raise ValidationAppError(
+                    f"Upload exceeds max size of {settings.upload_max_size_bytes} bytes.",
+                )
+
+            preprocess_result = await self.preprocess.preprocess_upload(
+                filename=file.filename or asset.original_filename,
+                mime_type=content_type,
+                file_size_bytes=uploaded_object.file_size_bytes,
+            )
+            logger.info(
+                "Analysis upload switched to backend-assisted transfer.",
                 extra={
-                    "event": "analysis_upload_failed",
+                    "event": "analysis_upload_backend_fallback",
                     "extra_fields": {
                         "user_id": str(user_id),
                         "upload_session_id": str(upload_session_id),
-                        "asset_id": str(asset_id),
-                        "error": str(exc),
+                        "asset_id": str(asset.id),
+                        "mime_type": content_type,
                     },
                 },
             )
+            return await self._finalize_uploaded_asset(
+                user_id=user_id,
+                upload_session=upload_session,
+                asset=asset,
+                resolved_mime_type=content_type,
+                resolved_file_size_bytes=uploaded_object.file_size_bytes,
+                sha256=uploaded_object.sha256,
+                preprocess_result=preprocess_result,
+                upload_etag=None,
+                upload_source="backend_proxy",
+            )
+        except Exception as exc:
+            if uploaded_object is not None:
+                await run_in_threadpool(
+                    self._storage().delete_object,
+                    bucket_name=uploaded_object.bucket_name,
+                    storage_key=uploaded_object.storage_key,
+                )
+            await self._mark_upload_failed(
+                user_id=user_id,
+                upload_session_id=upload_session_id,
+                asset_id=asset.id,
+                error_message=str(exc),
+            )
             raise
+
+    async def _finalize_uploaded_asset(
+        self,
+        *,
+        user_id: UUID,
+        upload_session,
+        asset,
+        resolved_mime_type: str | None,
+        resolved_file_size_bytes: int | None,
+        sha256: str | None,
+        preprocess_result,
+        upload_etag: str | None,
+        upload_source: str,
+    ) -> AnalysisUploadCompleteResponse:
+        merged_metadata = {
+            **(asset.metadata_json or {}),
+            "upload_source": upload_source,
+            "upload_etag": upload_etag,
+            "preprocessing_summary": preprocess_result.preprocessing_summary,
+            "extracted_metadata": preprocess_result.extracted_metadata,
+            "modality": preprocess_result.modality,
+        }
+        await self.uploads.mark_artifact_stored(
+            asset,
+            creative_version_id=None,
+            mime_type=resolved_mime_type or asset.mime_type,
+            file_size_bytes=resolved_file_size_bytes,
+            sha256=sha256,
+            metadata_json=merged_metadata,
+        )
+        creative_version = await self.creatives.create_version_from_artifact(asset)
+        await self.uploads.mark_artifact_stored(
+            asset,
+            creative_version_id=creative_version.id,
+            mime_type=asset.mime_type,
+            file_size_bytes=asset.file_size_bytes,
+            sha256=asset.sha256,
+            metadata_json=asset.metadata_json,
+        )
+        upload_session.creative_version_id = creative_version.id
+        await self.uploads.mark_stored(upload_session, asset.id)
+        await self.session.commit()
+        await self.session.refresh(upload_session)
+        await self.session.refresh(asset)
+        logger.info(
+            "Analysis upload completed and confirmed.",
+            extra={
+                "event": "analysis_upload_completed",
+                "extra_fields": {
+                    "user_id": str(user_id),
+                    "asset_id": str(asset.id),
+                    "creative_version_id": str(creative_version.id),
+                    "media_type": str((asset.metadata_json or {}).get("media_type") or "unknown"),
+                    "size_bytes": asset.file_size_bytes,
+                    "upload_source": upload_source,
+                },
+            },
+        )
+        return AnalysisUploadCompleteResponse(
+            upload_session=self._build_upload_session_read(upload_session),
+            asset=self._build_asset_read(asset),
+        )
+
+    async def _mark_upload_failed(
+        self,
+        *,
+        user_id: UUID,
+        upload_session_id: UUID,
+        asset_id: UUID,
+        error_message: str,
+    ) -> None:
+        await self.session.rollback()
+        persisted_session = await self.uploads.get_upload_session(upload_session_id)
+        persisted_asset = await self.uploads.get_stored_artifact(asset_id)
+        if persisted_session is not None:
+            await self.uploads.mark_failed(persisted_session, error_message)
+        if persisted_asset is not None:
+            await self.uploads.mark_artifact_failed(persisted_asset, error_message)
+        await self.session.commit()
+        logger.error(
+            "Analysis upload completion failed.",
+            extra={
+                "event": "analysis_upload_failed",
+                "extra_fields": {
+                    "user_id": str(user_id),
+                    "upload_session_id": str(upload_session_id),
+                    "asset_id": str(asset_id),
+                    "error": error_message,
+                },
+            },
+        )
+
+    async def _get_owned_upload_context(
+        self,
+        *,
+        user_id: UUID,
+        upload_session_id: UUID,
+        upload_token: str,
+    ) -> tuple[object, object]:
+        upload_session = await self.uploads.get_upload_session(upload_session_id)
+        if upload_session is None or upload_session.created_by_user_id != user_id:
+            raise NotFoundAppError("Upload session not found.")
+        if upload_session.upload_token != upload_token:
+            raise ValidationAppError("Upload session token is invalid.")
+
+        asset_id = self._extract_asset_id(upload_session.metadata_json)
+        asset = await self.uploads.get_stored_artifact(asset_id)
+        if asset is None or asset.created_by_user_id != user_id:
+            raise NotFoundAppError("Uploaded asset not found.")
+        return upload_session, asset
+
+    def _validate_asset_mime_type(self, *, asset, mime_type: str | None) -> None:
+        media_type = str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type))
+        if mime_type is None:
+            return
+        allowed_by_media_type = {
+            "video": settings.analysis_allowed_video_mime_types,
+            "audio": settings.analysis_allowed_audio_mime_types,
+            "text": settings.analysis_allowed_text_mime_types,
+        }
+        if mime_type not in allowed_by_media_type.get(media_type, []):
+            raise ValidationAppError(f"Unsupported {media_type} mime type: {mime_type}")
 
     async def create_analysis_job(
         self,
@@ -412,8 +599,10 @@ class AnalysisApplicationService:
         )
 
     def _build_result(self, job: InferenceJob) -> AnalysisResultRead | None:
-        record = job.analysis_result_record
-        if record is None or job.status != JobStatus.SUCCEEDED:
+        if job.status != JobStatus.SUCCEEDED:
+            return None
+        record = job.__dict__.get("analysis_result_record")
+        if record is None:
             return None
 
         return AnalysisResultRead(
