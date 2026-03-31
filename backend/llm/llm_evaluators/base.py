@@ -54,7 +54,7 @@ class BaseEvaluator(ABC):
     success_criteria: tuple[str, ...]
 
     def get_response_schema(self) -> dict[str, Any]:
-        return evaluation_json_schema()
+        return evaluation_json_schema(self.mode)
 
     def normalize_context(self, context: dict[str, Any]) -> dict[str, Any]:
         return context
@@ -74,13 +74,11 @@ class BaseEvaluator(ABC):
 
     def build_messages(self, context: dict[str, Any]) -> list[dict[str, str]]:
         normalized = self.normalize_context(context)
-        schema_json = json.dumps(self.get_response_schema(), ensure_ascii=True, separators=(",", ":"))
         context_json = json.dumps(normalized, ensure_ascii=True, separators=(",", ":"))
         user_prompt = (
             f"Active evaluation mode: {self.mode.value}\n"
             f"Prompt version: {self.prompt_version}\n"
-            "Required JSON schema:\n"
-            f"{schema_json}\n\n"
+            "The structured response schema is provided separately by the caller. Follow it exactly.\n\n"
             "Structured analysis context:\n"
             f"{context_json}"
         )

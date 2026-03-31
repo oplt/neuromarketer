@@ -13,7 +13,7 @@ from botocore.exceptions import ClientError
 
 from backend.core.config import settings
 from backend.core.exceptions import ConfigurationAppError
-from backend.core.logging import get_logger
+from backend.core.logging import get_logger, log_exception, summarize_storage_reference
 
 logger = get_logger(__name__)
 
@@ -247,17 +247,14 @@ class ObjectStorageService:
                 Params=params,
                 ExpiresIn=expires_in_seconds or settings.upload_presign_expires_seconds,
             )
-        except Exception:
-            logger.exception(
-                "Failed to generate presigned upload URL.",
-                extra={
-                    "event": "presigned_upload_failed",
-                    "extra_fields": {
-                        "bucket_name": bucket_name,
-                        "storage_key": storage_key,
-                        "provider": self.provider,
-                    },
-                },
+        except Exception as exc:
+            log_exception(
+                logger,
+                "presigned_upload_failed",
+                exc,
+                provider=self.provider,
+                status="failed",
+                **summarize_storage_reference(bucket_name, storage_key),
             )
             return None
 

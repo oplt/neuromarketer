@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from backend.core.logging import duration_ms, get_logger, log_event
 from backend.db.models import SuggestionStatus, SuggestionType, VisualizationType
+
+logger = get_logger(__name__)
 
 
 def _decimal(value: float, *, precision: int = 2) -> Decimal:
@@ -92,6 +96,7 @@ class NeuroScoringService:
         context: dict[str, Any],
         modality: str,
     ) -> ScoringBundle:
+        started_at = time.perf_counter()
         engagement = float(reduced_feature_vector.get("derived_neural_engagement_signal", 0.5))
         peak_focus = float(reduced_feature_vector.get("derived_peak_focus_signal", 0.5))
         temporal_dynamics = float(reduced_feature_vector.get("derived_temporal_dynamics_signal", 0.3))
@@ -102,6 +107,14 @@ class NeuroScoringService:
         audio_language_mix = float(reduced_feature_vector.get("derived_audio_language_mix_signal", 0.3))
         segment_features = list(reduced_feature_vector.get("segment_features", []))
         hemisphere_summary = region_activation_summary.get("hemisphere_summary", {})
+
+        log_event(
+            logger,
+            "scoring_started",
+            modality=modality,
+            status="started",
+            segment_count=len(segment_features),
+        )
 
         attention_value = self._clip01(
             (engagement * 0.46)
@@ -193,7 +206,7 @@ class NeuroScoringService:
             ),
         ]
 
-        return ScoringBundle(
+        bundle = ScoringBundle(
             scores=scores,
             visualizations=self._build_visualizations(
                 score_values=score_values,
@@ -213,6 +226,18 @@ class NeuroScoringService:
                 hemisphere_summary=hemisphere_summary,
             ),
         )
+        finished_at = time.perf_counter()
+        log_event(
+            logger,
+            "scoring_finished",
+            modality=modality,
+            status="succeeded",
+            duration_ms=duration_ms(started_at, finished_at),
+            suggestion_count=len(bundle.suggestions),
+            timeline_points=len(bundle.timeline_points),
+            score_summary={key: round(value * 100.0, 2) for key, value in score_values.items()},
+        )
+        return bundle
 
     def _build_score_item(
         self,

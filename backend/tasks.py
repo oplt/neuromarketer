@@ -4,6 +4,7 @@ import asyncio
 import socket
 import threading
 import time
+from contextvars import copy_context
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -16,7 +17,8 @@ from backend.core.exceptions import (
     NotFoundAppError,
     ValidationAppError,
 )
-from backend.core.logging import get_logger
+from backend.core.log_context import bound_log_context
+from backend.core.logging import duration_ms, get_logger, log_event, log_exception
 from backend.core.metrics import metrics
 from backend.db.session import AsyncSessionLocal
 from backend.schemas.evaluators import EvaluationMode
@@ -59,9 +61,14 @@ async def _run_prediction_job_in_process(job_id: UUID) -> None:
         await _run_prediction_job(job_id)
         metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "succeeded"})
     except Exception as exc:
-        logger.exception(
-            "In-process prediction job failed.",
-            extra={"event": "prediction_job_in_process_failed", "extra_fields": {"job_id": str(job_id), "error": str(exc)}},
+        log_exception(
+            logger,
+            "prediction_job_failed",
+            exc,
+            job_id=str(job_id),
+            status="failed",
+            execution_mode="in_process",
+            duration_ms=duration_ms(start, time.perf_counter()),
         )
         metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "failed"})
 
@@ -80,12 +87,15 @@ async def _run_llm_evaluation_job_in_process(job_id: UUID, mode: EvaluationMode)
             labels={"status": "succeeded", "mode": mode.value},
         )
     except Exception as exc:
-        logger.exception(
-            "In-process LLM evaluation failed.",
-            extra={
-                "event": "llm_evaluation_in_process_failed",
-                "extra_fields": {"job_id": str(job_id), "mode": mode.value, "error": str(exc)},
-            },
+        log_exception(
+            logger,
+            "llm_evaluation_in_process_failed",
+            exc,
+            job_id=str(job_id),
+            mode=mode.value,
+            status="failed",
+            execution_mode="in_process",
+            duration_ms=duration_ms(start, time.perf_counter()),
         )
         metrics.observe(
             "llm_evaluation_duration_seconds",
@@ -102,9 +112,10 @@ def _schedule_prediction_job_in_process(job_id: UUID) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        context = copy_context()
         worker = threading.Thread(
-            target=_run_prediction_job_in_process_entrypoint,
-            args=(job_id,),
+            target=context.run,
+            args=(_run_prediction_job_in_process_entrypoint, job_id),
             daemon=True,
             name=f"prediction-job-{job_id}",
         )
@@ -123,9 +134,10 @@ def _schedule_llm_evaluation_job_in_process(job_id: UUID, mode: EvaluationMode) 
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        context = copy_context()
         worker = threading.Thread(
-            target=_run_llm_evaluation_job_in_process_entrypoint,
-            args=(job_id, mode),
+            target=context.run,
+            args=(_run_llm_evaluation_job_in_process_entrypoint, job_id, mode),
             daemon=True,
             name=f"llm-evaluation-{job_id}-{mode.value}",
         )
@@ -164,17 +176,16 @@ def _is_broker_reachable(timeout_seconds: float = 0.25) -> bool:
         with socket.create_connection(address, timeout=timeout_seconds):
             return True
     except OSError as exc:
-        logger.warning(
-            "Celery broker is unreachable; falling back to in-process execution.",
-            extra={
-                "event": "prediction_job_broker_unreachable",
-                "extra_fields": {
-                    "broker_url": celery_app.conf.broker_url,
-                    "host": address[0],
-                    "port": address[1],
-                    "error": str(exc),
-                },
-            },
+        log_exception(
+            logger,
+            "prediction_job_broker_unreachable",
+            exc,
+            level="warning",
+            broker_url=celery_app.conf.broker_url,
+            host=address[0],
+            port=address[1],
+            status="fallback",
+            dispatch_mode="in_process",
         )
         return False
 
@@ -186,66 +197,95 @@ def _has_active_workers(timeout_seconds: float = 0.4) -> bool:
     try:
         responses = celery_app.control.inspect(timeout=timeout_seconds).ping() or {}
     except Exception as exc:
-        logger.warning(
-            "Celery worker availability check failed; falling back to in-process execution.",
-            extra={
-                "event": "prediction_job_worker_probe_failed",
-                "extra_fields": {
-                    "broker_url": celery_app.conf.broker_url,
-                    "error": str(exc),
-                },
-            },
+        log_exception(
+            logger,
+            "prediction_job_worker_probe_failed",
+            exc,
+            level="warning",
+            broker_url=celery_app.conf.broker_url,
+            status="fallback",
+            dispatch_mode="in_process",
         )
         return False
 
     if responses:
         return True
 
-    logger.warning(
-        "No Celery workers responded; falling back to in-process execution.",
-        extra={
-            "event": "prediction_job_no_workers",
-            "extra_fields": {"broker_url": celery_app.conf.broker_url},
-        },
+    log_event(
+        logger,
+        "prediction_job_no_workers",
+        level="warning",
+        broker_url=celery_app.conf.broker_url,
+        status="fallback",
+        dispatch_mode="in_process",
     )
     return False
 
 
 async def dispatch_prediction_job(job_id: UUID) -> str:
-    if not _has_active_workers():
-        _schedule_prediction_job_in_process(job_id)
-        return "in_process"
+    with bound_log_context(job_id=str(job_id)):
+        if not _has_active_workers():
+            _schedule_prediction_job_in_process(job_id)
+            log_event(
+                logger,
+                "prediction_job_enqueued",
+                job_id=str(job_id),
+                status="queued",
+                dispatch_mode="in_process",
+            )
+            return "in_process"
 
-    try:
-        process_prediction_job_task.delay(str(job_id))
-        return "celery"
-    except Exception as exc:
-        logger.warning(
-            "Prediction job dispatch fell back to in-process execution.",
-            extra={"event": "prediction_job_fallback_dispatch", "extra_fields": {"job_id": str(job_id), "error": str(exc)}},
-        )
-        _schedule_prediction_job_in_process(job_id)
-        return "in_process"
+        try:
+            process_prediction_job_task.delay(str(job_id))
+            log_event(
+                logger,
+                "prediction_job_enqueued",
+                job_id=str(job_id),
+                status="queued",
+                dispatch_mode="celery",
+            )
+            return "celery"
+        except Exception as exc:
+            log_exception(
+                logger,
+                "prediction_job_enqueue_failed",
+                exc,
+                job_id=str(job_id),
+                status="failed",
+            )
+            _schedule_prediction_job_in_process(job_id)
+            log_event(
+                logger,
+                "prediction_job_enqueued",
+                job_id=str(job_id),
+                status="queued",
+                dispatch_mode="in_process",
+            )
+            return "in_process"
 
 
 async def dispatch_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> str:
-    if not _has_active_workers():
-        _schedule_llm_evaluation_job_in_process(job_id, mode)
-        return "in_process"
+    with bound_log_context(job_id=str(job_id), mode=mode.value):
+        if not _has_active_workers():
+            _schedule_llm_evaluation_job_in_process(job_id, mode)
+            return "in_process"
 
-    try:
-        process_llm_evaluation_task.delay(str(job_id), mode.value)
-        return "celery"
-    except Exception as exc:
-        logger.warning(
-            "LLM evaluation dispatch fell back to in-process execution.",
-            extra={
-                "event": "llm_evaluation_fallback_dispatch",
-                "extra_fields": {"job_id": str(job_id), "mode": mode.value, "error": str(exc)},
-            },
-        )
-        _schedule_llm_evaluation_job_in_process(job_id, mode)
-        return "in_process"
+        try:
+            process_llm_evaluation_task.delay(str(job_id), mode.value)
+            return "celery"
+        except Exception as exc:
+            log_exception(
+                logger,
+                "llm_evaluation_fallback_dispatch",
+                exc,
+                level="warning",
+                job_id=str(job_id),
+                mode=mode.value,
+                status="fallback",
+                dispatch_mode="in_process",
+            )
+            _schedule_llm_evaluation_job_in_process(job_id, mode)
+            return "in_process"
 
 
 @celery_app.task(name="tasks.process_prediction_job", bind=True, max_retries=3, retry_backoff=True, retry_jitter=True)
@@ -255,16 +295,30 @@ def process_prediction_job_task(self, job_id: str) -> None:
         asyncio.run(_run_prediction_job(UUID(job_id)))
         metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "succeeded"})
     except (ConfigurationAppError, DependencyAppError, NotFoundAppError, ValidationAppError) as exc:
-        logger.warning(
-            "Prediction job failed permanently.",
-            extra={"event": "prediction_job_failed", "extra_fields": {"job_id": job_id, "error": str(exc)}},
+        log_exception(
+            logger,
+            "prediction_job_failed",
+            exc,
+            level="warning",
+            job_id=job_id,
+            task_id=self.request.id,
+            status="failed",
+            retryable=False,
+            duration_ms=duration_ms(start, time.perf_counter()),
         )
         metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "failed"})
         raise
     except Exception as exc:
-        logger.exception(
-            "Prediction job failed with retryable error.",
-            extra={"event": "prediction_job_retry", "extra_fields": {"job_id": job_id, "error": str(exc)}},
+        log_exception(
+            logger,
+            "prediction_job_failed",
+            exc,
+            job_id=job_id,
+            task_id=self.request.id,
+            status="retrying",
+            retryable=True,
+            retry_count=self.request.retries + 1,
+            duration_ms=duration_ms(start, time.perf_counter()),
         )
         metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "retry"})
         raise self.retry(exc=exc)
@@ -272,7 +326,6 @@ def process_prediction_job_task(self, job_id: str) -> None:
 
 @celery_app.task(name="tasks.process_llm_evaluation", bind=True, max_retries=0)
 def process_llm_evaluation_task(self, job_id: str, mode: str) -> None:
-    del self
     evaluation_mode = EvaluationMode(mode)
     start = time.perf_counter()
     try:
@@ -283,12 +336,15 @@ def process_llm_evaluation_task(self, job_id: str, mode: str) -> None:
             labels={"status": "succeeded", "mode": evaluation_mode.value},
         )
     except (ConfigurationAppError, DependencyAppError, NotFoundAppError, ValidationAppError) as exc:
-        logger.warning(
-            "LLM evaluation failed permanently.",
-            extra={
-                "event": "llm_evaluation_failed",
-                "extra_fields": {"job_id": job_id, "mode": evaluation_mode.value, "error": str(exc)},
-            },
+        log_exception(
+            logger,
+            "llm_evaluation_failed",
+            exc,
+            level="warning",
+            job_id=job_id,
+            mode=evaluation_mode.value,
+            task_id=self.request.id,
+            status="failed",
         )
         metrics.observe(
             "llm_evaluation_duration_seconds",
@@ -297,12 +353,15 @@ def process_llm_evaluation_task(self, job_id: str, mode: str) -> None:
         )
         raise
     except Exception as exc:
-        logger.exception(
-            "LLM evaluation failed with unexpected error.",
-            extra={
-                "event": "llm_evaluation_unhandled_error",
-                "extra_fields": {"job_id": job_id, "mode": evaluation_mode.value, "error": str(exc)},
-            },
+        log_exception(
+            logger,
+            "llm_evaluation_unhandled_error",
+            exc,
+            job_id=job_id,
+            mode=evaluation_mode.value,
+            task_id=self.request.id,
+            status="failed",
+            duration_ms=duration_ms(start, time.perf_counter()),
         )
         metrics.observe(
             "llm_evaluation_duration_seconds",

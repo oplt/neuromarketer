@@ -4,8 +4,9 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.log_context import bound_log_context
 from backend.core.exceptions import NotFoundAppError, ValidationAppError
-from backend.core.logging import get_logger
+from backend.core.logging import get_logger, log_event
 from backend.core.metrics import metrics
 from backend.db.repositories import CreativeRepository, InferenceRepository
 from backend.application.services.analysis_job_processor import AnalysisJobProcessor
@@ -23,35 +24,49 @@ class PredictionApplicationService:
         self.tribe_inference = TribeInferenceService()
 
     async def create_prediction_job(self, payload: PredictRequest):
-        creative = await self.creatives.get_creative(payload.creative_id)
-        if creative is None:
-            raise NotFoundAppError("Creative not found.")
-        if creative.project_id != payload.project_id:
-            raise ValidationAppError("Creative does not belong to project.")
+        with bound_log_context(
+            project_id=str(payload.project_id),
+            creative_id=str(payload.creative_id),
+            creative_version_id=str(payload.creative_version_id),
+        ):
+            creative = await self.creatives.get_creative(payload.creative_id)
+            if creative is None:
+                raise NotFoundAppError("Creative not found.")
+            if creative.project_id != payload.project_id:
+                raise ValidationAppError("Creative does not belong to project.")
 
-        creative_version = await self.creatives.get_creative_version(payload.creative_version_id)
-        if creative_version is None:
-            raise NotFoundAppError("Creative version not found.")
-        if creative_version.creative_id != payload.creative_id:
-            raise ValidationAppError("Creative version does not belong to creative.")
+            creative_version = await self.creatives.get_creative_version(payload.creative_version_id)
+            if creative_version is None:
+                raise NotFoundAppError("Creative version not found.")
+            if creative_version.creative_id != payload.creative_id:
+                raise ValidationAppError("Creative version does not belong to creative.")
 
-        modality = self.tribe_inference.resolve_modality(creative_version)
-        self.tribe_inference.assert_ready_for_inference(creative_version=creative_version, modality=modality)
+            modality = self.tribe_inference.resolve_modality(creative_version)
+            self.tribe_inference.assert_ready_for_inference(creative_version=creative_version, modality=modality)
 
-        job = await self.inference.create_job(
-            project_id=payload.project_id,
-            creative_id=payload.creative_id,
-            creative_version_id=payload.creative_version_id,
-            created_by_user_id=payload.created_by_user_id,
-            request_payload={
-                "audience_context": payload.audience_context,
-                "campaign_context": payload.campaign_context,
-            },
-            runtime_params=payload.runtime_params,
-        )
-        await self.session.commit()
-        hydrated = await self.inference.get_job_with_prediction(job.id)
-        return hydrated or job
+            job = await self.inference.create_job(
+                project_id=payload.project_id,
+                creative_id=payload.creative_id,
+                creative_version_id=payload.creative_version_id,
+                created_by_user_id=payload.created_by_user_id,
+                request_payload={
+                    "audience_context": payload.audience_context,
+                    "campaign_context": payload.campaign_context,
+                },
+                runtime_params=payload.runtime_params,
+            )
+            await self.session.commit()
+            hydrated = await self.inference.get_job_with_prediction(job.id)
+            log_event(
+                logger,
+                "prediction_job_created",
+                job_id=str(job.id),
+                modality=modality,
+                status=job.status.value,
+                audience_context_keys=sorted((payload.audience_context or {}).keys()),
+                campaign_context_keys=sorted((payload.campaign_context or {}).keys()),
+            )
+            return hydrated or job
 
     async def get_job(self, job_id: UUID):
         job = await self.inference.get_job_with_prediction(job_id)

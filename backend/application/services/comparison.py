@@ -7,8 +7,12 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.log_context import bound_log_context
 from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
+from backend.core.logging import get_logger, log_event
 from backend.db.repositories import ComparisonRepository, CreativeRepository, InferenceRepository
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -42,55 +46,71 @@ class ComparisonApplicationService:
         creative_version_ids: list[UUID],
         comparison_context: dict[str, Any],
     ):
-        creative_items: list[tuple[UUID, UUID]] = []
-        for creative_version_id in creative_version_ids:
-            version = await self.creatives.get_creative_version(creative_version_id)
-            if version is None:
-                raise NotFoundAppError(f"Creative version {creative_version_id} not found.")
-            creative = await self.creatives.get_creative(version.creative_id)
-            if creative is None or creative.project_id != project_id:
-                raise ValidationAppError("All comparison candidates must belong to the same project.")
-            creative_items.append((creative.id, version.id))
-
-        snapshots = await self.inference.get_latest_prediction_snapshots(creative_version_ids)
-        missing = [str(version_id) for version_id in creative_version_ids if version_id not in snapshots]
-        if missing:
-            raise ConflictAppError(
-                "Comparison requires an existing prediction for each creative version.",
-                code="missing_predictions",
+        with bound_log_context(project_id=str(project_id)):
+            log_event(
+                logger,
+                "comparison_requested",
+                project_id=str(project_id),
+                candidate_count=len(creative_version_ids),
+                status="started",
             )
+            creative_items: list[tuple[UUID, UUID]] = []
+            for creative_version_id in creative_version_ids:
+                version = await self.creatives.get_creative_version(creative_version_id)
+                if version is None:
+                    raise NotFoundAppError(f"Creative version {creative_version_id} not found.")
+                creative = await self.creatives.get_creative(version.creative_id)
+                if creative is None or creative.project_id != project_id:
+                    raise ValidationAppError("All comparison candidates must belong to the same project.")
+                creative_items.append((creative.id, version.id))
 
-        ranked_items = self._rank_predictions(snapshots=snapshots)
-        comparison = await self.comparisons.create_comparison(
-            project_id=project_id,
-            name=name,
-            creative_items=creative_items,
-            comparison_context=comparison_context,
-        )
-        winner_id = ranked_items[0].creative_version_id if ranked_items else None
-        await self.comparisons.replace_result(
-            comparison_id=comparison.id,
-            winning_creative_version_id=winner_id,
-            summary_json={
-                "method": "weighted_business_score",
-                "weights": self.WEIGHTS,
-                "candidate_count": len(ranked_items),
-            },
-            items=[
-                {
-                    "creative_version_id": item.creative_version_id,
-                    "overall_rank": item.overall_rank,
-                    "scores_json": item.scores_json,
-                    "rationale": item.rationale,
-                }
-                for item in ranked_items
-            ],
-        )
-        await self.session.commit()
-        result = await self.comparisons.get_result(comparison.id)
-        if result is None:
-            raise NotFoundAppError("Comparison result not found.")
-        return comparison, result
+            snapshots = await self.inference.get_latest_prediction_snapshots(creative_version_ids)
+            missing = [str(version_id) for version_id in creative_version_ids if version_id not in snapshots]
+            if missing:
+                raise ConflictAppError(
+                    "Comparison requires an existing prediction for each creative version.",
+                    code="missing_predictions",
+                )
+
+            ranked_items = self._rank_predictions(snapshots=snapshots)
+            comparison = await self.comparisons.create_comparison(
+                project_id=project_id,
+                name=name,
+                creative_items=creative_items,
+                comparison_context=comparison_context,
+            )
+            winner_id = ranked_items[0].creative_version_id if ranked_items else None
+            await self.comparisons.replace_result(
+                comparison_id=comparison.id,
+                winning_creative_version_id=winner_id,
+                summary_json={
+                    "method": "weighted_business_score",
+                    "weights": self.WEIGHTS,
+                    "candidate_count": len(ranked_items),
+                },
+                items=[
+                    {
+                        "creative_version_id": item.creative_version_id,
+                        "overall_rank": item.overall_rank,
+                        "scores_json": item.scores_json,
+                        "rationale": item.rationale,
+                    }
+                    for item in ranked_items
+                ],
+            )
+            await self.session.commit()
+            result = await self.comparisons.get_result(comparison.id)
+            if result is None:
+                raise NotFoundAppError("Comparison result not found.")
+            log_event(
+                logger,
+                "comparison_completed",
+                comparison_id=str(comparison.id),
+                creative_version_id=str(winner_id) if winner_id else None,
+                candidate_count=len(ranked_items),
+                status="succeeded",
+            )
+            return comparison, result
 
     def _rank_predictions(
         self,

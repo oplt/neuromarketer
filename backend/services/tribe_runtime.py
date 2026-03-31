@@ -20,7 +20,7 @@ from backend.core.exceptions import (
     UnsupportedModalityAppError,
     ValidationAppError,
 )
-from backend.core.logging import get_logger
+from backend.core.logging import duration_ms, get_logger, log_event, log_exception
 from backend.services.text_preprocess import TextPreprocessService
 
 logger = get_logger(__name__)
@@ -93,15 +93,13 @@ class TribeRuntime:
 
             if os.access(candidate, os.W_OK):
                 if candidate != configured_path:
-                    logger.warning(
-                        "Configured TRIBE cache folder is unavailable. Using fallback cache folder.",
-                        extra={
-                            "event": "tribe_cache_folder_fallback",
-                            "extra_fields": {
-                                "configured_path": str(configured_path),
-                                "resolved_path": str(candidate),
-                            },
-                        },
+                    log_event(
+                        logger,
+                        "tribe_cache_folder_fallback",
+                        level="warning",
+                        configured_path=str(configured_path),
+                        resolved_path=str(candidate),
+                        status="fallback",
                     )
                 return candidate
 
@@ -188,16 +186,13 @@ class TribeRuntime:
             self.validate_environment()
             self._authenticate_huggingface()
             load_started_at = time.perf_counter()
-            logger.info(
-                "Initializing shared TRIBE model.",
-                extra={
-                    "event": "tribe_model_init_started",
-                    "extra_fields": {
-                        "repo_id": self.model_repo_id,
-                        "checkpoint_name": self.checkpoint_name,
-                        "device": self._get_requested_device(),
-                    },
-                },
+            log_event(
+                logger,
+                "tribe_runtime_load_started",
+                repo_id=self.model_repo_id,
+                checkpoint_name=self.checkpoint_name,
+                requested_device=self._get_requested_device(),
+                status="started",
             )
 
             try:
@@ -213,6 +208,17 @@ class TribeRuntime:
                     config_update=self._build_runtime_config_update(requested_device),
                 )
             except Exception as exc:
+                load_finished_at = time.perf_counter()
+                log_exception(
+                    logger,
+                    "tribe_runtime_load_failed",
+                    exc,
+                    repo_id=self.model_repo_id,
+                    checkpoint_name=self.checkpoint_name,
+                    requested_device=self._get_requested_device(),
+                    duration_ms=duration_ms(load_started_at, load_finished_at),
+                    status="failed",
+                )
                 raise ConfigurationAppError(
                     "Failed to load TRIBE v2 from the configured checkpoint. "
                     "Check model availability, Hugging Face access, and runtime dependencies."
@@ -221,17 +227,15 @@ class TribeRuntime:
             self.__class__._shared_module = tribe_module
             self.__class__._shared_model = model
             self.__class__._resolved_device = self._resolve_loaded_device(model)
-            logger.info(
-                "Shared TRIBE model initialized.",
-                extra={
-                    "event": "tribe_model_init_finished",
-                    "extra_fields": {
-                        "repo_id": self.model_repo_id,
-                        "checkpoint_name": self.checkpoint_name,
-                        "resolved_device": self._get_resolved_device(),
-                        "duration_seconds": round(time.perf_counter() - load_started_at, 3),
-                    },
-                },
+            load_finished_at = time.perf_counter()
+            log_event(
+                logger,
+                "tribe_runtime_loaded",
+                repo_id=self.model_repo_id,
+                checkpoint_name=self.checkpoint_name,
+                resolved_device=self._get_resolved_device(),
+                duration_ms=duration_ms(load_started_at, load_finished_at),
+                status="loaded",
             )
 
     def infer(self, payload: TribeRuntimeInput) -> TribeRuntimeOutput:
@@ -242,7 +246,6 @@ class TribeRuntime:
         temp_text_path: Path | None = None
 
         try:
-            inference_started_at = time.perf_counter()
             if payload.modality == "video":
                 events = self._prepare_video_events(model=model, payload=payload)
             elif payload.modality == "audio":
@@ -253,24 +256,12 @@ class TribeRuntime:
                 raise UnsupportedModalityAppError(f"Unsupported TRIBE modality: {payload.modality}")
 
             predictions, segments = self._predict(model=model, events=events)
-            output = self._postprocess_predictions(
+            return self._postprocess_predictions(
                 payload=payload,
                 events=events,
                 predictions=predictions,
                 segments=segments,
             )
-            logger.info(
-                "TRIBE runtime inference completed.",
-                extra={
-                    "event": "tribe_runtime_infer_finished",
-                    "extra_fields": {
-                        "modality": payload.modality,
-                        "duration_seconds": round(time.perf_counter() - inference_started_at, 3),
-                        "segment_count": int(output.reduced_feature_vector.get("segment_count", 0)),
-                    },
-                },
-            )
-            return output
         finally:
             if temp_text_path is not None and temp_text_path.exists():
                 temp_text_path.unlink(missing_ok=True)

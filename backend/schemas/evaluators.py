@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -82,7 +82,7 @@ class ModelMetadata(StrictSchemaModel):
     tokens_out: int = Field(default=0, ge=0)
 
 
-class EvaluationResult(StrictSchemaModel):
+class BaseEvaluationResult(StrictSchemaModel):
     mode: EvaluationMode
     overall_verdict: str = Field(min_length=1, max_length=240)
     summary: str = Field(min_length=1, max_length=2_000)
@@ -94,6 +94,44 @@ class EvaluationResult(StrictSchemaModel):
     scorecard: Scorecard
     model_metadata: ModelMetadata
 
+
+class EducationalEvaluationResult(BaseEvaluationResult):
+    mode: Literal[EvaluationMode.EDUCATIONAL]
+    educational_summary: str | None = Field(default=None, max_length=2_000)
+    comprehension_risks: list[str] = Field(default_factory=list, max_length=8)
+    pacing_feedback: str | None = Field(default=None, max_length=1_000)
+    retention_feedback: str | None = Field(default=None, max_length=1_000)
+    accessibility_feedback: str | None = Field(default=None, max_length=1_000)
+
+
+class DefenceEvaluationResult(BaseEvaluationResult):
+    mode: Literal[EvaluationMode.DEFENCE]
+    defence_summary: str | None = Field(default=None, max_length=2_000)
+    operational_clarity_assessment: str | None = Field(default=None, max_length=1_000)
+    ambiguity_risks: list[str] = Field(default_factory=list, max_length=8)
+    overload_risks: list[str] = Field(default_factory=list, max_length=8)
+    safety_or_misuse_flags: list[str] = Field(default_factory=list, max_length=8)
+
+
+class MarketingEvaluationResult(BaseEvaluationResult):
+    mode: Literal[EvaluationMode.MARKETING]
+    marketing_summary: str | None = Field(default=None, max_length=2_000)
+    hook_assessment: str | None = Field(default=None, max_length=1_000)
+    value_prop_assessment: str | None = Field(default=None, max_length=1_000)
+    conversion_friction_points: list[str] = Field(default_factory=list, max_length=8)
+    brand_alignment_feedback: str | None = Field(default=None, max_length=1_000)
+
+
+class SocialMediaEvaluationResult(BaseEvaluationResult):
+    mode: Literal[EvaluationMode.SOCIAL_MEDIA]
+    social_summary: str | None = Field(default=None, max_length=2_000)
+    scroll_stop_assessment: str | None = Field(default=None, max_length=1_000)
+    retention_assessment: str | None = Field(default=None, max_length=1_000)
+    platform_fit_feedback: str | None = Field(default=None, max_length=1_000)
+    shareability_feedback: str | None = Field(default=None, max_length=1_000)
+
+
+class EvaluationResult(BaseEvaluationResult):
     educational_summary: str | None = Field(default=None, max_length=2_000)
     comprehension_risks: list[str] = Field(default_factory=list, max_length=8)
     pacing_feedback: str | None = Field(default=None, max_length=1_000)
@@ -151,5 +189,14 @@ class EvaluationListResponse(StrictSchemaModel):
     items: list[EvaluationRecordRead] = Field(default_factory=list)
 
 
-def evaluation_json_schema() -> dict[str, Any]:
-    return EvaluationResult.model_json_schema()
+def evaluation_json_schema(mode: EvaluationMode | None = None) -> dict[str, Any]:
+    if mode is None:
+        return EvaluationResult.model_json_schema()
+
+    model_by_mode = {
+        EvaluationMode.EDUCATIONAL: EducationalEvaluationResult,
+        EvaluationMode.DEFENCE: DefenceEvaluationResult,
+        EvaluationMode.MARKETING: MarketingEvaluationResult,
+        EvaluationMode.SOCIAL_MEDIA: SocialMediaEvaluationResult,
+    }
+    return model_by_mode[mode].model_json_schema()

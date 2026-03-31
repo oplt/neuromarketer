@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from backend.core.logging import get_logger
+from backend.core.logging import get_logger, log_event
 from backend.db.models import AnalysisResultRecord, CreativeVersion, InferenceJob
 from backend.services.asset_loader import AssetLoader
 
@@ -14,23 +14,36 @@ class EvaluationContextBuilder:
     def __init__(self) -> None:
         self.asset_loader = AssetLoader()
 
-    def build(self, *, job: InferenceJob, analysis_result: AnalysisResultRecord) -> dict[str, Any]:
+    def build(
+        self,
+        *,
+        job: InferenceJob,
+        analysis_result: AnalysisResultRecord,
+        creative_version: CreativeVersion | None = None,
+    ) -> dict[str, Any]:
         summary = analysis_result.summary_json or {}
         metrics = list(analysis_result.metrics_json or [])
         timeline = list(analysis_result.timeline_json or [])
         segments = list(analysis_result.segments_json or [])
         visualizations = analysis_result.visualizations_json or {}
         recommendations = list(analysis_result.recommendations_json or [])
-        creative_version = job.creative_version
+        resolved_creative_version = creative_version
 
         return {
-            "job_metadata": self._build_job_metadata(job=job, summary=summary, creative_version=creative_version),
+            "job_metadata": self._build_job_metadata(
+                job=job,
+                summary=summary,
+                creative_version=resolved_creative_version,
+                analysis_created_at=analysis_result.created_at.isoformat()
+                if analysis_result.created_at is not None
+                else None,
+            ),
             "summary_metrics": self._build_summary_metrics(summary=summary, metrics=metrics),
             "timeline_highlights": self._build_timeline_highlights(timeline=timeline),
             "best_segments": self._select_segments(segments=segments, reverse=True),
             "worst_segments": self._select_segments(segments=segments, reverse=False),
             "visualization_hints": self._build_visualization_hints(visualizations=visualizations),
-            "transcript_excerpt": self._load_text_excerpt(creative_version=creative_version),
+            "transcript_excerpt": self._load_text_excerpt(creative_version=resolved_creative_version),
             "existing_recommendations": self._build_recommendations(recommendations),
             "analysis_notes": list(summary.get("notes") or []),
         }
@@ -41,6 +54,7 @@ class EvaluationContextBuilder:
         job: InferenceJob,
         summary: dict[str, Any],
         creative_version: CreativeVersion | None,
+        analysis_created_at: str | None,
     ) -> dict[str, Any]:
         summary_metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
         extracted_metadata = creative_version.extracted_metadata if creative_version is not None else {}
@@ -63,9 +77,7 @@ class EvaluationContextBuilder:
             "language": extracted_metadata.get("language"),
             "mime_type": creative_version.mime_type if creative_version is not None else None,
             "created_at": job.created_at.isoformat() if job.created_at else None,
-            "analysis_created_at": job.analysis_result_record.created_at.isoformat()
-            if job.analysis_result_record is not None
-            else None,
+            "analysis_created_at": analysis_created_at,
         }
 
     def _build_summary_metrics(self, *, summary: dict[str, Any], metrics: list[dict[str, Any]]) -> dict[str, Any]:
@@ -205,15 +217,14 @@ class EvaluationContextBuilder:
             excerpt = Path(loaded_asset.local_path).read_text(encoding="utf-8", errors="ignore").strip()
             return excerpt[:1_600] or None
         except Exception as exc:
-            logger.warning(
-                "Unable to load text excerpt for evaluation context.",
-                extra={
-                    "event": "llm_context_text_excerpt_failed",
-                    "extra_fields": {
-                        "creative_version_id": str(creative_version.id),
-                        "error": str(exc),
-                    },
-                },
+            log_event(
+                logger,
+                "llm_context_text_excerpt_failed",
+                level="warning",
+                creative_version_id=str(creative_version.id),
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+                status="failed",
             )
             return None
         finally:

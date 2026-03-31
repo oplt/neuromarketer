@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from backend.core.logging import get_logger
+from backend.core.logging import get_logger, log_event
 
 logger = get_logger(__name__)
 
@@ -23,6 +23,10 @@ class LLMTransportError(LLMClientError):
 class LLMResponseFormatError(LLMClientError):
     """Raised when the LLM response cannot be parsed into the expected format."""
 
+    def __init__(self, message: str, *, raw_text: str | None = None) -> None:
+        super().__init__(message)
+        self.raw_text = raw_text
+
 
 @dataclass(slots=True)
 class LLMClientConfig:
@@ -34,6 +38,7 @@ class LLMClientConfig:
     temperature: float = 0.2
     top_p: float = 0.9
     max_tokens: int = 2_000
+    think: bool | None = None
     default_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -41,6 +46,26 @@ class LLMClientConfig:
 class StructuredGeneration:
     parsed_json: dict[str, Any]
     metadata: dict[str, Any]
+
+
+def _summarize_error_response(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        for key in ("error", "message", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:500]
+
+    return response.text.strip()[:500]
+
+
+def _describe_http_error(exc: httpx.HTTPError) -> str:
+    message = str(exc).strip()
+    return message or exc.__class__.__name__
 
 
 def _strip_markdown_fences(raw_text: str) -> str:
@@ -61,14 +86,14 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start < 0 or end <= start:
-            raise LLMResponseFormatError("Model output is not valid JSON.")
+            raise LLMResponseFormatError("Model output is not valid JSON.", raw_text=cleaned)
         try:
             parsed = json.loads(cleaned[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise LLMResponseFormatError(f"Model output is not valid JSON: {exc}") from exc
+            raise LLMResponseFormatError(f"Model output is not valid JSON: {exc}", raw_text=cleaned) from exc
 
     if not isinstance(parsed, dict):
-        raise LLMResponseFormatError("Model output JSON must be an object.")
+        raise LLMResponseFormatError("Model output JSON must be an object.", raw_text=cleaned)
     return parsed
 
 
@@ -100,24 +125,26 @@ class BaseLLMClient(ABC):
                 options=options,
             )
         except LLMResponseFormatError as first_exc:
-            logger.warning(
-                "Structured generation failed; retrying with repair instruction.",
-                extra={
-                    "event": "llm_json_repair_retry",
-                    "extra_fields": {
-                        "provider": self.config.provider,
-                        "model": self.config.model,
-                        "error": str(first_exc),
-                    },
-                },
+            log_event(
+                logger,
+                "llm_json_repair_retry",
+                level="warning",
+                provider=self.config.provider,
+                model=self.config.model,
+                error_type=first_exc.__class__.__name__,
+                error_message=str(first_exc),
+                status="retrying",
             )
+            repair_content = (
+                "Your previous answer was malformed. Return exactly one valid JSON object "
+                "that matches the required schema. Do not include markdown, comments, or extra text."
+            )
+            if first_exc.raw_text:
+                repair_content += "\nMalformed JSON to repair:\n" + first_exc.raw_text[:4_000]
             repair_messages = messages + [
                 {
                     "role": "user",
-                    "content": (
-                        "Your previous answer was malformed. Return exactly one valid JSON object "
-                        "that matches the required schema. Do not include markdown, comments, or extra text."
-                    ),
+                    "content": repair_content,
                 }
             ]
             return await self.generate_structured(
@@ -144,23 +171,27 @@ class OllamaLLMClient(BaseLLMClient):
             "num_predict": self.config.max_tokens,
         }
         request_options.update(options or {})
-        _ = response_schema
-
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
             "stream": False,
-            "format": "json",
+            "format": response_schema or "json",
             "options": request_options,
         }
+        if self.config.think is not None:
+            payload["think"] = self.config.think
         headers = {"Accept": "application/json", **self.config.default_headers}
 
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                 response = await client.post(self._chat_url(), json=payload, headers=headers)
                 response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _summarize_error_response(exc.response)
+            suffix = f"; response: {detail}" if detail else ""
+            raise LLMTransportError(f"Failed to call Ollama endpoint: {_describe_http_error(exc)}{suffix}") from exc
         except httpx.HTTPError as exc:
-            raise LLMTransportError(f"Failed to call Ollama endpoint: {exc}") from exc
+            raise LLMTransportError(f"Failed to call Ollama endpoint: {_describe_http_error(exc)}") from exc
 
         try:
             response_json = response.json()
@@ -240,8 +271,14 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
                 response = await client.post(self._chat_url(), json=payload, headers=headers)
                 response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = _summarize_error_response(exc.response)
+            suffix = f"; response: {detail}" if detail else ""
+            raise LLMTransportError(
+                f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}{suffix}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise LLMTransportError(f"Failed to call OpenAI-compatible endpoint: {exc}") from exc
+            raise LLMTransportError(f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}") from exc
 
         try:
             response_json = response.json()

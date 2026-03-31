@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import (
+    after_setup_logger,
+    after_setup_task_logger,
+    before_task_publish,
+    setup_logging,
+    task_postrun,
+    task_prerun,
+    worker_process_init,
+)
 
 from backend.core.config import settings
-from backend.core.logging import get_logger
+from backend.core.log_context import bind_celery_task_context, build_celery_task_headers, clear_log_context
+from backend.core.logging import configure_logging
 from backend.services.tribe_runtime import get_shared_tribe_runtime
+
+configure_logging()
 
 celery_app = Celery(
     "neuromarketing",
@@ -25,9 +38,57 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     task_soft_time_limit=settings.celery_soft_time_limit_seconds,
     task_time_limit=settings.celery_time_limit_seconds,
+    worker_hijack_root_logger=False,
 )
 
-logger = get_logger(__name__)
+@setup_logging.connect
+def configure_celery_logging(**_: object) -> None:
+    configure_logging(force=True)
+
+
+@after_setup_logger.connect
+def propagate_celery_loggers(logger: logging.Logger, **_: object) -> None:
+    logger.handlers.clear()
+    logger.propagate = True
+
+
+@after_setup_task_logger.connect
+def propagate_celery_task_loggers(logger: logging.Logger, **_: object) -> None:
+    logger.handlers.clear()
+    logger.propagate = True
+
+
+@before_task_publish.connect
+def inject_publish_context(headers: dict | None = None, **_: object) -> None:
+    if headers is None:
+        return
+    headers.update(build_celery_task_headers())
+
+
+@task_prerun.connect
+def bind_task_logging_context(
+    task_id: str | None = None,
+    task=None,
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    **_: object,
+) -> None:
+    job_id = None
+    if args:
+        job_id = args[0]
+    elif kwargs and "job_id" in kwargs:
+        job_id = kwargs["job_id"]
+    bind_celery_task_context(
+        task.request if task is not None else None,
+        task_id=task_id,
+        task_name=task.name if task is not None else None,
+        job_id=str(job_id) if job_id is not None else None,
+    )
+
+
+@task_postrun.connect
+def clear_task_logging_context(**_: object) -> None:
+    clear_log_context()
 
 
 @worker_process_init.connect
@@ -37,10 +98,3 @@ def preload_tribe_runtime(**_: object) -> None:
 
     runtime = get_shared_tribe_runtime()
     runtime.load()
-    logger.info(
-        "TRIBE runtime preloaded for worker process.",
-        extra={
-            "event": "tribe_runtime_preloaded",
-            "extra_fields": {"model_repo_id": runtime.model_repo_id, "device": runtime._get_resolved_device()},
-        },
-    )

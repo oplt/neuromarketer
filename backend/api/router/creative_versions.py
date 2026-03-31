@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.application.services.creative_versions import CreativeVersionApplicationService
+from backend.core.log_context import bound_log_context
 from backend.db.session import get_db
 from backend.schemas.schemas import CreativeVersionRead
 
@@ -17,5 +18,6 @@ async def create_version_from_artifact(
     artifact_id: UUID,
     db: AsyncSession = Depends(get_db),
 ) -> CreativeVersionRead:
-    version = await CreativeVersionApplicationService(db).promote_artifact(artifact_id)
-    return CreativeVersionRead.model_validate(version)
+    with bound_log_context(artifact_id=str(artifact_id)):
+        version = await CreativeVersionApplicationService(db).promote_artifact(artifact_id)
+        return CreativeVersionRead.model_validate(version)

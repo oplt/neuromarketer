@@ -9,6 +9,7 @@ import {
   Alert,
   Box,
   Button,
+  ButtonBase,
   Chip,
   LinearProgress,
   Paper,
@@ -192,6 +193,23 @@ type AnalysisJobStatusResponse = {
   result?: AnalysisResult | null
 }
 
+type AnalysisJobListItem = {
+  job: AnalysisJob
+  asset?: AnalysisAsset | null
+  has_result: boolean
+  result_created_at?: string | null
+}
+
+type AnalysisJobListResponse = {
+  items: AnalysisJobListItem[]
+}
+
+type LoadAnalysisJobOptions = {
+  historyItem?: AnalysisJobListItem | null
+  announceSelection?: boolean
+  showSelectionLoading?: boolean
+}
+
 type UploadState = {
   stage: UploadStage
   progressPercent: number
@@ -330,6 +348,8 @@ const placeholderHeatmapFrames: AnalysisHeatmapFrame[] = [
   },
 ]
 
+const ANALYSIS_HISTORY_LIMIT = 12
+
 function AnalysisPage({ session }: AnalysisPageProps) {
   const [config, setConfig] = useState<AnalysisConfigResponse | null>(null)
   const [configError, setConfigError] = useState<string | null>(null)
@@ -353,15 +373,27 @@ function AnalysisPage({ session }: AnalysisPageProps) {
   const [hasLoadedAssetLibrary, setHasLoadedAssetLibrary] = useState(false)
   const [assetLibraryError, setAssetLibraryError] = useState<string | null>(null)
   const [assetLibraryRefreshNonce, setAssetLibraryRefreshNonce] = useState(0)
+  const [analysisHistory, setAnalysisHistory] = useState<AnalysisJobListItem[]>([])
+  const [isLoadingAnalysisHistory, setIsLoadingAnalysisHistory] = useState(false)
+  const [hasLoadedAnalysisHistory, setHasLoadedAnalysisHistory] = useState(false)
+  const [analysisHistoryError, setAnalysisHistoryError] = useState<string | null>(null)
+  const [analysisHistoryRefreshNonce, setAnalysisHistoryRefreshNonce] = useState(0)
   const selectedAssetStorageKey = buildSelectedAssetStorageKey(session.defaultProjectId || session.email)
+  const selectedJobStorageKey = buildSelectedJobStorageKey(session.defaultProjectId || session.email)
   const [activeLibraryAssetId, setActiveLibraryAssetId] = useState<string | null>(() =>
     readSelectedAnalysisAssetId(buildSelectedAssetStorageKey(session.defaultProjectId || session.email)),
   )
+  const [activeHistoryJobId, setActiveHistoryJobId] = useState<string | null>(() =>
+    readSelectedAnalysisJobId(buildSelectedJobStorageKey(session.defaultProjectId || session.email)),
+  )
+  const [loadingHistoryJobId, setLoadingHistoryJobId] = useState<string | null>(null)
+  const [pendingHistorySelection, setPendingHistorySelection] = useState<AnalysisJobListItem | null>(null)
 
   const sessionToken = session.sessionToken
   const currentMediaOption = mediaTypeOptions.find((option) => option.kind === selectedMediaType) ?? mediaTypeOptions[0]
   const CurrentMediaIcon = currentMediaOption.icon
   const currentStage = resolveCurrentStage(uploadState.stage, analysisJob?.status)
+  const hasLocalDraft = selectedMediaType === 'text' ? Boolean(textContent.trim()) : Boolean(selectedFile)
   const canUpload = Boolean(config && sessionToken && uploadState.stage !== 'uploading')
   const canStartAnalysis =
     Boolean(sessionToken) &&
@@ -370,37 +402,75 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     analysisJob?.status !== 'queued' &&
     analysisJob?.status !== 'processing'
 
-  const pollAnalysisJob = useEffectEvent(async (jobId: string) => {
+  const loadAnalysisJob = useEffectEvent(async (jobId: string, options?: LoadAnalysisJobOptions) => {
     if (!sessionToken) {
       return
     }
 
+    const historyItem = options?.historyItem ?? analysisHistory.find((item) => item.job.id === jobId) ?? null
+
+    if (options?.showSelectionLoading) {
+      setLoadingHistoryJobId(jobId)
+    }
+
     try {
-      const statusResponse = await apiRequest<AnalysisJobStatusResponse>(`/api/v1/analysis/jobs/${jobId}`, {
+      const statusResponse = await fetchAnalysisJobDetails({
+        jobId,
         sessionToken,
       })
-      setAnalysisJob(statusResponse.job)
 
-      if (statusResponse.result) {
-        setAnalysisResult(statusResponse.result)
-      } else if (statusResponse.job.status === 'completed') {
-        const result = await apiRequest<AnalysisResult>(`/api/v1/analysis/jobs/${jobId}/results`, {
-          sessionToken,
+      const nextAsset = historyItem?.asset ?? (uploadState.asset?.id === statusResponse.job.asset_id ? uploadState.asset : null)
+
+      if (nextAsset && nextAsset.media_type === selectedMediaType) {
+        setActiveLibraryAssetId(nextAsset.id)
+        storeSelectedAnalysisAssetId(selectedAssetStorageKey, nextAsset.id)
+        setAssetLibrary((current) => mergeLatestAnalysisAsset(current, nextAsset))
+        setUploadState({
+          stage: 'uploaded',
+          progressPercent: 100,
+          validationErrors: [],
+          asset: nextAsset,
         })
-        setAnalysisResult(result)
       }
+
+      setAnalysisJob(statusResponse.job)
+      setAnalysisResult(statusResponse.result || null)
+      setObjective(statusResponse.job.objective || '')
+      setActiveHistoryJobId(statusResponse.job.id)
+      storeSelectedAnalysisJobId(selectedJobStorageKey, statusResponse.job.id)
+      setAnalysisHistory((current) =>
+        upsertAnalysisHistoryItem(
+          current,
+          {
+            job: statusResponse.job,
+            asset: nextAsset,
+            has_result: Boolean(statusResponse.result),
+            result_created_at: statusResponse.result?.created_at ?? historyItem?.result_created_at ?? null,
+          },
+          ANALYSIS_HISTORY_LIMIT,
+        ),
+      )
 
       if (statusResponse.job.status === 'failed' && statusResponse.job.error_message) {
         setBannerMessage({
           type: 'error',
           message: statusResponse.job.error_message,
         })
+      } else if (options?.announceSelection) {
+        setBannerMessage({
+          type: 'info',
+          message: `Loaded ${nextAsset?.original_filename || 'analysis run'} from ${formatTimestamp(statusResponse.job.created_at)}.`,
+        })
       }
     } catch (error) {
       setBannerMessage({
         type: 'error',
-        message: error instanceof Error ? error.message : 'Unable to refresh analysis status.',
+        message: error instanceof Error ? error.message : 'Unable to load the selected analysis.',
       })
+    } finally {
+      if (options?.showSelectionLoading) {
+        setLoadingHistoryJobId((current) => (current === jobId ? null : current))
+      }
     }
   })
 
@@ -453,6 +523,58 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     }
   })
 
+  const loadAnalysisHistory = useEffectEvent(async () => {
+    if (!sessionToken) {
+      setAnalysisHistory([])
+      setAnalysisHistoryError(null)
+      setIsLoadingAnalysisHistory(false)
+      setHasLoadedAnalysisHistory(true)
+      return
+    }
+
+    setIsLoadingAnalysisHistory(true)
+    try {
+      const response = await apiRequest<AnalysisJobListResponse>(
+        `/api/v1/analysis/jobs?media_type=${encodeURIComponent(selectedMediaType)}&limit=${ANALYSIS_HISTORY_LIMIT}`,
+        {
+          sessionToken,
+        },
+      )
+      setAnalysisHistory(response.items)
+      setAnalysisHistoryError(null)
+      setHasLoadedAnalysisHistory(true)
+
+      const preferredJobId = activeHistoryJobId || readSelectedAnalysisJobId(selectedJobStorageKey)
+      const preferredHistoryItem =
+        (analysisJob ? response.items.find((item) => item.job.id === analysisJob.id) : null) ||
+        (preferredJobId ? response.items.find((item) => item.job.id === preferredJobId) : null) ||
+        response.items.find((item) => item.has_result) ||
+        response.items[0] ||
+        null
+
+      if (!preferredHistoryItem) {
+        setActiveHistoryJobId(null)
+        clearSelectedAnalysisJobId(selectedJobStorageKey)
+        return
+      }
+
+      if (!analysisJob && !analysisResult && uploadState.stage !== 'uploading' && !hasLocalDraft) {
+        await loadAnalysisJob(preferredHistoryItem.job.id, {
+          historyItem: preferredHistoryItem,
+        })
+        return
+      }
+
+      setActiveHistoryJobId(preferredHistoryItem.job.id)
+      storeSelectedAnalysisJobId(selectedJobStorageKey, preferredHistoryItem.job.id)
+    } catch (error) {
+      setAnalysisHistoryError(error instanceof Error ? error.message : 'Unable to load recent analyses.')
+      setHasLoadedAnalysisHistory(true)
+    } finally {
+      setIsLoadingAnalysisHistory(false)
+    }
+  })
+
   useEffect(() => {
     const loadConfig = async () => {
       if (!sessionToken) {
@@ -482,24 +604,45 @@ function AnalysisPage({ session }: AnalysisPageProps) {
   }, [assetLibraryRefreshNonce, selectedMediaType, sessionToken])
 
   useEffect(() => {
+    void loadAnalysisHistory()
+  }, [analysisHistoryRefreshNonce, selectedMediaType, sessionToken])
+
+  useEffect(() => {
     if (!analysisJob || !sessionToken) {
       return
     }
     if (analysisJob.status === 'completed' || analysisJob.status === 'failed') {
       if (analysisJob.status === 'completed' && !analysisResult) {
-        void pollAnalysisJob(analysisJob.id)
+        void loadAnalysisJob(analysisJob.id)
       }
       return
     }
 
     const intervalId = window.setInterval(() => {
-      void pollAnalysisJob(analysisJob.id)
+      void loadAnalysisJob(analysisJob.id)
     }, 4_000)
 
     return () => {
       window.clearInterval(intervalId)
     }
   }, [analysisJob, analysisResult, sessionToken])
+
+  useEffect(() => {
+    if (!pendingHistorySelection) {
+      return
+    }
+
+    const selectedHistoryItem = pendingHistorySelection
+    void loadAnalysisJob(selectedHistoryItem.job.id, {
+      historyItem: selectedHistoryItem,
+      announceSelection: true,
+      showSelectionLoading: true,
+    }).finally(() => {
+      setPendingHistorySelection((current) =>
+        current?.job.id === selectedHistoryItem.job.id ? null : current,
+      )
+    })
+  }, [pendingHistorySelection])
 
   const handleMediaTypeChange = (nextMediaType: MediaType) => {
     if (nextMediaType === selectedMediaType) {
@@ -511,6 +654,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     setTextContent('')
     setTextFilename('analysis-notes.txt')
     setActiveLibraryAssetId(null)
+    setActiveHistoryJobId(null)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
   }
 
@@ -522,6 +667,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     event.target.value = ''
     setSelectedFile(file)
     setActiveLibraryAssetId(null)
+    setActiveHistoryJobId(null)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
   }
 
@@ -537,6 +684,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
       setTextContent(nextTextContent)
       setTextFilename(ensureTxtFilename(file.name))
       setActiveLibraryAssetId(null)
+      setActiveHistoryJobId(null)
+      clearSelectedAnalysisJobId(selectedJobStorageKey)
       resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
     } catch {
       setBannerMessage({
@@ -557,6 +706,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
 
     setSelectedFile(file)
     setActiveLibraryAssetId(null)
+    setActiveHistoryJobId(null)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
     resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
   }
 
@@ -571,7 +722,9 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     setAnalysisJob(null)
     setAnalysisResult(null)
     setActiveLibraryAssetId(asset.id)
+    setActiveHistoryJobId(null)
     storeSelectedAnalysisAssetId(selectedAssetStorageKey, asset.id)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
     setUploadState({
       stage: 'uploaded',
       progressPercent: 100,
@@ -625,6 +778,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
     setAnalysisJob(null)
     setAnalysisResult(null)
     setActiveLibraryAssetId(null)
+    setActiveHistoryJobId(null)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
     setUploadState({
       stage: 'uploading',
       progressPercent: 0,
@@ -750,6 +905,20 @@ function AnalysisPage({ session }: AnalysisPageProps) {
       })
       setAnalysisJob(response.job)
       setAnalysisResult(response.result || null)
+      setActiveHistoryJobId(response.job.id)
+      storeSelectedAnalysisJobId(selectedJobStorageKey, response.job.id)
+      setAnalysisHistory((current) =>
+        upsertAnalysisHistoryItem(
+          current,
+          {
+            job: response.job,
+            asset: uploadState.asset || null,
+            has_result: Boolean(response.result),
+            result_created_at: response.result?.created_at ?? null,
+          },
+          ANALYSIS_HISTORY_LIMIT,
+        ),
+      )
       setBannerMessage({
         type: 'info',
         message:
@@ -763,6 +932,15 @@ function AnalysisPage({ session }: AnalysisPageProps) {
         message: error instanceof Error ? error.message : 'Unable to queue the analysis job.',
       })
     }
+  }
+
+  const handleSelectAnalysisHistoryItem = (item: AnalysisJobListItem) => {
+    setSelectedFile(null)
+    setTextContent('')
+    if (item.asset?.media_type === 'text' && item.asset.original_filename) {
+      setTextFilename(ensureTxtFilename(item.asset.original_filename))
+    }
+    setPendingHistorySelection(item)
   }
 
   const summary = analysisResult?.summary_json ?? placeholderSummary
@@ -847,6 +1025,8 @@ function AnalysisPage({ session }: AnalysisPageProps) {
                     multiline
                     onChange={(event) => {
                       setTextContent(event.target.value)
+                      setActiveHistoryJobId(null)
+                      clearSelectedAnalysisJobId(selectedJobStorageKey)
                       resetWorkflowState(setUploadState, setAnalysisJob, setAnalysisResult, setBannerMessage)
                     }}
                     placeholder="Paste transcript copy, concept notes, or product narrative here."
@@ -1018,6 +1198,17 @@ function AnalysisPage({ session }: AnalysisPageProps) {
               />
             </Stack>
           </Paper>
+
+          <RecentAnalysesPanel
+            activeJobId={activeHistoryJobId}
+            errorMessage={analysisHistoryError}
+            hasLoaded={hasLoadedAnalysisHistory}
+            isLoading={isLoadingAnalysisHistory}
+            items={analysisHistory}
+            loadingJobId={loadingHistoryJobId}
+            onReload={() => setAnalysisHistoryRefreshNonce((current) => current + 1)}
+            onSelectJob={handleSelectAnalysisHistoryItem}
+          />
 
           <Paper className="dashboard-card" elevation={0}>
             <Stack spacing={2}>
@@ -1328,6 +1519,123 @@ function UploadedMediaLibrary({
   )
 }
 
+function RecentAnalysesPanel({
+  activeJobId,
+  errorMessage,
+  hasLoaded,
+  isLoading,
+  items,
+  loadingJobId,
+  onReload,
+  onSelectJob,
+}: {
+  activeJobId: string | null
+  errorMessage: string | null
+  hasLoaded: boolean
+  isLoading: boolean
+  items: AnalysisJobListItem[]
+  loadingJobId: string | null
+  onReload: () => void
+  onSelectJob: (item: AnalysisJobListItem) => void
+}) {
+  return (
+    <Paper className="dashboard-card" elevation={0}>
+      <Stack spacing={1.5}>
+        <Stack
+          alignItems={{ xs: 'stretch', sm: 'center' }}
+          direction={{ xs: 'column', sm: 'row' }}
+          justifyContent="space-between"
+          spacing={1.5}
+        >
+          <Box>
+            <Typography variant="h6">Recent analyses</Typography>
+            <Typography color="text.secondary" variant="body2">
+              Open a completed or in-flight run for this media type and render it in the dashboard below.
+            </Typography>
+          </Box>
+          <Button onClick={onReload} size="small" variant="text">
+            Refresh list
+          </Button>
+        </Stack>
+
+        {errorMessage ? <Alert severity="error">{errorMessage}</Alert> : null}
+
+        {isLoading && items.length === 0 ? (
+          <Box className="analysis-empty-state">
+            <Typography color="text.secondary" variant="body2">
+              Loading recent analyses…
+            </Typography>
+          </Box>
+        ) : null}
+
+        {!isLoading && hasLoaded && items.length === 0 ? (
+          <Box className="analysis-empty-state">
+            <Typography color="text.secondary" variant="body2">
+              No analysis jobs have been created for this media type yet.
+            </Typography>
+          </Box>
+        ) : null}
+
+        {items.length > 0 ? (
+          <Box className="analysis-job-history" data-testid="analysis-history-list">
+            {items.map((item) => {
+              const isSelected = item.job.id === activeJobId
+              const isLoadingSelection = item.job.id === loadingJobId
+              const primaryLabel =
+                item.asset?.original_filename || item.asset?.object_key || `Analysis ${shortenId(item.job.id)}`
+
+              return (
+                <ButtonBase
+                  className={`analysis-job-history__item ${isSelected ? 'is-selected' : ''}`}
+                  data-testid={`analysis-history-item-${item.job.id}`}
+                  key={item.job.id}
+                  onClick={() => onSelectJob(item)}
+                  sx={{ borderRadius: '20px', width: '100%', textAlign: 'left' }}
+                >
+                  <Box sx={{ width: '100%' }}>
+                    <Stack spacing={1.25}>
+                      <Stack alignItems="flex-start" direction="row" justifyContent="space-between" spacing={1.5}>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ wordBreak: 'break-word' }} variant="subtitle2">
+                            {primaryLabel}
+                          </Typography>
+                          <Typography color="text.secondary" sx={{ wordBreak: 'break-word' }} variant="body2">
+                            {formatTimestamp(item.job.created_at)}
+                          </Typography>
+                        </Box>
+                        <Chip
+                          className={`analysis-status-chip is-${item.job.status}`}
+                          label={isLoadingSelection ? 'loading' : item.job.status}
+                          size="small"
+                          variant="outlined"
+                        />
+                      </Stack>
+
+                      <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                        <Chip
+                          color={item.has_result ? 'success' : item.job.status === 'failed' ? 'error' : 'default'}
+                          label={item.has_result ? 'Results ready' : item.job.status === 'failed' ? 'Failed' : 'No result yet'}
+                          size="small"
+                          variant="outlined"
+                        />
+                        <Chip label={item.asset?.media_type || 'analysis'} size="small" variant="outlined" />
+                      </Stack>
+
+                      <Typography color="text.secondary" variant="body2">
+                        {truncateText(item.job.objective || 'No analysis objective was stored for this run.', 132)}
+                      </Typography>
+                    </Stack>
+                  </Box>
+                </ButtonBase>
+              )
+            })}
+          </Box>
+        ) : null}
+      </Stack>
+    </Paper>
+  )
+}
+
 function ResultStateBanner({
   resultState,
   analysisJob,
@@ -1619,7 +1927,18 @@ function buildSelectedAssetStorageKey(scope: string) {
   return `neuromarketer.analysis.selected-asset.${scope}`
 }
 
+function buildSelectedJobStorageKey(scope: string) {
+  return `neuromarketer.analysis.selected-job.${scope}`
+}
+
 function readSelectedAnalysisAssetId(storageKey: string) {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  return window.sessionStorage.getItem(storageKey)
+}
+
+function readSelectedAnalysisJobId(storageKey: string) {
   if (typeof window === 'undefined') {
     return null
   }
@@ -1631,6 +1950,66 @@ function storeSelectedAnalysisAssetId(storageKey: string, assetId: string) {
     return
   }
   window.sessionStorage.setItem(storageKey, assetId)
+}
+
+function storeSelectedAnalysisJobId(storageKey: string, jobId: string) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.sessionStorage.setItem(storageKey, jobId)
+}
+
+function clearSelectedAnalysisJobId(storageKey: string) {
+  if (typeof window === 'undefined') {
+    return
+  }
+  window.sessionStorage.removeItem(storageKey)
+}
+
+async function fetchAnalysisJobDetails({
+  jobId,
+  sessionToken,
+}: {
+  jobId: string
+  sessionToken: string
+}): Promise<AnalysisJobStatusResponse> {
+  const statusResponse = await apiRequest<AnalysisJobStatusResponse>(`/api/v1/analysis/jobs/${jobId}`, {
+    sessionToken,
+  })
+
+  if (statusResponse.result || statusResponse.job.status !== 'completed') {
+    return statusResponse
+  }
+
+  const result = await apiRequest<AnalysisResult>(`/api/v1/analysis/jobs/${jobId}/results`, {
+    sessionToken,
+  })
+
+  return {
+    job: statusResponse.job,
+    result,
+  }
+}
+
+function upsertAnalysisHistoryItem(
+  currentItems: AnalysisJobListItem[],
+  nextItem: AnalysisJobListItem,
+  limit: number,
+) {
+  const existingIndex = currentItems.findIndex((item) => item.job.id === nextItem.job.id)
+  if (existingIndex === -1) {
+    return [nextItem, ...currentItems].slice(0, limit)
+  }
+
+  const existing = currentItems[existingIndex]
+  const mergedItem: AnalysisJobListItem = {
+    job: nextItem.job,
+    asset: nextItem.asset ?? existing.asset ?? null,
+    has_result: nextItem.has_result || existing.has_result,
+    result_created_at: nextItem.result_created_at ?? existing.result_created_at ?? null,
+  }
+
+  return currentItems.map((item, index) => (index === existingIndex ? mergedItem : item))
 }
 
 function validateCurrentInput({
@@ -1862,6 +2241,13 @@ function ensureTxtFilename(value: string) {
 
 function shortenId(value: string) {
   return `${value.slice(0, 8)}…`
+}
+
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value
+  }
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`
 }
 
 function formatDuration(milliseconds: number) {

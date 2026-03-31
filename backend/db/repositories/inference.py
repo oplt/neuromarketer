@@ -81,6 +81,39 @@ class InferenceRepository:
         result = await self.session.execute(select(InferenceJob).where(InferenceJob.id == job_id))
         return result.scalar_one_or_none()
 
+    async def list_analysis_jobs_for_user(
+        self,
+        *,
+        project_id: UUID,
+        created_by_user_id: UUID,
+        media_type: str | None,
+        limit: int,
+    ) -> list[InferenceJob]:
+        candidate_limit = max(limit * 4, limit)
+        result = await self.session.execute(
+            select(InferenceJob)
+            .options(selectinload(InferenceJob.analysis_result_record))
+            .where(
+                InferenceJob.project_id == project_id,
+                InferenceJob.created_by_user_id == created_by_user_id,
+            )
+            .order_by(desc(InferenceJob.created_at))
+            .limit(candidate_limit)
+        )
+        jobs = list(result.scalars().all())
+
+        filtered: list[InferenceJob] = []
+        for job in jobs:
+            runtime_params = job.runtime_params or {}
+            if runtime_params.get("analysis_surface") != "analysis_dashboard":
+                continue
+            if media_type is not None and str(runtime_params.get("media_type") or "") != media_type:
+                continue
+            filtered.append(job)
+            if len(filtered) >= limit:
+                break
+        return filtered
+
     async def get_job_for_analysis_evaluation(self, job_id: UUID) -> InferenceJob | None:
         result = await self.session.execute(
             select(InferenceJob)

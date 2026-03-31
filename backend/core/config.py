@@ -9,6 +9,8 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+EnvironmentName = Literal["development", "staging", "production", "test"]
+LogFormatName = Literal["auto", "pretty", "json"]
 
 
 class Settings(BaseSettings):
@@ -21,11 +23,23 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "NeuroMarketer API"
-    app_env: Literal["local", "dev", "staging", "prod", "test"] = "dev"
+    app_env: EnvironmentName = Field(
+        default="development",
+        validation_alias=AliasChoices("ENVIRONMENT", "APP_ENV"),
+    )
     app_version: str = "0.3.0"
     api_v1_prefix: str = "/api/v1"
     debug: bool = False
-    log_level: str = "INFO"
+    service_name: str = Field(default="neuromarketer-api", validation_alias="SERVICE_NAME")
+    log_level: str = Field(default="INFO", validation_alias="LOG_LEVEL")
+    log_format: LogFormatName = Field(default="auto", validation_alias="LOG_FORMAT")
+    log_to_file: bool = Field(default=False, validation_alias="LOG_TO_FILE")
+    log_file_path: str = Field(default="./logs/app.log", validation_alias="LOG_FILE_PATH")
+    log_file_max_bytes: int = Field(default=10 * 1024 * 1024, validation_alias="LOG_FILE_MAX_BYTES")
+    log_file_backup_count: int = Field(default=5, validation_alias="LOG_FILE_BACKUP_COUNT")
+    otel_enabled: bool = Field(default=False, validation_alias="OTEL_ENABLED")
+    otel_service_name: str | None = Field(default=None, validation_alias="OTEL_SERVICE_NAME")
+    otel_exporter_otlp_endpoint: str | None = Field(default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT")
 
     database_url: str = Field(validation_alias="DATABASE_URL")
     database_echo: bool = False
@@ -143,6 +157,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = Field(default=2_000, validation_alias="LLM_MAX_TOKENS")
     llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
     llm_top_p: float = Field(default=0.9, validation_alias="LLM_TOP_P")
+    llm_ollama_think: bool = Field(default=False, validation_alias="LLM_OLLAMA_THINK")
     llm_processing_stale_after_seconds: int = Field(
         default=900,
         validation_alias="LLM_PROCESSING_STALE_AFTER_SECONDS",
@@ -181,6 +196,41 @@ class Settings(BaseSettings):
         if not normalized.startswith("/"):
             normalized = f"/{normalized}"
         return normalized.rstrip("/") or "/api/v1"
+
+    @field_validator("app_env", mode="before")
+    @classmethod
+    def _normalize_app_env(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.strip().lower()
+        aliases = {
+            "local": "development",
+            "dev": "development",
+            "development": "development",
+            "stage": "staging",
+            "staging": "staging",
+            "prod": "production",
+            "production": "production",
+            "test": "test",
+            "testing": "test",
+        }
+        return aliases.get(normalized, value)
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _normalize_log_format(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.strip().lower()
+        aliases = {
+            "auto": "auto",
+            "console": "pretty",
+            "pretty": "pretty",
+            "json": "json",
+        }
+        return aliases.get(normalized, value)
 
     @staticmethod
     def _parse_listish_value(raw_value: str) -> list[str]:

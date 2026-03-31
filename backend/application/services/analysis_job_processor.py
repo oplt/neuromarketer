@@ -6,8 +6,9 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
+from backend.core.log_context import bound_log_context
 from backend.core.exceptions import NotFoundAppError
-from backend.core.logging import get_logger
+from backend.core.logging import duration_ms, get_logger, log_event
 from backend.core.metrics import metrics
 from backend.db.repositories import CreativeRepository, InferenceRepository
 from backend.services.analysis_postprocessor import AnalysisPostprocessor
@@ -32,110 +33,96 @@ class AnalysisJobProcessor:
             stale_after_seconds=settings.celery_job_stale_after_seconds,
         )
         if job is None:
-            logger.info(
-                "Analysis job skipped.",
-                extra={"event": "analysis_job_skipped", "extra_fields": {"job_id": str(job_id)}},
-            )
+            log_event(logger, "prediction_job_skipped", job_id=str(job_id), status="skipped")
             return
 
-        creative_version = await self.creatives.get_creative_version(job.creative_version_id)
-        if creative_version is None:
-            raise NotFoundAppError("Creative version not found.")
+        with bound_log_context(
+            job_id=str(job.id),
+            project_id=str(job.project_id),
+            creative_id=str(job.creative_id),
+            creative_version_id=str(job.creative_version_id),
+        ):
+            creative_version = await self.creatives.get_creative_version(job.creative_version_id)
+            if creative_version is None:
+                raise NotFoundAppError("Creative version not found.")
 
-        objective = ((job.request_payload or {}).get("campaign_context") or {}).get("objective")
-        total_started_at = time.perf_counter()
-        logger.info(
-            "Analysis job started.",
-            extra={
-                "event": "analysis_job_started",
-                "extra_fields": {
-                    "job_id": str(job.id),
-                    "creative_version_id": str(creative_version.id),
-                },
-            },
-        )
+            modality = self.tribe_inference.resolve_modality(creative_version)
+            objective = ((job.request_payload or {}).get("campaign_context") or {}).get("objective")
+            total_started_at = time.perf_counter()
+            log_event(
+                logger,
+                "prediction_job_started",
+                job_id=str(job.id),
+                creative_version_id=str(creative_version.id),
+                modality=modality,
+                status="running",
+            )
 
-        execution = self.tribe_inference.run_for_version(
-            creative_version=creative_version,
-            request_payload=job.request_payload or {},
-            runtime_params=job.runtime_params or {},
-        )
+            execution = self.tribe_inference.run_for_version(
+                creative_version=creative_version,
+                request_payload=job.request_payload or {},
+                runtime_params=job.runtime_params or {},
+            )
 
-        scoring_started_at = time.perf_counter()
-        scoring_bundle = await self.scoring.score(
-            reduced_feature_vector=execution.runtime_output.reduced_feature_vector,
-            region_activation_summary=execution.runtime_output.region_activation_summary,
-            context=job.request_payload or {},
-            modality=execution.modality,
-        )
-        scoring_duration_seconds = time.perf_counter() - scoring_started_at
-        logger.info(
-            "Analysis scoring completed.",
-            extra={
-                "event": "analysis_scoring_finished",
-                "extra_fields": {
-                    "job_id": str(job.id),
-                    "duration_seconds": round(scoring_duration_seconds, 3),
-                    "modality": execution.modality,
-                },
-            },
-        )
+            scoring_bundle = await self.scoring.score(
+                reduced_feature_vector=execution.runtime_output.reduced_feature_vector,
+                region_activation_summary=execution.runtime_output.region_activation_summary,
+                context=job.request_payload or {},
+                modality=execution.modality,
+            )
 
-        postprocess_started_at = time.perf_counter()
-        dashboard_payload = self.postprocessor.build_dashboard_payload(
-            runtime_output=execution.runtime_output,
-            scoring_bundle=scoring_bundle,
-            modality=execution.modality,
-            objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
-            source_label=execution.source_label,
-        )
-        postprocess_duration_seconds = time.perf_counter() - postprocess_started_at
-        logger.info(
-            "Analysis postprocessing completed.",
-            extra={
-                "event": "analysis_postprocess_finished",
-                "extra_fields": {
-                    "job_id": str(job.id),
-                    "duration_seconds": round(postprocess_duration_seconds, 3),
-                    "timeline_points": len(dashboard_payload.timeline_json),
-                    "segments": len(dashboard_payload.segments_json),
-                    "recommendations": len(dashboard_payload.recommendations_json),
-                },
-            },
-        )
+            postprocess_started_at = time.perf_counter()
+            dashboard_payload = self.postprocessor.build_dashboard_payload(
+                runtime_output=execution.runtime_output,
+                scoring_bundle=scoring_bundle,
+                modality=execution.modality,
+                objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
+                source_label=execution.source_label,
+            )
+            postprocess_finished_at = time.perf_counter()
 
-        persistence_started_at = time.perf_counter()
-        await self.inference.replace_prediction_result(
-            job=job,
-            runtime_output=execution.runtime_output,
-            scoring_bundle=scoring_bundle,
-            model_name=self.tribe_inference.runtime.model_name,
-        )
-        await self.inference.replace_analysis_result(
-            job=job,
-            summary_json=dashboard_payload.summary_json,
-            metrics_json=dashboard_payload.metrics_json,
-            timeline_json=dashboard_payload.timeline_json,
-            segments_json=dashboard_payload.segments_json,
-            visualizations_json=dashboard_payload.visualizations_json,
-            recommendations_json=dashboard_payload.recommendations_json,
-        )
-        await self.inference.mark_job_succeeded(job)
-        persistence_duration_seconds = time.perf_counter() - persistence_started_at
+            persistence_started_at = time.perf_counter()
+            log_event(
+                logger,
+                "prediction_persist_started",
+                job_id=str(job.id),
+                modality=execution.modality,
+                status="running",
+            )
+            prediction_result = await self.inference.replace_prediction_result(
+                job=job,
+                runtime_output=execution.runtime_output,
+                scoring_bundle=scoring_bundle,
+                model_name=self.tribe_inference.runtime.model_name,
+            )
+            await self.inference.replace_analysis_result(
+                job=job,
+                summary_json=dashboard_payload.summary_json,
+                metrics_json=dashboard_payload.metrics_json,
+                timeline_json=dashboard_payload.timeline_json,
+                segments_json=dashboard_payload.segments_json,
+                visualizations_json=dashboard_payload.visualizations_json,
+                recommendations_json=dashboard_payload.recommendations_json,
+            )
+            await self.inference.mark_job_succeeded(job)
+            persistence_finished_at = time.perf_counter()
 
-        total_duration_seconds = time.perf_counter() - total_started_at
-        logger.info(
-            "Analysis job persisted.",
-            extra={
-                "event": "analysis_job_persisted",
-                "extra_fields": {
-                    "job_id": str(job.id),
-                    "modality": execution.modality,
-                    "tribe_inference_seconds": round(execution.inference_duration_seconds, 3),
-                    "postprocess_seconds": round(postprocess_duration_seconds, 3),
-                    "persistence_seconds": round(persistence_duration_seconds, 3),
-                    "total_duration_seconds": round(total_duration_seconds, 3),
-                },
-            },
-        )
-        metrics.increment("prediction_jobs_total", labels={"status": "succeeded"})
+            total_finished_at = time.perf_counter()
+            log_event(
+                logger,
+                "prediction_persist_finished",
+                prediction_result_id=str(prediction_result.id),
+                modality=execution.modality,
+                duration_ms=duration_ms(persistence_started_at, persistence_finished_at),
+                status="succeeded",
+            )
+            log_event(
+                logger,
+                "prediction_job_succeeded",
+                prediction_result_id=str(prediction_result.id),
+                modality=execution.modality,
+                duration_ms=duration_ms(total_started_at, total_finished_at),
+                postprocess_duration_ms=duration_ms(postprocess_started_at, postprocess_finished_at),
+                status="succeeded",
+            )
+            metrics.increment("prediction_jobs_total", labels={"status": "succeeded"})

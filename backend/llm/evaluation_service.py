@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from backend.core.config import settings
-from backend.core.logging import get_logger
+from backend.core.logging import get_logger, log_event, log_exception
 from backend.schemas.evaluators import EvaluationMode, EvaluationResult
 
 from .llm_client import (
@@ -65,6 +65,7 @@ class EvaluationService:
             temperature=settings.llm_temperature,
             top_p=settings.llm_top_p,
             max_tokens=settings.llm_max_tokens,
+            think=settings.llm_ollama_think,
         )
         return cls(llm_client=create_llm_client(config))
 
@@ -94,35 +95,31 @@ class EvaluationService:
                 response_schema=prompt_payload["response_schema"],
             )
         except (LLMTransportError, LLMResponseFormatError, LLMClientError) as exc:
-            logger.exception(
-                "LLM evaluation transport/format failure.",
-                extra={
-                    "event": "llm_evaluation_failed",
-                    "extra_fields": {
-                        "mode": request.mode.value,
-                        "provider": self.llm_client.config.provider,
-                        "model": self.llm_client.config.model,
-                        "error": str(exc),
-                    },
-                },
+            log_exception(
+                logger,
+                "llm_evaluation_failed",
+                exc,
+                mode=request.mode.value,
+                provider=self.llm_client.config.provider,
+                model=self.llm_client.config.model,
+                status="failed",
             )
             raise EvaluationServiceError(f"LLM evaluation failed: {exc}") from exc
 
         try:
             validated_result = EvaluationResult.model_validate(generation.parsed_json)
         except ValidationError as exc:
-            logger.warning(
-                "LLM evaluation JSON failed schema validation.",
-                extra={
-                    "event": "llm_evaluation_schema_mismatch",
-                    "extra_fields": {
-                        "mode": request.mode.value,
-                        "provider": self.llm_client.config.provider,
-                        "model": self.llm_client.config.model,
-                        "error": str(exc),
-                        "raw_text": generation.metadata.get("raw_text", "")[:2_000],
-                    },
-                },
+            log_event(
+                logger,
+                "llm_evaluation_schema_mismatch",
+                level="warning",
+                mode=request.mode.value,
+                provider=self.llm_client.config.provider,
+                model=self.llm_client.config.model,
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+                raw_text_char_count=len(str(generation.metadata.get("raw_text") or "")),
+                status="invalid",
             )
             raise EvaluationServiceError(f"Model JSON did not match EvaluationResult schema: {exc}") from exc
 

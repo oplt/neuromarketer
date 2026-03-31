@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.core.logging import duration_ms, get_logger, log_event, log_exception
 from backend.services.storage import build_s3_client
+
+logger = get_logger(__name__)
 
 
 @dataclass(slots=True)
@@ -27,18 +31,46 @@ class AssetLoader:
         self.s3_client = build_s3_client()
 
     def load(self, *, storage_uri: str, mime_type: str | None = None) -> LoadedAsset:
-        if storage_uri.startswith("s3://"):
-            return self._load_from_s3(storage_uri=storage_uri, mime_type=mime_type)
-        if storage_uri.startswith("file://"):
-            path = storage_uri.replace("file://", "", 1)
-            return self._load_from_local_path(local_path=path, storage_uri=storage_uri, mime_type=mime_type)
-        if storage_uri.startswith("/"):
-            return self._load_from_local_path(
-                local_path=storage_uri,
-                storage_uri=f"file://{storage_uri}",
+        started_at = time.perf_counter()
+        try:
+            if storage_uri.startswith("s3://"):
+                loaded_asset = self._load_from_s3(storage_uri=storage_uri, mime_type=mime_type)
+            elif storage_uri.startswith("file://"):
+                path = storage_uri.replace("file://", "", 1)
+                loaded_asset = self._load_from_local_path(local_path=path, storage_uri=storage_uri, mime_type=mime_type)
+            elif storage_uri.startswith("/"):
+                loaded_asset = self._load_from_local_path(
+                    local_path=storage_uri,
+                    storage_uri=f"file://{storage_uri}",
+                    mime_type=mime_type,
+                )
+            else:
+                raise ValueError(f"Unsupported storage URI: {storage_uri}")
+
+            finished_at = time.perf_counter()
+            log_event(
+                logger,
+                "asset_loaded",
+                storage_uri=storage_uri,
                 mime_type=mime_type,
+                filename=loaded_asset.filename,
+                file_size_bytes=loaded_asset.file_size_bytes,
+                duration_ms=duration_ms(started_at, finished_at),
+                status="succeeded",
             )
-        raise ValueError(f"Unsupported storage URI: {storage_uri}")
+            return loaded_asset
+        except Exception as exc:
+            finished_at = time.perf_counter()
+            log_exception(
+                logger,
+                "asset_load_failed",
+                exc,
+                storage_uri=storage_uri,
+                mime_type=mime_type,
+                duration_ms=duration_ms(started_at, finished_at),
+                status="failed",
+            )
+            raise
 
     def _load_from_s3(self, *, storage_uri: str, mime_type: str | None) -> LoadedAsset:
         without_scheme = storage_uri.replace("s3://", "", 1)

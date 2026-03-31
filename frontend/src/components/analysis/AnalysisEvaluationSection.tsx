@@ -259,10 +259,7 @@ function AnalysisEvaluationSection({
     () => selectedModes.map((mode) => recordsByMode[mode]).filter(Boolean),
     [recordsByMode, selectedModes],
   )
-  const hasCachedSelection = selectedModes.some((mode) => {
-    const record = recordsByMode[mode]
-    return Boolean(record && record.evaluation_json)
-  })
+  const hasExistingSelection = selectedModes.some((mode) => Boolean(recordsByMode[mode]))
 
   return (
     <Stack spacing={3}>
@@ -289,7 +286,7 @@ function AnalysisEvaluationSection({
                 {isSubmitting ? 'Submitting…' : 'Generate evaluation'}
               </Button>
               <Button
-                disabled={!analysisCompleted || selectedModes.length === 0 || !hasCachedSelection || isSubmitting}
+                disabled={!analysisCompleted || selectedModes.length === 0 || !hasExistingSelection || isSubmitting}
                 onClick={() => void requestEvaluations(true)}
                 startIcon={<CachedRounded />}
                 variant="outlined"

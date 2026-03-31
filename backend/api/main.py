@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
+from asgi_correlation_id import CorrelationIdMiddleware
 
 from backend.api.errors import register_exception_handlers
-from backend.api.middleware import RequestContextMiddleware
 from backend.api.router.analysis import router as analysis_router
 from backend.api.router.auth import router as auth_router
 from backend.api.router.creative_versions import router as creative_versions_router
@@ -15,10 +15,13 @@ from backend.api.router.uploads import router as uploads_router
 from backend.core.config import settings
 from backend.core.logging import configure_logging
 from backend.core.metrics import metrics
+from backend.core.telemetry import configure_telemetry
 from backend.db.session import close_db, database_is_ready, init_db
+from backend.middleware.request_context import RequestContextMiddleware
 from backend.schemas.schemas import HealthResponse
 
 configure_logging()
+configure_telemetry()
 
 
 @asynccontextmanager
@@ -34,6 +37,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(
+    CorrelationIdMiddleware,
+    header_name="X-Request-ID",
+    update_request_header=True,
+)
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -42,6 +50,7 @@ app.add_middleware(
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Correlation-ID"],
 )
 
 register_exception_handlers(app)

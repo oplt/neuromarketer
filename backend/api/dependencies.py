@@ -7,6 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.exceptions import UnauthorizedAppError
+from backend.core.log_context import bind_log_context
 from backend.core.security import verify_session_token
 from backend.db.models import Organization, Project, User
 from backend.db.repositories import crud
@@ -45,6 +46,11 @@ async def require_authenticated_context(
         db,
         organization_id=organization.id,
         created_by_user_id=user.id,
+    )
+    bind_log_context(
+        user_id=str(user.id),
+        org_id=str(organization.id),
+        project_id=str(default_project.id),
     )
     return AuthenticatedRequestContext(
         user=user,

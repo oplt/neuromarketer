@@ -171,3 +171,14 @@ class AnalysisResultRead(BaseModel):
 class AnalysisJobStatusResponse(BaseModel):
     job: AnalysisJobRead
     result: AnalysisResultRead | None = None
+
+
+class AnalysisJobListItemRead(BaseModel):
+    job: AnalysisJobRead
+    asset: AnalysisAssetRead | None = None
+    has_result: bool = False
+    result_created_at: datetime | None = None
+
+
+class AnalysisJobListResponse(BaseModel):
+    items: list[AnalysisJobListItemRead] = Field(default_factory=list)

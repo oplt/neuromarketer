@@ -164,6 +164,11 @@
   gap: 12px;
 }
 
+.analysis-job-history {
+  display: grid;
+  gap: 12px;
+}
+
 .analysis-asset-library__item {
   padding: 14px 16px;
   border-radius: 18px;
@@ -172,12 +177,30 @@
   transition: border-color 160ms ease, transform 160ms ease, background-color 160ms ease;
 }
 
+.analysis-job-history__item {
+  padding: 14px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.82);
+  transition: border-color 160ms ease, transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
 .analysis-asset-library__item.is-selected {
   border-color: rgba(20, 184, 166, 0.28);
   background: linear-gradient(180deg, rgba(20, 184, 166, 0.08), rgba(255, 255, 255, 0.96));
 }
 
+.analysis-job-history__item.is-selected {
+  border-color: rgba(59, 91, 219, 0.32);
+  background: linear-gradient(180deg, rgba(59, 91, 219, 0.08), rgba(255, 255, 255, 0.96));
+  box-shadow: inset 0 0 0 1px rgba(59, 91, 219, 0.08);
+}
+
 .analysis-asset-library__item:hover {
+  transform: translateY(-1px);
+}
+
+.analysis-job-history__item:hover {
   transform: translateY(-1px);
 }
 

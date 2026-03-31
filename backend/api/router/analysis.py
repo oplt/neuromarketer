@@ -14,6 +14,7 @@ from backend.schemas.analysis import (
     AnalysisAssetListResponse,
     AnalysisConfigResponse,
     AnalysisJobCreateRequest,
+    AnalysisJobListResponse,
     AnalysisJobStatusResponse,
     AnalysisResultRead,
     AnalysisUploadCompleteRequest,
@@ -57,6 +58,21 @@ async def list_analysis_assets(
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
 ) -> AnalysisAssetListResponse:
     return await AnalysisApplicationService(db).list_assets(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        media_type=media_type,
+        limit=limit,
+    )
+
+
+@router.get("/jobs", response_model=AnalysisJobListResponse)
+async def list_analysis_jobs(
+    media_type: MediaType | None = Query(default=None),
+    limit: int = Query(default=12, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisJobListResponse:
+    return await AnalysisApplicationService(db).list_jobs(
         user_id=auth.user.id,
         project_id=auth.default_project.id,
         media_type=media_type,
