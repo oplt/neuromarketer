@@ -85,7 +85,7 @@ Frontend tasks
 
 Backend tasks
 - [x] Provide a lightweight analytics ingestion path or integrate the existing logging pipeline with product events.
-- [ ] Include job timing metadata for queue wait time, processing time, and result delivery time.
+- [x] Include job timing metadata for queue wait time, processing time, and result delivery time.
 - [x] Make sure analytics collection is safe for authenticated multi-user environments.
 
 Research tasks
@@ -117,15 +117,15 @@ Frontend tasks
 - [x] Add an event-stream client helper.
 - [x] Subscribe active jobs to `/analysis/jobs/{job_id}/events`.
 - [x] Fall back to polling if the event stream fails.
-- [ ] Surface transport mode in diagnostics or developer tooling so support can debug live-update issues.
-- [ ] Add UI messaging for reconnect attempts and degraded polling mode.
+- [x] Surface transport mode in diagnostics or developer tooling so support can debug live-update issues.
+- [x] Add UI messaging for reconnect attempts and degraded polling mode.
 
 Backend tasks
 - [x] Add an authenticated SSE endpoint for job events.
 - [x] Publish job lifecycle events for running, completed, and failed states.
 - [x] Support Redis pub/sub when available and DB-based snapshot fallback when Redis is unavailable.
-- [ ] Add heartbeat events so proxies do not silently close long-lived streams.
-- [ ] Add more granular stage events such as upload finalized, queued, inference started, post-processing started, and evaluation started.
+- [x] Add heartbeat events so proxies do not silently close long-lived streams.
+- [x] Add more granular stage events such as upload finalized, queued, inference started, post-processing started, and evaluation started.
 
 Operations tasks
 - [ ] Validate SSE behavior behind the deployed reverse proxy and hosting stack.
@@ -145,10 +145,10 @@ Frontend tasks
 - [x] Show extracted scenes or frame summaries before final scoring is ready.
 - [x] Display provisional metrics with clear "updating" treatment.
 - [x] Reveal recommendations and LLM critique only when those stages complete.
-- [ ] Add skeleton states that align with actual pipeline stages rather than generic loading spinners.
+- [x] Add skeleton states that align with actual pipeline stages rather than generic loading spinners.
 
 Backend tasks
-- [ ] Emit intermediate snapshots for scene extraction, primary scoring, post-processing, and evaluation.
+- [x] Emit intermediate snapshots for scene extraction, primary scoring, post-processing, and evaluation.
 - [x] Define a stable partial-result schema so the UI can progressively hydrate sections.
 - [ ] Persist staged outputs only if needed for retries or page refresh restoration.
 - [x] Ensure partial payloads do not expose invalid or misleading "final" values.

@@ -179,12 +179,38 @@ class InferenceRepository:
         job.status = JobStatus.FAILED
         job.error_message = error_message
         job.completed_at = datetime.now(timezone.utc)
+        runtime_params = dict(job.runtime_params or {})
+        current_progress = dict(runtime_params.get("analysis_progress") or {})
+        current_diagnostics = dict(current_progress.get("diagnostics") or {})
+        runtime_params["analysis_progress"] = {
+            "stage": "failed",
+            "stage_label": current_progress.get("stage_label") or "The analysis stopped before results were produced.",
+            "diagnostics": current_diagnostics,
+            "is_partial": False,
+        }
+        job.runtime_params = runtime_params
         await self.session.flush()
 
     async def mark_job_succeeded(self, job: InferenceJob) -> None:
         job.status = JobStatus.SUCCEEDED
         job.error_message = None
         job.completed_at = datetime.now(timezone.utc)
+        await self.session.flush()
+
+    async def reset_job_for_rerun(self, job: InferenceJob) -> None:
+        """Reset a FAILED or CANCELED job back to QUEUED so it can be re-dispatched."""
+        job.status = JobStatus.QUEUED
+        job.error_message = None
+        job.started_at = None
+        job.completed_at = None
+        runtime_params = dict(job.runtime_params or {})
+        runtime_params["analysis_progress"] = {
+            "stage": "queued",
+            "stage_label": "Upload finalized. The analysis job is queued and waiting for worker capacity.",
+            "diagnostics": {},
+            "is_partial": False,
+        }
+        job.runtime_params = runtime_params
         await self.session.flush()
 
     async def replace_prediction_result(

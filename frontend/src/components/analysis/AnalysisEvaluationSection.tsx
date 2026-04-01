@@ -13,6 +13,7 @@ import {
   Divider,
   LinearProgress,
   Paper,
+  Skeleton,
   Stack,
   Typography,
 } from '@mui/material'
@@ -103,6 +104,15 @@ type AnalysisEvaluationRecord = {
   model_name?: string | null
   prompt_version?: string | null
   evaluation_json?: AnalysisEvaluationResult | null
+  metadata_json?: {
+    progress?: {
+      stage?: string | null
+      stage_label?: string | null
+      sections_ready?: string[]
+      expected_sections?: string[]
+      updated_at?: string | null
+    }
+  } | null
   error_message?: string | null
   created_at: string
   updated_at: string
@@ -112,10 +122,18 @@ type AnalysisEvaluationListResponse = {
   items: AnalysisEvaluationRecord[]
 }
 
+export type AnalysisEvaluationProgressSnapshot = {
+  jobId: string
+  mode: AnalysisEvaluationMode
+  stage: string
+  stageLabel: string | null
+}
+
 type AnalysisEvaluationSectionProps = {
   sessionToken: string | null
   jobId: string | null
   analysisCompleted: boolean
+  onProgressSnapshot?: (snapshot: AnalysisEvaluationProgressSnapshot | null) => void
 }
 
 const modeDefinitions: Array<{
@@ -159,6 +177,7 @@ function AnalysisEvaluationSection({
   sessionToken,
   jobId,
   analysisCompleted,
+  onProgressSnapshot,
 }: AnalysisEvaluationSectionProps) {
   const [selectedModes, setSelectedModes] = useState<AnalysisEvaluationMode[]>([])
   const [recordsByMode, setRecordsByMode] = useState<Record<string, AnalysisEvaluationRecord>>({})
@@ -168,8 +187,8 @@ function AnalysisEvaluationSection({
 
   const applyResponse = (response: AnalysisEvaluationListResponse) => {
     startTransition(() => {
-      setRecordsByMode((current) => {
-        const next = { ...current }
+      setRecordsByMode(() => {
+        const next: Record<string, AnalysisEvaluationRecord> = {}
         response.items.forEach((item) => {
           next[item.mode] = item
         })
@@ -183,6 +202,13 @@ function AnalysisEvaluationSection({
       })
     })
   }
+
+  useEffect(() => {
+    startTransition(() => {
+      setRecordsByMode({})
+      setRequestError(null)
+    })
+  }, [jobId])
 
   const loadEvaluations = useEffectEvent(async () => {
     if (!sessionToken || !jobId || !analysisCompleted) {
@@ -243,7 +269,7 @@ function AnalysisEvaluationSection({
     if (!sessionToken || !jobId) {
       return
     }
-    const activeRecords = Object.values(recordsByMode)
+    const activeRecords = Object.values(recordsByMode).filter((record) => record.job_id === jobId)
     if (!activeRecords.some((record) => record.status === 'queued' || record.status === 'processing')) {
       return
     }
@@ -259,7 +285,49 @@ function AnalysisEvaluationSection({
     () => selectedModes.map((mode) => recordsByMode[mode]).filter(Boolean),
     [recordsByMode, selectedModes],
   )
+  const activeProgressSnapshot = useMemo<AnalysisEvaluationProgressSnapshot | null>(() => {
+    if (!jobId) {
+      return null
+    }
+
+    const activeRecords = Object.values(recordsByMode).filter((record) => record.job_id === jobId)
+    const activeRecord =
+      activeRecords.find((record) => record.status === 'processing') ??
+      activeRecords.find((record) => record.status === 'queued') ??
+      null
+
+    if (!activeRecord) {
+      return null
+    }
+
+    const progress = activeRecord.metadata_json?.progress
+    const stage =
+      progress?.stage ||
+      (activeRecord.status === 'processing'
+        ? 'evaluation_started'
+        : activeRecord.status === 'queued'
+          ? 'evaluation_queued'
+          : '')
+
+    if (!stage) {
+      return null
+    }
+
+    return {
+      jobId,
+      mode: activeRecord.mode,
+      stage,
+      stageLabel: progress?.stage_label ?? defaultEvaluationStageLabel(activeRecord.mode, activeRecord.status),
+    }
+  }, [jobId, recordsByMode])
   const hasExistingSelection = selectedModes.some((mode) => Boolean(recordsByMode[mode]))
+
+  useEffect(() => {
+    if (!onProgressSnapshot) {
+      return
+    }
+    onProgressSnapshot(activeProgressSnapshot)
+  }, [activeProgressSnapshot, onProgressSnapshot])
 
   return (
     <Stack spacing={3}>
@@ -334,6 +402,7 @@ function AnalysisEvaluationSection({
             <Alert severity="info">LLM evaluation becomes available after the core analysis job is completed.</Alert>
           ) : null}
           {requestError ? <Alert severity="error">{requestError}</Alert> : null}
+          {activeProgressSnapshot?.stageLabel ? <Alert severity="info">{activeProgressSnapshot.stageLabel}</Alert> : null}
           {isLoading ? <LinearProgress /> : null}
         </Stack>
       </Paper>
@@ -371,9 +440,13 @@ function AnalysisEvaluationSection({
               {selectedRecords.map((record) => (
                 <Box className="analysis-evaluation-summary-card" key={`summary-${record.mode}`}>
                   <Typography variant="subtitle2">{toModeLabel(record.mode)}</Typography>
-                  <Typography variant="h4">
-                    {record.evaluation_json ? Math.round(record.evaluation_json.scores.fit_for_purpose) : '--'}
-                  </Typography>
+                  {record.evaluation_json ? (
+                    <Typography variant="h4">{Math.round(record.evaluation_json.scores.fit_for_purpose)}</Typography>
+                  ) : record.status === 'queued' || record.status === 'processing' ? (
+                    <Skeleton height={42} sx={{ transform: 'none' }} width={56} />
+                  ) : (
+                    <Typography variant="h4">--</Typography>
+                  )}
                   <Typography color="text.secondary" variant="body2">
                     Fit for purpose
                   </Typography>
@@ -397,6 +470,12 @@ function EvaluationModeCard({
   const definition = modeDefinitions.find((item) => item.mode === mode) ?? modeDefinitions[0]
   const evaluation = record?.evaluation_json ?? null
   const domainSections = evaluation ? buildDomainSections(evaluation) : []
+  const progress = record?.metadata_json?.progress ?? null
+  const isLoading = record?.status === 'queued' || record?.status === 'processing'
+  const loadingStage =
+    progress?.stage ||
+    (record?.status === 'processing' ? 'evaluation_started' : record?.status === 'queued' ? 'evaluation_queued' : null)
+  const loadingLabel = progress?.stage_label ?? (record ? defaultEvaluationStageLabel(mode, record.status) : null)
 
   return (
     <Paper className="dashboard-card analysis-evaluation-card" data-testid={`evaluation-card-${mode}`} elevation={0}>
@@ -415,7 +494,8 @@ function EvaluationModeCard({
           />
         </Stack>
 
-        {record?.status === 'queued' || record?.status === 'processing' ? <LinearProgress /> : null}
+        {isLoading ? <LinearProgress /> : null}
+        {isLoading && loadingLabel ? <Alert severity="info">{loadingLabel}</Alert> : null}
         {record?.error_message ? (
           <Alert severity={evaluation ? 'warning' : 'error'}>
             {evaluation
@@ -430,6 +510,14 @@ function EvaluationModeCard({
               No evaluation has been requested for this mode yet.
             </Typography>
           </Box>
+        ) : null}
+
+        {!evaluation && isLoading ? (
+          <EvaluationLoadingState
+            loadingLabel={loadingLabel}
+            mode={mode}
+            stage={loadingStage}
+          />
         ) : null}
 
         {evaluation ? (
@@ -555,6 +643,67 @@ function EvaluationModeCard({
         ) : null}
       </Stack>
     </Paper>
+  )
+}
+
+function EvaluationLoadingState({
+  mode,
+  stage,
+  loadingLabel,
+}: {
+  mode: AnalysisEvaluationMode
+  stage: string | null
+  loadingLabel: string | null
+}) {
+  const stageDetail =
+    stage === 'evaluation_started'
+      ? 'Analysis sections are loaded. Verdict, scorecard, risks, and recommendations are being drafted now.'
+      : 'The evaluation request is queued. The worker will read the completed analysis snapshot when capacity is available.'
+
+  return (
+    <Stack data-testid={`evaluation-loading-${mode}`} spacing={1.5}>
+      <Typography color="text.secondary" variant="body2">
+        {loadingLabel || stageDetail}
+      </Typography>
+      <Stack spacing={1}>
+        <Skeleton height={34} sx={{ transform: 'none' }} width="72%" />
+        <Skeleton height={18} sx={{ transform: 'none' }} width="100%" />
+        <Skeleton height={18} sx={{ transform: 'none' }} width="88%" />
+      </Stack>
+      <Box className="analysis-evaluation-score-grid">
+        {Array.from({ length: 5 }).map((_, index) => (
+          <Skeleton key={`${mode}-score-${index}`} height={88} sx={{ borderRadius: '18px', transform: 'none' }} variant="rounded" />
+        ))}
+      </Box>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle2">Strengths and weaknesses</Typography>
+        <Skeleton height={72} sx={{ transform: 'none' }} variant="rounded" />
+      </Stack>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle2">Risks</Typography>
+        <Skeleton height={96} sx={{ transform: 'none' }} variant="rounded" />
+      </Stack>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle2">Recommendations</Typography>
+        <Skeleton height={96} sx={{ transform: 'none' }} variant="rounded" />
+      </Stack>
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle2">Scorecard</Typography>
+        <Box className="analysis-evaluation-scorecard-grid">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <Skeleton
+              key={`${mode}-scorecard-${index}`}
+              height={112}
+              sx={{ borderRadius: '18px', transform: 'none' }}
+              variant="rounded"
+            />
+          ))}
+        </Box>
+      </Stack>
+      <Typography color="text.secondary" variant="caption">
+        {stageDetail}
+      </Typography>
+    </Stack>
   )
 }
 
@@ -693,6 +842,16 @@ function toggleMode(current: AnalysisEvaluationMode[], nextMode: AnalysisEvaluat
 
 function toModeLabel(mode: AnalysisEvaluationMode) {
   return modeDefinitions.find((item) => item.mode === mode)?.label ?? mode
+}
+
+function defaultEvaluationStageLabel(mode: AnalysisEvaluationMode, status: AnalysisEvaluationStatus) {
+  if (status === 'processing') {
+    return `${toModeLabel(mode)} evaluation is reading the completed analysis snapshot.`
+  }
+  if (status === 'queued') {
+    return `${toModeLabel(mode)} evaluation queued. Waiting for worker capacity.`
+  }
+  return null
 }
 
 function formatTimestampRange(start?: number | null, end?: number | null) {

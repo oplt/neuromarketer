@@ -132,6 +132,35 @@ async def get_user_by_id(db: AsyncSession, user_id: UUID) -> User | None:
     return result.scalar_one_or_none()
 
 
+async def get_user_and_organization(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> tuple[User | None, Organization | None]:
+    """Single-query fetch of user and organization, using a JOIN through membership.
+
+    Replaces two separate queries in the auth-context dependency hot path.
+    Returns ``(None, None)`` when either entity is missing or the user is not
+    a member of the requested organization.
+    """
+    result = await db.execute(
+        select(User, Organization)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .join(Organization, Organization.id == OrganizationMembership.organization_id)
+        .where(
+            User.id == user_id,
+            Organization.id == organization_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+        .limit(1)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None, None
+    return row[0], row[1]
+
+
 async def get_primary_organization_for_user(
     db: AsyncSession,
     user_id: UUID,

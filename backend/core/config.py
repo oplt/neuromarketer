@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     tribe_model_repo_id: str = Field(default="facebook/tribev2", validation_alias="TRIBE_MODEL_REPO_ID")
     tribe_checkpoint_name: str = Field(default="best.ckpt", validation_alias="TRIBE_CHECKPOINT_NAME")
     tribe_cache_folder: str = Field(default="./cache/tribev2", validation_alias="TRIBE_CACHE_FOLDER")
+    asset_cache_folder: str = Field(default="./cache/assets", validation_alias="ASSET_CACHE_FOLDER")
     tribe_device: str = Field(default="auto", validation_alias="TRIBE_DEVICE")
     tribe_feature_cluster: str | None = Field(default=None, validation_alias="TRIBE_FEATURE_CLUSTER")
     tribe_hf_token: str | None = Field(
@@ -274,6 +275,17 @@ class Settings(BaseSettings):
             "testing": "test",
         }
         return aliases.get(normalized, value)
+
+    @model_validator(mode="after")
+    def _block_insecure_production_defaults(self) -> "Settings":
+        if self.app_env == "production":
+            insecure_secrets = ("dev-session-secret", "CHANGE_ME_USE_openssl_rand_hex_64", "")
+            if self.session_secret in insecure_secrets or len(self.session_secret) < 32:
+                raise ValueError(
+                    "SESSION_SECRET must be set to a strong random value (>=32 chars) in production. "
+                    "Generate one with: openssl rand -hex 64"
+                )
+        return self
 
     @field_validator("log_format", mode="before")
     @classmethod

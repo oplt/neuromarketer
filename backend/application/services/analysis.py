@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -28,9 +29,11 @@ from backend.schemas.analysis import (
     AnalysisConfigResponse,
     AnalysisClientEventRequest,
     AnalysisGoalPresetsResponse,
+    AnalysisJobDiagnosticsRead,
     AnalysisJobRead,
     AnalysisJobListItemRead,
     AnalysisJobListResponse,
+    AnalysisJobProgressRead,
     AnalysisJobStatusResponse,
     AnalysisResultRead,
     AnalysisUploadCreateRequest,
@@ -647,6 +650,12 @@ class AnalysisApplicationService:
                     "analysis_surface": "analysis_dashboard",
                     "asset_id": str(asset.id),
                     "media_type": media_type,
+                    "analysis_progress": {
+                        "stage": "queued",
+                        "stage_label": "Upload finalized. The analysis job is queued and waiting for worker capacity.",
+                        "diagnostics": {},
+                        "is_partial": False,
+                    },
                 },
             )
         )
@@ -688,6 +697,24 @@ class AnalysisApplicationService:
         if result is None:
             raise ConflictAppError("Analysis results are not ready yet.")
         return result
+
+    async def get_asset_media(
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+        asset_id: UUID,
+    ) -> tuple[AnalysisAssetRead, bytes, str | None]:
+        asset = await self.uploads.get_stored_artifact(asset_id)
+        if asset is None or asset.created_by_user_id != user_id or asset.project_id != project_id:
+            raise NotFoundAppError("Asset not found.")
+
+        body, content_type = await run_in_threadpool(
+            self._storage().get_object_bytes,
+            bucket_name=asset.bucket_name,
+            storage_key=asset.storage_key,
+        )
+        return self._build_asset_read(asset), body, content_type or asset.mime_type
 
     def _validate_payload(self, payload: AnalysisUploadCreateRequest) -> None:
         if payload.size_bytes > settings.upload_max_size_bytes:
@@ -760,6 +787,7 @@ class AnalysisApplicationService:
             job=self._build_job_read(job),
             result=self._build_result(job),
             asset=self._build_asset_read(asset) if asset is not None else None,
+            progress=self._build_job_progress(job),
         )
 
     async def _load_job_asset(self, job: InferenceJob):
@@ -790,6 +818,67 @@ class AnalysisApplicationService:
             created_at=job.created_at,
         )
 
+    def _build_job_progress(self, job: InferenceJob) -> AnalysisJobProgressRead | None:
+        runtime_params = job.runtime_params or {}
+        raw_progress = runtime_params.get("analysis_progress") if isinstance(runtime_params, dict) else None
+        progress_payload = raw_progress if isinstance(raw_progress, dict) else {}
+        diagnostics = self._build_job_diagnostics(job, progress_payload.get("diagnostics"))
+
+        status = self._map_job_status(job.status)
+        stage = self._normalize_optional_string(progress_payload.get("stage"))
+        stage_label = self._normalize_optional_string(progress_payload.get("stage_label"))
+
+        if stage is None:
+            if status == "queued":
+                stage = "queued"
+                stage_label = stage_label or "The job is queued and waiting for worker capacity."
+            elif status == "processing":
+                stage = "processing"
+                stage_label = stage_label or "The worker is processing the asset."
+            elif status == "completed":
+                stage = "completed"
+                stage_label = stage_label or "Results are ready."
+            elif status == "failed":
+                stage = "failed"
+                stage_label = stage_label or "The analysis stopped before results were produced."
+
+        if stage is None and not any(value is not None for value in diagnostics.model_dump().values()):
+            return None
+
+        return AnalysisJobProgressRead(
+            stage=stage or status,
+            stage_label=stage_label,
+            diagnostics=diagnostics,
+            is_partial=bool(progress_payload.get("is_partial")),
+        )
+
+    def _build_job_diagnostics(
+        self,
+        job: InferenceJob,
+        raw_diagnostics: Any,
+    ) -> AnalysisJobDiagnosticsRead:
+        diagnostics_payload = raw_diagnostics if isinstance(raw_diagnostics, dict) else {}
+
+        queue_wait_ms = self._coerce_non_negative_int(diagnostics_payload.get("queue_wait_ms"))
+        if queue_wait_ms is None:
+            queue_wait_ms = self._calculate_elapsed_ms(job.created_at, job.started_at)
+
+        processing_duration_ms = self._coerce_non_negative_int(diagnostics_payload.get("processing_duration_ms"))
+        if processing_duration_ms is None:
+            processing_duration_ms = self._calculate_elapsed_ms(job.started_at, job.completed_at)
+
+        result_delivery_ms = self._coerce_non_negative_int(diagnostics_payload.get("result_delivery_ms"))
+        if result_delivery_ms is None:
+            result_delivery_ms = self._calculate_elapsed_ms(job.created_at, job.completed_at)
+
+        return AnalysisJobDiagnosticsRead(
+            queue_wait_ms=queue_wait_ms,
+            processing_duration_ms=processing_duration_ms,
+            time_to_first_result_ms=self._coerce_non_negative_int(diagnostics_payload.get("time_to_first_result_ms")),
+            result_delivery_ms=result_delivery_ms,
+            postprocess_duration_ms=self._coerce_non_negative_int(diagnostics_payload.get("postprocess_duration_ms")),
+        )
+
     def _build_result(self, job: InferenceJob) -> AnalysisResultRead | None:
         if job.status != JobStatus.SUCCEEDED:
             return None
@@ -813,6 +902,26 @@ class AnalysisApplicationService:
             recommendations_json=record.recommendations_json or [],
             created_at=record.created_at,
         )
+
+    def _coerce_non_negative_int(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            coerced = int(value)
+        except (TypeError, ValueError):
+            return None
+        return max(coerced, 0)
+
+    def _calculate_elapsed_ms(self, started_at: datetime | None, finished_at: datetime | None) -> int | None:
+        if started_at is None or finished_at is None:
+            return None
+        return max(int((finished_at - started_at).total_seconds() * 1000), 0)
+
+    def _normalize_optional_string(self, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
 
     def _ensure_job_ownership(self, job: InferenceJob, *, user_id: UUID) -> None:
         if job.created_by_user_id != user_id:

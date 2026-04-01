@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
+from backend.api.rate_limit import limiter
 from backend.application.services.auth_service import AuthApplicationService, AuthClientMetadata
 from backend.db.session import get_db
 from backend.schemas.schemas import (
@@ -19,6 +20,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.post("/signup", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def sign_up(
     payload: SignUpRequest,
     request: Request,
@@ -31,6 +33,7 @@ async def sign_up(
 
 
 @router.post("/signin", response_model=AuthResponse)
+@limiter.limit("10/minute")
 async def sign_in(
     payload: SignInRequest,
     request: Request,
@@ -43,6 +46,7 @@ async def sign_in(
 
 
 @router.post("/mfa/verify", response_model=AuthResponse)
+@limiter.limit("10/minute")
 async def verify_mfa_challenge(
     payload: MfaChallengeVerifyRequest,
     request: Request,

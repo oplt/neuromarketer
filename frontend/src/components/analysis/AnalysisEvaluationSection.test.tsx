@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AnalysisEvaluationSection from './AnalysisEvaluationSection'
@@ -66,9 +66,45 @@ function buildRecord(mode: 'marketing' | 'social_media') {
   }
 }
 
+function buildQueuedRecord(mode: 'marketing' | 'social_media', jobId: string) {
+  return {
+    ...buildRecord(mode),
+    job_id: jobId,
+    status: 'queued',
+    evaluation_json: null,
+    metadata_json: {
+      progress: {
+        stage: 'evaluation_queued',
+        stage_label: `${mode === 'marketing' ? 'Marketing' : 'Social media'} evaluation queued. Waiting for worker capacity.`,
+      },
+    },
+  }
+}
+
+function buildProcessingRecord(mode: 'marketing' | 'social_media', jobId: string) {
+  return {
+    ...buildQueuedRecord(mode, jobId),
+    status: 'processing',
+    metadata_json: {
+      progress: {
+        stage: 'evaluation_started',
+        stage_label: `${mode === 'marketing' ? 'Marketing' : 'Social media'} evaluation is reading the completed analysis snapshot.`,
+      },
+    },
+  }
+}
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+}
+
 describe('AnalysisEvaluationSection', () => {
   beforeEach(() => {
     mockedApiRequest.mockReset()
+    vi.useRealTimers()
   })
 
   it('renders multiple evaluation modes side by side from cached results', async () => {
@@ -93,5 +129,89 @@ describe('AnalysisEvaluationSection', () => {
     expect(screen.getByText('marketing verdict')).toBeTruthy()
     expect(screen.getByText('social_media verdict')).toBeTruthy()
     expect(screen.getByText('Comparison snapshot')).toBeTruthy()
+  })
+
+  it('stops polling stale queued records after switching to a different job', async () => {
+    vi.useFakeTimers()
+    mockedApiRequest.mockImplementation(async (path) => {
+      if (path === '/api/v1/analysis/jobs/job-1/evaluations') {
+        return {
+          items: [buildQueuedRecord('marketing', 'job-1')],
+        }
+      }
+      if (path === '/api/v1/analysis/jobs/job-2/evaluations') {
+        return {
+          items: [],
+        }
+      }
+      throw new Error(`Unexpected path: ${String(path)}`)
+    })
+
+    const { rerender } = render(
+      <AnalysisEvaluationSection
+        analysisCompleted
+        jobId="job-1"
+        sessionToken="session-token"
+      />,
+    )
+
+    await flushEffects()
+    expect(mockedApiRequest).toHaveBeenCalledWith('/api/v1/analysis/jobs/job-1/evaluations', {
+      sessionToken: 'session-token',
+    })
+
+    rerender(
+      <AnalysisEvaluationSection
+        analysisCompleted
+        jobId="job-2"
+        sessionToken="session-token"
+      />,
+    )
+
+    await flushEffects()
+    expect(mockedApiRequest).toHaveBeenCalledWith('/api/v1/analysis/jobs/job-2/evaluations', {
+      sessionToken: 'session-token',
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000)
+    })
+
+    expect(
+      mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs/job-2/evaluations'),
+    ).toHaveLength(1)
+  })
+
+  it('renders stage-aligned loading scaffolds and reports active evaluation progress', async () => {
+    const onProgressSnapshot = vi.fn()
+
+    mockedApiRequest.mockResolvedValue({
+      items: [buildProcessingRecord('marketing', 'job-1')],
+    })
+
+    render(
+      <AnalysisEvaluationSection
+        analysisCompleted
+        jobId="job-1"
+        onProgressSnapshot={onProgressSnapshot}
+        sessionToken="session-token"
+      />,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('evaluation-loading-marketing')).toBeTruthy()
+    })
+
+    expect(screen.getAllByText(/Marketing evaluation is reading the completed analysis snapshot/i).length).toBeGreaterThan(0)
+    expect(screen.getByText(/Verdict, scorecard, risks, and recommendations are being drafted now/i)).toBeTruthy()
+
+    await waitFor(() => {
+      expect(onProgressSnapshot).toHaveBeenCalledWith({
+        jobId: 'job-1',
+        mode: 'marketing',
+        stage: 'evaluation_started',
+        stageLabel: 'Marketing evaluation is reading the completed analysis snapshot.',
+      })
+    })
   })
 })

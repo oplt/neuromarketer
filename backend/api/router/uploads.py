@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.rate_limit import limiter
 from backend.core.log_context import bound_log_context
 from backend.application.services.uploads import UploadApplicationService
+from backend.db.repositories.uploads import UploadRepository
 from backend.db.session import get_db
 from backend.schemas.uploads import (
     DirectUploadResponse,
@@ -15,13 +17,16 @@ from backend.schemas.uploads import (
     UploadInitResponse,
     UploadSessionRead,
 )
+from backend.services.storage import S3StorageService
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
 
 @router.post("/init", response_model=UploadInitResponse)
+@limiter.limit("30/minute")
 async def init_upload(
     payload: UploadInitRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> UploadInitResponse:
     with bound_log_context(
@@ -47,7 +52,9 @@ async def init_upload(
 
 
 @router.post("/direct", response_model=DirectUploadResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("20/minute")
 async def direct_upload(
+    request: Request,
     project_id: str = Form(...),
     creative_id: str | None = Form(None),
     creative_version_id: str | None = Form(None),
@@ -75,3 +82,24 @@ async def direct_upload(
             upload_session=UploadSessionRead.model_validate(result.upload_session),
             artifact=StoredArtifactRead.model_validate(result.artifact),
         )
+
+
+@router.get("/{artifact_id}/download-url")
+@limiter.limit("60/minute")
+async def get_download_url(
+    artifact_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    repo = UploadRepository(db)
+    artifact = await repo.get_stored_artifact(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    storage = S3StorageService()
+    url = storage.generate_presigned_get_url(
+        bucket_name=artifact.bucket_name,
+        storage_key=artifact.storage_key,
+    )
+    if url is None:
+        raise HTTPException(status_code=502, detail="Could not generate download URL.")
+    return {"url": url}

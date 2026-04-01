@@ -66,6 +66,7 @@ from backend.schemas.schemas import (
     SignInRequest,
     SignUpRequest,
 )
+from backend.application.services.mfa_service import MFAService
 
 ADMIN_ROLES = {OrgRole.OWNER, OrgRole.ADMIN}
 AVAILABLE_MFA_METHODS = ["totp", "recovery_code"]
@@ -81,6 +82,7 @@ class AuthClientMetadata:
 class AuthApplicationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self._mfa = MFAService(session)
 
     async def sign_up(self, *, payload: SignUpRequest, client: AuthClientMetadata) -> AuthResponse:
         existing_user = await crud.get_user_by_email(self.session, payload.email)
@@ -400,17 +402,8 @@ class AuthApplicationService:
         user_id: UUID,
         email: str,
     ) -> AccountMfaSetupStartResponse:
-        await self._get_membership(organization_id=organization_id, user_id=user_id)
-        credential = await self._get_or_create_mfa_credential(user_id=user_id)
-        secret = create_totp_secret()
-        credential.pending_secret_ciphertext = seal_secret(secret)
-        await self.session.flush()
-        await self.session.commit()
-        issuer = settings.app_name
-        return AccountMfaSetupStartResponse(
-            secret=secret,
-            otpauth_uri=build_totp_uri(secret=secret, email=email, issuer=issuer),
-            issuer=issuer,
+        return await self._mfa.start_mfa_setup(
+            organization_id=organization_id, user_id=user_id, email=email
         )
 
     async def confirm_mfa_setup(
@@ -420,32 +413,8 @@ class AuthApplicationService:
         user_id: UUID,
         payload: AccountMfaConfirmRequest,
     ) -> AccountMfaRecoveryCodesResponse:
-        await self._get_membership(organization_id=organization_id, user_id=user_id)
-        credential = await self._get_or_create_mfa_credential(user_id=user_id)
-        pending_secret = unseal_secret(credential.pending_secret_ciphertext)
-        if not pending_secret:
-            raise ValidationAppError("Start MFA setup before confirming a code.")
-        if not verify_totp_code(payload.code, pending_secret):
-            raise ValidationAppError("The verification code is invalid.")
-
-        recovery_codes = generate_recovery_codes()
-        credential.secret_ciphertext = seal_secret(pending_secret)
-        credential.pending_secret_ciphertext = None
-        credential.is_enabled = True
-        credential.recovery_code_hashes = [hash_recovery_code(item) for item in recovery_codes]
-        credential.last_used_at = self._now()
-        await self._append_audit_log(
-            organization_id=organization_id,
-            actor_user_id=user_id,
-            action="auth.mfa.enabled",
-            entity_type="user_mfa_credential",
-            entity_id=credential.id,
-            payload_json={"method_type": credential.method_type.value},
-        )
-        await self.session.commit()
-        return AccountMfaRecoveryCodesResponse(
-            recovery_codes=recovery_codes,
-            status=await self._build_mfa_status(user_id=user_id),
+        return await self._mfa.confirm_mfa_setup(
+            organization_id=organization_id, user_id=user_id, payload=payload
         )
 
     async def disable_mfa(
@@ -455,26 +424,9 @@ class AuthApplicationService:
         user_id: UUID,
         payload: AccountMfaDisableRequest,
     ) -> AccountMfaStatusRead:
-        await self._get_membership(organization_id=organization_id, user_id=user_id)
-        credential = await self._get_mfa_credential(user_id=user_id)
-        if credential is None or not credential.is_enabled:
-            raise ValidationAppError("Multi-factor authentication is not enabled.")
-        await self._verify_mfa_assertion(credential=credential, code=payload.code, recovery_code=payload.recovery_code)
-        credential.is_enabled = False
-        credential.secret_ciphertext = None
-        credential.pending_secret_ciphertext = None
-        credential.recovery_code_hashes = []
-        credential.last_used_at = self._now()
-        await self._append_audit_log(
-            organization_id=organization_id,
-            actor_user_id=user_id,
-            action="auth.mfa.disabled",
-            entity_type="user_mfa_credential",
-            entity_id=credential.id,
-            payload_json={"method_type": credential.method_type.value},
+        return await self._mfa.disable_mfa(
+            organization_id=organization_id, user_id=user_id, payload=payload
         )
-        await self.session.commit()
-        return await self._build_mfa_status(user_id=user_id)
 
     async def regenerate_mfa_recovery_codes(
         self,
@@ -483,26 +435,8 @@ class AuthApplicationService:
         user_id: UUID,
         payload: AccountMfaDisableRequest,
     ) -> AccountMfaRecoveryCodesResponse:
-        await self._get_membership(organization_id=organization_id, user_id=user_id)
-        credential = await self._get_mfa_credential(user_id=user_id)
-        if credential is None or not credential.is_enabled:
-            raise ValidationAppError("Multi-factor authentication is not enabled.")
-        await self._verify_mfa_assertion(credential=credential, code=payload.code, recovery_code=payload.recovery_code)
-        recovery_codes = generate_recovery_codes()
-        credential.recovery_code_hashes = [hash_recovery_code(item) for item in recovery_codes]
-        credential.last_used_at = self._now()
-        await self._append_audit_log(
-            organization_id=organization_id,
-            actor_user_id=user_id,
-            action="auth.mfa.recovery_codes_regenerated",
-            entity_type="user_mfa_credential",
-            entity_id=credential.id,
-            payload_json={"remaining_codes": len(recovery_codes)},
-        )
-        await self.session.commit()
-        return AccountMfaRecoveryCodesResponse(
-            recovery_codes=recovery_codes,
-            status=await self._build_mfa_status(user_id=user_id),
+        return await self._mfa.regenerate_mfa_recovery_codes(
+            organization_id=organization_id, user_id=user_id, payload=payload
         )
 
     async def revoke_session(
@@ -744,17 +678,9 @@ class AuthApplicationService:
         code: str | None,
         recovery_code: str | None,
     ) -> None:
-        secret = unseal_secret(credential.secret_ciphertext)
-        if code and secret and verify_totp_code(code, secret):
-            return
-        if recovery_code:
-            hashed_value = hash_recovery_code(recovery_code)
-            remaining_hashes = list(credential.recovery_code_hashes or [])
-            if hashed_value in remaining_hashes:
-                remaining_hashes.remove(hashed_value)
-                credential.recovery_code_hashes = remaining_hashes
-                return
-        raise UnauthorizedAppError("The MFA verification code is invalid.")
+        await self._mfa.verify_mfa_assertion_for_credential(
+            credential=credential, code=code, recovery_code=recovery_code
+        )
 
     async def _resolve_invite(
         self,
@@ -792,31 +718,8 @@ class AuthApplicationService:
             raise NotFoundAppError("Workspace membership not found.")
         return membership
 
-    async def _get_or_create_mfa_credential(self, *, user_id: UUID) -> UserMfaCredential:
-        credential = await self._get_mfa_credential(user_id=user_id)
-        if credential is not None:
-            return credential
-        credential = UserMfaCredential(
-            user_id=user_id,
-            method_type=MfaMethodType.TOTP,
-            is_enabled=False,
-            recovery_code_hashes=[],
-            metadata_json={},
-        )
-        self.session.add(credential)
-        await self.session.flush()
-        return credential
-
     async def _get_mfa_credential(self, *, user_id: UUID) -> UserMfaCredential | None:
-        result = await self.session.execute(
-            select(UserMfaCredential)
-            .where(
-                UserMfaCredential.user_id == user_id,
-                UserMfaCredential.method_type == MfaMethodType.TOTP,
-            )
-            .limit(1)
-        )
-        return result.scalar_one_or_none()
+        return await self._mfa.get_mfa_credential(user_id=user_id)
 
     async def _list_user_sessions(
         self,
@@ -840,16 +743,7 @@ class AuthApplicationService:
         ]
 
     async def _build_mfa_status(self, *, user_id: UUID) -> AccountMfaStatusRead:
-        credential = await self._get_mfa_credential(user_id=user_id)
-        if credential is None:
-            return AccountMfaStatusRead(is_enabled=False, method_type="totp", pending_setup=False, recovery_codes_remaining=0)
-        return AccountMfaStatusRead(
-            is_enabled=credential.is_enabled,
-            method_type=credential.method_type.value,
-            recovery_codes_remaining=len(credential.recovery_code_hashes or []),
-            pending_setup=bool(credential.pending_secret_ciphertext),
-            last_used_at=credential.last_used_at,
-        )
+        return await self._mfa.build_mfa_status(user_id=user_id)
 
     async def _list_invites(self, *, organization_id: UUID) -> list[AccountInviteRead]:
         result = await self.session.execute(

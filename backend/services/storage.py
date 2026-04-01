@@ -130,8 +130,8 @@ class ObjectStorageService:
 
     @staticmethod
     def is_allowed_mime_type(mime_type: str | None) -> bool:
-        if mime_type is None:
-            return True
+        if not mime_type:
+            return False
         return any(mime_type.startswith(prefix) for prefix in settings.allowed_upload_mime_prefixes)
 
     def build_storage_key(
@@ -257,6 +257,40 @@ class ObjectStorageService:
                 **summarize_storage_reference(bucket_name, storage_key),
             )
             return None
+
+    def generate_presigned_get_url(
+        self,
+        *,
+        bucket_name: str,
+        storage_key: str,
+        expires_in_seconds: int = 3600,
+    ) -> str | None:
+        try:
+            return self.client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket_name, "Key": storage_key},
+                ExpiresIn=expires_in_seconds,
+            )
+        except Exception as exc:
+            log_exception(
+                logger,
+                "presigned_download_failed",
+                exc,
+                provider=self.provider,
+                status="failed",
+                **summarize_storage_reference(bucket_name, storage_key),
+            )
+            return None
+
+    def get_object_bytes(
+        self,
+        *,
+        bucket_name: str,
+        storage_key: str,
+    ) -> tuple[bytes, str | None]:
+        response = self.client.get_object(Bucket=bucket_name, Key=storage_key)
+        body = response["Body"].read()
+        return body, response.get("ContentType")
 
     def build_object_url(self, *, bucket_name: str, storage_key: str) -> str:
         if self.public_base_url:

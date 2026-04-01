@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import signal
 import socket
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from urllib.parse import urlparse
 from uuid import UUID
@@ -27,6 +30,12 @@ from backend.schemas.evaluators import EvaluationMode
 logger = get_logger(__name__)
 _in_process_tasks: set[asyncio.Task[None]] = set()
 _in_process_llm_tasks: set[asyncio.Task[None]] = set()
+
+# ThreadPoolExecutor for in-process fallback jobs.
+# Using a bounded pool (max_workers=4) with wait=True on shutdown so
+# SIGTERM does not kill running analysis jobs mid-flight.
+_fallback_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="prediction-job")
+atexit.register(lambda: _fallback_executor.shutdown(wait=True, cancel_futures=False))
 
 
 async def _run_prediction_job(job_id: UUID) -> None:
@@ -123,14 +132,10 @@ def _schedule_prediction_job_in_process(job_id: UUID) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
+        # No running event loop — submit to the bounded executor so the thread
+        # is tracked and waited for on shutdown (not a fire-and-forget daemon).
         context = copy_context()
-        worker = threading.Thread(
-            target=context.run,
-            args=(_run_prediction_job_in_process_entrypoint, job_id),
-            daemon=True,
-            name=f"prediction-job-{job_id}",
-        )
-        worker.start()
+        _fallback_executor.submit(context.run, _run_prediction_job_in_process_entrypoint, job_id)
         return
 
     task = loop.create_task(
@@ -146,13 +151,9 @@ def _schedule_llm_evaluation_job_in_process(job_id: UUID, mode: EvaluationMode) 
         loop = asyncio.get_running_loop()
     except RuntimeError:
         context = copy_context()
-        worker = threading.Thread(
-            target=context.run,
-            args=(_run_llm_evaluation_job_in_process_entrypoint, job_id, mode),
-            daemon=True,
-            name=f"llm-evaluation-{job_id}-{mode.value}",
+        _fallback_executor.submit(
+            context.run, _run_llm_evaluation_job_in_process_entrypoint, job_id, mode
         )
-        worker.start()
         return
 
     task = loop.create_task(

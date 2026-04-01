@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AnalysisPage from './AnalysisPage'
@@ -9,13 +9,15 @@ vi.mock('../components/analysis/AnalysisEvaluationSection', () => ({
 
 vi.mock('../lib/api', () => ({
   apiRequest: vi.fn(),
+  apiFetch: vi.fn(),
   subscribeToEventStream: vi.fn(() => vi.fn()),
   uploadToApi: vi.fn(),
   uploadToSignedUrl: vi.fn(),
 }))
 
-import { apiRequest, subscribeToEventStream } from '../lib/api'
+import { apiFetch, apiRequest, subscribeToEventStream } from '../lib/api'
 
+const mockedApiFetch = vi.mocked(apiFetch)
 const mockedApiRequest = vi.mocked(apiRequest)
 const mockedSubscribeToEventStream = vi.mocked(subscribeToEventStream)
 
@@ -163,11 +165,27 @@ function buildResult(jobId: string, attentionScore: number, recommendationTitle:
   }
 }
 
-function buildJobStatus(item: ReturnType<typeof buildHistoryItem>, result: ReturnType<typeof buildResult>) {
+function buildJobStatus(
+  item: ReturnType<typeof buildHistoryItem>,
+  result: ReturnType<typeof buildResult>,
+  progress?: {
+    stage: string
+    stage_label?: string | null
+    diagnostics?: {
+      queue_wait_ms?: number | null
+      processing_duration_ms?: number | null
+      time_to_first_result_ms?: number | null
+      result_delivery_ms?: number | null
+      postprocess_duration_ms?: number | null
+    }
+    is_partial?: boolean
+  } | null,
+) {
   return {
     job: item.job,
     asset: item.asset,
     result,
+    progress: progress ?? null,
   }
 }
 
@@ -280,6 +298,13 @@ function mockGeneratedVariantsResponse(jobId: string) {
       },
     ],
   }
+}
+
+async function flushEffects() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
+  })
 }
 
 function mockWorkspaceMembers() {
@@ -446,6 +471,8 @@ function mockGoalPresets() {
 
 describe('AnalysisPage', () => {
   beforeEach(() => {
+    mockedApiFetch.mockReset()
+    mockedApiFetch.mockResolvedValue(new Response(new Blob(), { status: 200 }))
     mockedApiRequest.mockReset()
     mockedSubscribeToEventStream.mockReset()
     mockedSubscribeToEventStream.mockImplementation(() => vi.fn())
@@ -540,6 +567,10 @@ describe('AnalysisPage', () => {
     })
     expect(screen.getByText('Review ops')).toBeTruthy()
 
+    expect(screen.getByTestId('frame-breakdown-strip')).toBeTruthy()
+    expect(screen.queryByTestId('frame-breakdown-scroll-next')).toBeNull()
+    expect(screen.getByTestId('frame-breakdown-card-0')).toBeTruthy()
+
     expect((screen.getByTestId('analysis-action-compare') as HTMLButtonElement).disabled).toBe(false)
     expect((screen.getByTestId('analysis-action-export') as HTMLButtonElement).disabled).toBe(false)
     expect((screen.getByTestId('analysis-action-generate') as HTMLButtonElement).disabled).toBe(false)
@@ -564,6 +595,90 @@ describe('AnalysisPage', () => {
       expect(screen.getByText('Quick comparison')).toBeTruthy()
       expect(screen.getByText(/beta.mp4 currently leads the quick compare snapshot/i)).toBeTruthy()
     })
+  })
+
+  it('loads completed insights once when selecting a recent analysis', async () => {
+    const alphaItem = buildHistoryItem({
+      jobId: 'job-alpha',
+      assetId: 'asset-alpha',
+      filename: 'alpha.mp4',
+      objective: 'Assess the launch hook',
+      goalTemplate: 'paid_social_hook',
+      channel: 'meta_feed',
+      audienceSegment: 'Returning customers',
+    })
+    const alphaResult = buildResult('job-alpha', 41, 'Alpha recommendation')
+
+    mockedApiRequest.mockImplementation(async (path) => {
+      const collaborationResponse = maybeHandleCollaborationRequest(path)
+      if (collaborationResponse !== undefined) {
+        return collaborationResponse
+      }
+      if (path === '/api/v1/analysis/config') {
+        return mockConfig()
+      }
+      if (path === '/api/v1/analysis/goal-presets') {
+        return mockGoalPresets()
+      }
+      if (path === '/api/v1/analysis/events') {
+        return { status: 'accepted' }
+      }
+      if (path === '/api/v1/analysis/assets?media_type=video&limit=12') {
+        return { items: [] }
+      }
+      if (path === '/api/v1/analysis/jobs?media_type=video&limit=12') {
+        return { items: [alphaItem] }
+      }
+      if (path === '/api/v1/analysis/jobs/job-alpha') {
+        return buildJobStatus(alphaItem, alphaResult)
+      }
+      if (path === '/api/v1/analysis/jobs/job-alpha/benchmarks') {
+        return mockBenchmarkResponse('job-alpha')
+      }
+      if (path === '/api/v1/analysis/jobs/job-alpha/verdict') {
+        return mockVerdictResponse('job-alpha')
+      }
+      if (path === '/api/v1/analysis/jobs/job-alpha/calibration') {
+        return mockCalibrationResponse('job-alpha')
+      }
+      if (path === '/api/v1/analysis/jobs/job-alpha/variants') {
+        return { job_id: 'job-alpha', items: [] }
+      }
+      throw new Error(`Unexpected path ${path}`)
+    })
+
+    render(<AnalysisPage session={session} />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId('open-analysis-history')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByTestId('open-analysis-history'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('analysis-history-item-job-alpha')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByTestId('analysis-history-item-job-alpha'))
+
+    await waitFor(() => {
+      expect(screen.getByText('Alpha recommendation')).toBeTruthy()
+    })
+
+    await flushEffects()
+
+    expect(
+      mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs/job-alpha/benchmarks'),
+    ).toHaveLength(1)
+    expect(
+      mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs/job-alpha/verdict'),
+    ).toHaveLength(1)
+    expect(
+      mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs/job-alpha/calibration'),
+    ).toHaveLength(1)
+    expect(
+      mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs/job-alpha/variants'),
+    ).toHaveLength(1)
   })
 
   it('restores the goal step from the stored asset snapshot without auto-loading history', async () => {
@@ -705,6 +820,19 @@ describe('AnalysisPage', () => {
       expect(screen.getByText('Audio recommendation')).toBeTruthy()
       expect(screen.getAllByText('Assess narration pacing').length).toBeGreaterThan(0)
     })
+
+    const frameBreakdownCard0 = screen.getByTestId('frame-breakdown-card-0')
+    const frameBreakdownCard1500 = screen.getByTestId('frame-breakdown-card-1500')
+
+    expect(within(frameBreakdownCard0).getByText('Frame 1')).toBeTruthy()
+    expect(within(frameBreakdownCard0).getByText('73/100')).toBeTruthy()
+    expect(within(frameBreakdownCard0).getByText('62/100')).toBeTruthy()
+    expect(within(frameBreakdownCard0).getByText('58/100')).toBeTruthy()
+
+    expect(within(frameBreakdownCard1500).getByText('Frame 2')).toBeTruthy()
+    expect(within(frameBreakdownCard1500).getByText('69/100')).toBeTruthy()
+    expect(within(frameBreakdownCard1500).getByText('66/100')).toBeTruthy()
+    expect(within(frameBreakdownCard1500).getByText('60/100')).toBeTruthy()
   })
 
   it('renders progressive results from the live stream before the final dashboard is ready', async () => {
@@ -754,6 +882,33 @@ describe('AnalysisPage', () => {
           attention_score: 77,
           engagement_delta: 6,
           note: 'Preview segment note',
+        },
+      ],
+    }
+    const scenePreviewResult = {
+      ...previewResult,
+      metrics_json: [],
+      summary_json: {
+        ...previewResult.summary_json,
+        overall_attention_score: 0,
+        hook_score_first_3_seconds: 0,
+        sustained_engagement_score: 0,
+        memory_proxy_score: 0,
+        cognitive_load_proxy: 0,
+        confidence: null,
+      },
+      timeline_json: [
+        { timestamp_ms: 0, engagement_score: 0, attention_score: 0, memory_proxy: 0 },
+      ],
+      segments_json: [
+        {
+          segment_index: 0,
+          label: 'Scene 01',
+          start_time_ms: 0,
+          end_time_ms: 1500,
+          attention_score: 0,
+          engagement_delta: 0,
+          note: 'Scene extraction note',
         },
       ],
     }
@@ -845,9 +1000,30 @@ describe('AnalysisPage', () => {
         data: {
           job: processingJob,
           asset: storedAsset,
+          result: scenePreviewResult,
+          stage: 'scene_extraction_ready',
+          stage_label: 'Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.',
+          is_partial: true,
+        },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('Scene extraction note')).toBeTruthy()
+      expect(
+        screen.getAllByText(/Primary scoring is filling in attention, memory, and cognitive-load metrics now/i).length,
+      ).toBeGreaterThan(0)
+    })
+
+    act(() => {
+      currentStreamHandler({
+        event: 'progress',
+        data: {
+          job: processingJob,
+          asset: storedAsset,
           result: previewResult,
-          stage: 'signals_ready',
-          stage_label: 'Summary, charts, and scene diagnostics are ready. Recommendations are still running.',
+          stage: 'primary_scoring_ready',
+          stage_label: 'Primary scoring is complete. Provisional metrics and charts are ready while recommendations are still pending.',
           is_partial: true,
         },
       })
@@ -855,7 +1031,7 @@ describe('AnalysisPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Preview segment note')).toBeTruthy()
-      expect(screen.getByText(/Recommendations are still being generated/i)).toBeTruthy()
+      expect(screen.getByText(/Recommendations are still being composed from the post-processed signals/i)).toBeTruthy()
     })
     expect((screen.getByTestId('analysis-action-export') as HTMLButtonElement).disabled).toBe(true)
 
@@ -888,6 +1064,114 @@ describe('AnalysisPage', () => {
         .map(([, requestOptions]) => requestOptions?.body as { event_name: string })
       expect(eventBodies.some((body) => body.event_name === 'analysis_started')).toBe(true)
       expect(eventBodies.some((body) => body.event_name === 'analysis_completed')).toBe(true)
+    })
+  })
+
+  it('surfaces degraded polling mode when the live stream fails', async () => {
+    const storedAsset = buildHistoryItem({
+      jobId: 'job-stream-fallback-source',
+      assetId: 'asset-stream-fallback',
+      filename: 'stream-fallback.mp4',
+      objective: 'Assess launch hook quality',
+      goalTemplate: 'paid_social_hook',
+      channel: 'meta_feed',
+      audienceSegment: 'Prospecting audiences',
+    }).asset
+
+    const queuedJob = {
+      id: 'job-stream-fallback',
+      asset_id: 'asset-stream-fallback',
+      status: 'queued',
+      objective: 'Assess launch hook quality',
+      goal_template: 'paid_social_hook',
+      channel: 'meta_feed',
+      audience_segment: 'Prospecting audiences',
+      started_at: null,
+      finished_at: null,
+      error_message: null,
+      created_at: '2026-03-31T10:10:00.000Z',
+    }
+
+    let streamErrorHandler: ((error: Error) => void) | undefined
+
+    window.sessionStorage.setItem(
+      'neuromarketer.analysis.wizard.project-1',
+      JSON.stringify({
+        mediaType: 'video',
+        objective: 'Assess launch hook quality',
+        goalTemplate: 'paid_social_hook',
+        channel: 'meta_feed',
+        audienceSegment: 'Prospecting audiences',
+        selectionMode: 'asset',
+      }),
+    )
+    window.sessionStorage.setItem('neuromarketer.analysis.selected-asset.project-1', 'asset-stream-fallback')
+
+    mockedSubscribeToEventStream.mockImplementation(({ onError }) => {
+      streamErrorHandler = onError
+      return vi.fn()
+    })
+
+    mockedApiRequest.mockImplementation(async (path, options) => {
+      const collaborationResponse = maybeHandleCollaborationRequest(path)
+      if (collaborationResponse !== undefined) {
+        return collaborationResponse
+      }
+      if (path === '/api/v1/analysis/config') {
+        return mockConfig()
+      }
+      if (path === '/api/v1/analysis/goal-presets') {
+        return mockGoalPresets()
+      }
+      if (path === '/api/v1/analysis/events') {
+        return { status: 'accepted' }
+      }
+      if (path === '/api/v1/analysis/assets?media_type=video&limit=12') {
+        return { items: [storedAsset] }
+      }
+      if (path === '/api/v1/analysis/jobs?media_type=video&limit=12') {
+        return { items: [] }
+      }
+      if (path === '/api/v1/analysis/jobs' && options?.method === 'POST') {
+        return {
+          job: queuedJob,
+          asset: storedAsset,
+          result: null,
+          progress: {
+            stage: 'queued',
+            stage_label: 'The job is queued and waiting for worker capacity.',
+            diagnostics: {},
+            is_partial: false,
+          },
+        }
+      }
+      throw new Error(`Unexpected path ${path}`)
+    })
+
+    render(<AnalysisPage session={session} />)
+
+    await waitFor(() => {
+      expect(screen.getAllByText('stream-fallback.mp4').length).toBeGreaterThan(0)
+      expect((screen.getByText('Start analysis') as HTMLButtonElement).disabled).toBe(false)
+    })
+
+    fireEvent.click(screen.getByText('Start analysis'))
+
+    await waitFor(() => {
+      expect(streamErrorHandler).toBeTruthy()
+    })
+
+    if (!streamErrorHandler) {
+      throw new Error('Expected the analysis event stream to expose an error handler.')
+    }
+
+    act(() => {
+      streamErrorHandler?.(new Error('Unable to open event stream.'))
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/Live updates disconnected\. The page switched to polling every 4 seconds/i)).toBeTruthy()
+      expect(screen.getByText('Polling fallback')).toBeTruthy()
     })
   })
 })

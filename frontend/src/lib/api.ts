@@ -115,6 +115,74 @@ export async function apiRequest<T>(
   return parsedBody as T
 }
 
+export async function apiFetch(
+  path: string,
+  { method = 'GET', sessionToken, body, headers, signal }: ApiRequestOptions = {},
+): Promise<Response> {
+  const requestHeaders = new Headers(headers)
+  const init: RequestInit = {
+    method,
+    headers: requestHeaders,
+    signal,
+  }
+
+  if (sessionToken) {
+    requestHeaders.set('Authorization', `Bearer ${sessionToken}`)
+  }
+
+  if (body !== undefined) {
+    const isNativeBody =
+      body instanceof FormData || body instanceof Blob || body instanceof URLSearchParams || typeof body === 'string'
+    init.body = isNativeBody ? body : JSON.stringify(body)
+    if (!isNativeBody && !requestHeaders.has('Content-Type')) {
+      requestHeaders.set('Content-Type', 'application/json')
+    }
+  }
+
+  const startedAt = performance.now()
+  recordDevRequestLog({
+    kind: 'fetch',
+    method,
+    path,
+    status: 'started',
+    loggedAt: new Date().toISOString(),
+  })
+
+  const response = await fetch(buildApiUrl(path), init)
+  if (!response.ok) {
+    const parsedBody = (await response.clone().json().catch(() => null)) as
+      | {
+          detail?: string
+          error?: {
+            message?: string
+          }
+        }
+      | null
+
+    recordDevRequestLog({
+      kind: 'fetch',
+      method,
+      path,
+      status: 'failed',
+      durationMs: Math.round(performance.now() - startedAt),
+      detail: `${response.status} ${parsedBody?.error?.message || parsedBody?.detail || 'Request failed.'}`,
+      loggedAt: new Date().toISOString(),
+    })
+    throw new Error(parsedBody?.error?.message || parsedBody?.detail || 'Request failed.')
+  }
+
+  recordDevRequestLog({
+    kind: 'fetch',
+    method,
+    path,
+    status: 'succeeded',
+    durationMs: Math.round(performance.now() - startedAt),
+    detail: String(response.status),
+    loggedAt: new Date().toISOString(),
+  })
+  return response
+}
+
 type UploadToUrlOptions = {
   file: Blob
   url: string

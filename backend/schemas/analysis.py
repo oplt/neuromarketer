@@ -260,10 +260,26 @@ class AnalysisResultRead(BaseModel):
     created_at: datetime
 
 
+class AnalysisJobDiagnosticsRead(BaseModel):
+    queue_wait_ms: int | None = None
+    processing_duration_ms: int | None = None
+    time_to_first_result_ms: int | None = None
+    result_delivery_ms: int | None = None
+    postprocess_duration_ms: int | None = None
+
+
+class AnalysisJobProgressRead(BaseModel):
+    stage: str
+    stage_label: str | None = None
+    diagnostics: AnalysisJobDiagnosticsRead = Field(default_factory=AnalysisJobDiagnosticsRead)
+    is_partial: bool = False
+
+
 class AnalysisJobStatusResponse(BaseModel):
     job: AnalysisJobRead
     result: AnalysisResultRead | None = None
     asset: AnalysisAssetRead | None = None
+    progress: AnalysisJobProgressRead | None = None
 
 
 class AnalysisJobListItemRead(BaseModel):

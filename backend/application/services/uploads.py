@@ -23,6 +23,7 @@ from backend.core.logging import (
 from backend.db.models import UploadSession, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
 from backend.schemas.uploads import UploadInitRequest
+from backend.services.file_validation import validate_file_content
 from backend.services.preprocess import PreprocessService
 from backend.services.storage import S3StorageService, UploadedObject
 
@@ -36,12 +37,18 @@ class DirectUploadResult:
 
 
 class UploadApplicationService:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        storage: S3StorageService | None = None,
+        preprocess: PreprocessService | None = None,
+    ) -> None:
         self.session = session
         self.creatives = CreativeRepository(session)
         self.uploads = UploadRepository(session)
-        self.storage = S3StorageService()
-        self.preprocess = PreprocessService()
+        self.storage = storage if storage is not None else S3StorageService()
+        self.preprocess = preprocess if preprocess is not None else PreprocessService()
 
     async def create_upload_session(self, payload: UploadInitRequest) -> UploadSession:
         with bound_log_context(
@@ -123,6 +130,16 @@ class UploadApplicationService:
 
             if not self.storage.is_allowed_mime_type(file.content_type):
                 raise ValidationAppError(f"Unsupported mime type: {file.content_type or 'unknown'}")
+
+            await file.seek(0)
+            is_valid_content, detected_mime = validate_file_content(
+                file.file, declared_mime_type=file.content_type
+            )
+            await file.seek(0)
+            if not is_valid_content:
+                raise ValidationAppError(
+                    f"File content does not match declared type. Detected: {detected_mime or 'unknown'}"
+                )
 
             upload_session = await self.uploads.create_session(
                 project_id=project_id,

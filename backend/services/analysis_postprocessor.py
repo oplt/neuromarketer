@@ -140,6 +140,85 @@ class AnalysisPostprocessor:
             recommendations_json=recommendations_json,
         )
 
+    def build_scene_extraction_payload(
+        self,
+        *,
+        runtime_output: TribeRuntimeOutput,
+        modality: str,
+        objective: str | None,
+        goal_template: str | None,
+        channel: str | None,
+        audience_segment: str | None,
+        source_label: str | None,
+    ) -> AnalysisDashboardPayload:
+        reduced_feature_vector = runtime_output.reduced_feature_vector or {}
+        segment_features = list(reduced_feature_vector.get("segment_features", []))
+        completeness_score = self._build_completeness_score(
+            segment_count=len(segment_features),
+            event_row_count=int(reduced_feature_vector.get("event_row_count", 0)),
+        )
+        timeline_rows = self._build_scene_extraction_timeline_rows(segment_features=segment_features)
+        segment_rows = self._build_segment_rows(timeline_rows=timeline_rows, segment_features=segment_features)
+        total_duration_ms = max(
+            (
+                int(row["end_time_ms"])
+                for row in segment_rows
+            ),
+            default=max((int(row["timestamp_ms"]) for row in timeline_rows), default=0),
+        )
+
+        for row in segment_rows:
+            row["attention_score"] = 0.0
+            row["engagement_delta"] = 0.0
+            row["note"] = "Scene extraction is ready. Primary scoring is still generating the attention profile."
+
+        summary_json = {
+            "modality": modality,
+            "overall_attention_score": 0.0,
+            "hook_score_first_3_seconds": 0.0,
+            "sustained_engagement_score": 0.0,
+            "memory_proxy_score": 0.0,
+            "cognitive_load_proxy": 0.0,
+            "confidence": None,
+            "completeness": round(completeness_score, 2),
+            "notes": [
+                "Scene extraction is complete. Attention, memory, and recommendation scoring are still running.",
+            ],
+            "metadata": {
+                "objective": objective,
+                "goal_template": goal_template,
+                "channel": channel,
+                "audience_segment": audience_segment,
+                "source_label": source_label,
+                "segment_count": len(segment_rows),
+                "duration_ms": total_duration_ms,
+            },
+        }
+        visualizations_json = {
+            "heatmap_frames": self._build_heatmap_frames(
+                timeline_rows=timeline_rows,
+                segment_features=segment_features,
+                score_map={
+                    "attention": 0.0,
+                    "memory": 0.0,
+                    "cognitive_load": 0.0,
+                    "conversion_proxy": 0.0,
+                },
+            ),
+            "high_attention_intervals": [],
+            "low_attention_intervals": [],
+            "visualization_mode": "frame_grid_fallback",
+        }
+
+        return AnalysisDashboardPayload(
+            summary_json=summary_json,
+            metrics_json=[],
+            timeline_json=timeline_rows,
+            segments_json=segment_rows,
+            visualizations_json=visualizations_json,
+            recommendations_json=[],
+        )
+
     def build_result_payload(
         self,
         *,
@@ -158,6 +237,34 @@ class AnalysisPostprocessor:
             "recommendations_json": dashboard_payload.recommendations_json,
             "created_at": timestamp.isoformat(),
         }
+
+    def _build_scene_extraction_timeline_rows(
+        self,
+        *,
+        segment_features: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for index, segment in enumerate(segment_features):
+            timestamp_ms = int(segment.get("start_ms", index * 1000))
+            engagement_score = round(float(segment.get("engagement_signal", 0.0)) * 100.0, 2)
+            rows.append(
+                {
+                    "timestamp_ms": timestamp_ms,
+                    "engagement_score": engagement_score,
+                    "attention_score": 0.0,
+                    "memory_proxy": 0.0,
+                }
+            )
+        if rows:
+            return rows
+        return [
+            {
+                "timestamp_ms": 0,
+                "engagement_score": 0.0,
+                "attention_score": 0.0,
+                "memory_proxy": 0.0,
+            }
+        ]
 
     def _build_summary_json(
         self,

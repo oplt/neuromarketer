@@ -5,7 +5,8 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.log_context import bound_log_context
-from backend.core.exceptions import NotFoundAppError, ValidationAppError
+from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
+from backend.db.models import JobStatus
 from backend.core.logging import get_logger, log_event
 from backend.core.metrics import metrics
 from backend.db.repositories import CreativeRepository, InferenceRepository
@@ -82,6 +83,31 @@ class PredictionApplicationService:
 
     async def process_prediction_job(self, job_id: UUID) -> None:
         await AnalysisJobProcessor(self.session).process(job_id)
+
+    async def rerun_job(self, *, job_id: UUID, user_id: UUID):
+        """Reset a failed or canceled job to QUEUED so it can be re-dispatched.
+
+        Only FAILED and CANCELED jobs may be rerun.  RUNNING/QUEUED jobs are
+        rejected to prevent duplicate workers on the same job.
+        """
+        job = await self.inference.get_job_with_prediction(job_id)
+        if job is None:
+            raise NotFoundAppError("Job not found.")
+        if job.created_by_user_id is not None and job.created_by_user_id != user_id:
+            raise NotFoundAppError("Job not found.")
+        if job.status not in (JobStatus.FAILED, JobStatus.CANCELED):
+            raise ConflictAppError(
+                f"Only failed or canceled jobs can be rerun. Current status: {job.status.value}."
+            )
+        await self.inference.reset_job_for_rerun(job)
+        log_event(
+            logger,
+            "prediction_job_rerun_requested",
+            job_id=str(job_id),
+            user_id=str(user_id),
+            status=JobStatus.QUEUED.value,
+        )
+        return await self.inference.get_job_with_prediction(job_id)
 
     async def mark_job_failed(self, job_id: UUID, error_message: str) -> None:
         job = await self.inference.get_job(job_id)

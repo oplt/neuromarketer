@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +30,60 @@ class AnalysisJobProcessor:
         self.tribe_inference = TribeInferenceService()
         self.scoring = NeuroScoringService()
         self.postprocessor = AnalysisPostprocessor()
+
+    async def _store_progress(
+        self,
+        *,
+        job,
+        stage: str,
+        stage_label: str,
+        diagnostics: dict[str, int | None] | None = None,
+        is_partial: bool | None = None,
+        replace_diagnostics: bool = False,
+    ) -> dict[str, Any]:
+        runtime_params = dict(job.runtime_params or {})
+        current_progress = dict(runtime_params.get("analysis_progress") or {})
+        current_diagnostics = {} if replace_diagnostics else dict(current_progress.get("diagnostics") or {})
+        merged_diagnostics = {
+            **current_diagnostics,
+            **{key: value for key, value in (diagnostics or {}).items() if value is not None},
+        }
+        next_progress = {
+            **current_progress,
+            "stage": stage,
+            "stage_label": stage_label,
+            "diagnostics": merged_diagnostics,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if is_partial is not None:
+            next_progress["is_partial"] = is_partial
+        runtime_params["analysis_progress"] = next_progress
+        job.runtime_params = runtime_params
+        await self.session.flush()
+        return next_progress
+
+    async def _publish_progress_event(
+        self,
+        *,
+        job_id: UUID,
+        stage: str,
+        stage_label: str,
+        diagnostics: dict[str, Any],
+        partial_result: dict[str, Any] | None = None,
+        is_partial: bool = False,
+    ) -> None:
+        await publish_analysis_job_event(
+            job_id=job_id,
+            event_type="job_progress",
+            payload={
+                "status": "processing",
+                "stage": stage,
+                "stage_label": stage_label,
+                "diagnostics": diagnostics,
+                "partial_result": partial_result,
+                "is_partial": is_partial,
+            },
+        )
 
     async def process(self, job_id: UUID) -> None:
         job = await self.inference.acquire_job(
@@ -66,15 +122,60 @@ class AnalysisJobProcessor:
                 queue_wait_ms=queue_wait_ms,
                 status="running",
             )
-            await self.session.commit()
-            await publish_analysis_job_event(
-                job_id=job.id,
-                event_type="job_running",
-                payload={
-                    "status": "processing",
-                    "stage": "worker_started",
-                    "stage_label": "Worker acquired the job and is loading creative inputs.",
+            worker_started_progress = await self._store_progress(
+                job=job,
+                stage="worker_started",
+                stage_label="Worker acquired the job and is loading creative inputs.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": 0,
                 },
+                is_partial=False,
+                replace_diagnostics=True,
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="worker_started",
+                stage_label="Worker acquired the job and is loading creative inputs.",
+                diagnostics=worker_started_progress["diagnostics"],
+                is_partial=False,
+            )
+
+            asset_resolved_progress = await self._store_progress(
+                job=job,
+                stage="asset_resolved",
+                stage_label="Creative metadata is resolved. Preparing the inference payload now.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
+                },
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="asset_resolved",
+                stage_label="Creative metadata is resolved. Preparing the inference payload now.",
+                diagnostics=asset_resolved_progress["diagnostics"],
+                is_partial=False,
+            )
+
+            inference_started_progress = await self._store_progress(
+                job=job,
+                stage="inference_started",
+                stage_label="Inference has started. The worker is extracting events from the uploaded asset.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
+                },
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="inference_started",
+                stage_label="Inference has started. The worker is extracting events from the uploaded asset.",
+                diagnostics=inference_started_progress["diagnostics"],
+                is_partial=False,
             )
 
             inference_started_at = time.perf_counter()
@@ -91,6 +192,63 @@ class AnalysisJobProcessor:
                 modality=execution.modality,
                 duration_ms=duration_ms(inference_started_at, inference_finished_at),
                 status="succeeded",
+            )
+
+            scene_payload = self.postprocessor.build_scene_extraction_payload(
+                runtime_output=execution.runtime_output,
+                modality=execution.modality,
+                objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
+                goal_template=normalize_goal_template(campaign_context.get("goal_template")),
+                channel=normalize_analysis_channel(campaign_context.get("channel")),
+                audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
+                source_label=execution.source_label,
+            )
+            scene_extraction_finished_at = time.perf_counter()
+            first_result_time_ms = (queue_wait_ms or 0) + duration_ms(total_started_at, scene_extraction_finished_at)
+            scene_extraction_snapshot = self.postprocessor.build_result_payload(
+                job_id=job.id,
+                dashboard_payload=scene_payload,
+            )
+            scene_extraction_ready_progress = await self._store_progress(
+                job=job,
+                stage="scene_extraction_ready",
+                stage_label="Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, scene_extraction_finished_at),
+                    "time_to_first_result_ms": first_result_time_ms,
+                },
+                is_partial=True,
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="scene_extraction_ready",
+                stage_label="Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.",
+                diagnostics=scene_extraction_ready_progress["diagnostics"],
+                partial_result=scene_extraction_snapshot,
+                is_partial=True,
+            )
+
+            primary_scoring_started_progress = await self._store_progress(
+                job=job,
+                stage="primary_scoring_started",
+                stage_label="Primary scoring has started. Attention, memory, and load metrics are being computed.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
+                    "time_to_first_result_ms": first_result_time_ms,
+                },
+                is_partial=True,
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="primary_scoring_started",
+                stage_label="Primary scoring has started. Attention, memory, and load metrics are being computed.",
+                diagnostics=primary_scoring_started_progress["diagnostics"],
+                partial_result=scene_extraction_snapshot,
+                is_partial=True,
             )
 
             scoring_started_at = time.perf_counter()
@@ -128,29 +286,57 @@ class AnalysisJobProcessor:
                 "prediction_preview_ready",
                 job_id=str(job.id),
                 modality=execution.modality,
-                time_to_first_result_ms=(queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
+                time_to_first_result_ms=first_result_time_ms,
+                time_to_first_scored_result_ms=(queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
                 duration_ms=duration_ms(preview_started_at, preview_finished_at),
                 timeline_points=len(preview_payload.timeline_json),
                 segment_rows=len(preview_payload.segments_json),
                 status="succeeded",
             )
-            await publish_analysis_job_event(
+            preview_snapshot = self.postprocessor.build_result_payload(
                 job_id=job.id,
-                event_type="job_progress",
-                payload={
-                    "status": "processing",
-                    "stage": "signals_ready",
-                    "stage_label": "Summary, charts, and scene diagnostics are ready. Recommendations are still running.",
-                    "diagnostics": {
-                        "queue_wait_ms": queue_wait_ms,
-                        "time_to_first_result_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
-                        "preview_build_ms": duration_ms(preview_started_at, preview_finished_at),
-                    },
-                    "partial_result": self.postprocessor.build_result_payload(
-                        job_id=job.id,
-                        dashboard_payload=preview_payload,
-                    ),
+                dashboard_payload=preview_payload,
+            )
+            primary_scoring_ready_progress = await self._store_progress(
+                job=job,
+                stage="primary_scoring_ready",
+                stage_label="Primary scoring is complete. Provisional metrics and charts are ready while recommendations are still pending.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, preview_finished_at),
+                    "time_to_first_result_ms": first_result_time_ms,
                 },
+                is_partial=True,
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="primary_scoring_ready",
+                stage_label="Primary scoring is complete. Provisional metrics and charts are ready while recommendations are still pending.",
+                diagnostics=primary_scoring_ready_progress["diagnostics"],
+                partial_result=preview_snapshot,
+                is_partial=True,
+            )
+
+            postprocessing_started_progress = await self._store_progress(
+                job=job,
+                stage="postprocessing_started",
+                stage_label="Post-processing has started. The dashboard is composing intervals and recommendations from the scored signals.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, preview_finished_at),
+                    "time_to_first_result_ms": first_result_time_ms,
+                },
+                is_partial=True,
+            )
+            await self.session.commit()
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="postprocessing_started",
+                stage_label="Post-processing has started. The dashboard is composing intervals and recommendations from the scored signals.",
+                diagnostics=postprocessing_started_progress["diagnostics"],
+                partial_result=preview_snapshot,
+                is_partial=True,
             )
 
             postprocess_started_at = time.perf_counter()
@@ -165,19 +351,30 @@ class AnalysisJobProcessor:
                 source_label=execution.source_label,
             )
             postprocess_finished_at = time.perf_counter()
-            await publish_analysis_job_event(
-                job_id=job.id,
-                event_type="job_progress",
-                payload={
-                    "status": "processing",
-                    "stage": "recommendations_ready",
-                    "stage_label": "Recommendations are ready. Persisting the final dashboard payload now.",
-                    "diagnostics": {
-                        "queue_wait_ms": queue_wait_ms,
-                        "time_to_first_result_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
-                        "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
-                    },
+            recommendations_ready_progress = await self._store_progress(
+                job=job,
+                stage="recommendations_ready",
+                stage_label="Recommendations are ready. Persisting the final dashboard payload now.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, postprocess_finished_at),
+                    "time_to_first_result_ms": first_result_time_ms,
+                    "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
                 },
+                is_partial=True,
+            )
+            await self.session.commit()
+            final_preview_snapshot = self.postprocessor.build_result_payload(
+                job_id=job.id,
+                dashboard_payload=dashboard_payload,
+            )
+            await self._publish_progress_event(
+                job_id=job.id,
+                stage="recommendations_ready",
+                stage_label="Recommendations are ready. Persisting the final dashboard payload now.",
+                diagnostics=recommendations_ready_progress["diagnostics"],
+                partial_result=final_preview_snapshot,
+                is_partial=True,
             )
 
             persistence_started_at = time.perf_counter()
@@ -226,15 +423,31 @@ class AnalysisJobProcessor:
                 status="succeeded",
             )
             metrics.increment("prediction_jobs_total", labels={"status": "succeeded"})
+            await self._store_progress(
+                job=job,
+                stage="completed",
+                stage_label="Results are ready and delivery timings are finalized.",
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": duration_ms(total_started_at, total_finished_at),
+                    "time_to_first_result_ms": first_result_time_ms,
+                    "result_delivery_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, total_finished_at),
+                    "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
+                },
+                is_partial=False,
+            )
             await self.session.commit()
             await publish_analysis_job_event(
                 job_id=job.id,
                 event_type="job_completed",
                 payload={
                     "status": "completed",
+                    "stage": "completed",
+                    "stage_label": "Results are ready and delivery timings are finalized.",
                     "diagnostics": {
                         "queue_wait_ms": queue_wait_ms,
-                        "time_to_first_result_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
+                        "processing_duration_ms": duration_ms(total_started_at, total_finished_at),
+                        "time_to_first_result_ms": first_result_time_ms,
                         "result_delivery_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, total_finished_at),
                         "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
                     },

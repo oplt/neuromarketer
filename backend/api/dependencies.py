@@ -34,10 +34,18 @@ async def require_authenticated_context(
         raise UnauthorizedAppError("Authentication is required.")
 
     claims = verify_session_token(credentials.credentials)
-    user = await crud.get_user_by_id(db, claims.user_id)
+
+    # Single JOIN query instead of two separate lookups for user + organization.
+    user, organization = await crud.get_user_and_organization(
+        db,
+        user_id=claims.user_id,
+        organization_id=claims.organization_id,
+    )
     if user is None or not user.is_active or user.deleted_at is not None:
         raise UnauthorizedAppError("Authentication is required.")
     if user.email.strip().lower() != claims.email:
+        raise UnauthorizedAppError("Authentication is required.")
+    if organization is None or not organization.is_active:
         raise UnauthorizedAppError("Authentication is required.")
 
     session_record = await AuthApplicationService(db).validate_session_token(
@@ -46,14 +54,6 @@ async def require_authenticated_context(
         user_id=user.id,
         organization_id=claims.organization_id,
     )
-
-    organization = await crud.get_organization_for_user(
-        db,
-        user_id=user.id,
-        organization_id=claims.organization_id,
-    )
-    if organization is None or organization.id != claims.organization_id or not organization.is_active:
-        raise UnauthorizedAppError("Authentication is required.")
 
     default_project = await crud.get_or_create_default_project_for_organization(
         db,

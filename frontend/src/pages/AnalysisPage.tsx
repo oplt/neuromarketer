@@ -19,6 +19,7 @@ import {
   LinearProgress,
   MenuItem,
   Paper,
+  Skeleton,
   Stack,
   Table,
   TableBody,
@@ -39,9 +40,11 @@ import {
   type ReactElement,
   type SetStateAction,
 } from 'react'
-import AnalysisEvaluationSection from '../components/analysis/AnalysisEvaluationSection'
+import AnalysisEvaluationSection, {
+  type AnalysisEvaluationProgressSnapshot,
+} from '../components/analysis/AnalysisEvaluationSection'
 import CollaborationPanel from '../components/collaboration/CollaborationPanel'
-import { apiRequest, subscribeToEventStream, uploadToApi, uploadToSignedUrl } from '../lib/api'
+import { apiFetch, apiRequest, subscribeToEventStream, uploadToApi, uploadToSignedUrl } from '../lib/api'
 import { buildCompareWorkspaceStorageKey, storeCompareWorkspaceSnapshot } from '../lib/compareWorkspace'
 import type { AuthSession } from '../lib/session'
 
@@ -184,6 +187,16 @@ type AnalysisHeatmapFrame = {
   caption: string
 }
 
+type AnalysisFrameBreakdownItem = {
+  timestamp_ms: number
+  label: string
+  scene_label: string
+  strongest_zone?: string | null
+  attention_score: number
+  engagement_score: number
+  memory_proxy: number
+}
+
 type AnalysisRecommendation = {
   title: string
   detail: string
@@ -212,6 +225,18 @@ type AnalysisJobStatusResponse = {
   job: AnalysisJob
   result?: AnalysisResult | null
   asset?: AnalysisAsset | null
+  progress?: {
+    stage: string
+    stage_label?: string | null
+    diagnostics?: {
+      queue_wait_ms?: number | null
+      processing_duration_ms?: number | null
+      time_to_first_result_ms?: number | null
+      result_delivery_ms?: number | null
+      postprocess_duration_ms?: number | null
+    }
+    is_partial?: boolean
+  } | null
 }
 
 type AnalysisProgressEvent = {
@@ -222,6 +247,7 @@ type AnalysisProgressEvent = {
   stage_label?: string | null
   diagnostics?: {
     queue_wait_ms?: number | null
+    processing_duration_ms?: number | null
     time_to_first_result_ms?: number | null
     result_delivery_ms?: number | null
     postprocess_duration_ms?: number | null
@@ -266,6 +292,7 @@ type AnalysisProgressState = {
   stageLabel: string | null
   diagnostics?: {
     queueWaitMs?: number | null
+    processingDurationMs?: number | null
     timeToFirstResultMs?: number | null
     resultDeliveryMs?: number | null
     postprocessDurationMs?: number | null
@@ -451,6 +478,7 @@ type AnalysisTransportDiagnostics = {
   reconnectCount: number
   lastError: string | null
   lastConnectedAt: string | null
+  lastHeartbeatAt: string | null
 }
 
 type AnalysisGoalPresetsResponse = {
@@ -725,6 +753,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
   const [analysisPreviewResult, setAnalysisPreviewResult] = useState<AnalysisResult | null>(null)
   const [analysisProgress, setAnalysisProgress] = useState<AnalysisProgressState | null>(null)
+  const [evaluationProgress, setEvaluationProgress] = useState<AnalysisProgressState | null>(null)
   const [assetLibrary, setAssetLibrary] = useState<AnalysisAsset[]>([])
   const [isLoadingAssetLibrary, setIsLoadingAssetLibrary] = useState(false)
   const [hasLoadedAssetLibrary, setHasLoadedAssetLibrary] = useState(false)
@@ -751,6 +780,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
     reconnectCount: 0,
     lastError: null,
     lastConnectedAt: null,
+    lastHeartbeatAt: null,
   })
   const [isHistoryDrawerOpen, setIsHistoryDrawerOpen] = useState(false)
   const [historyDrawerMode, setHistoryDrawerMode] = useState<HistoryDrawerMode>('resume')
@@ -774,6 +804,8 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   const completedResultJobIdRef = useRef<string | null>(null)
   const streamConnectedJobIdRef = useRef<string | null>(null)
   const streamFallbackJobIdRef = useRef<string | null>(null)
+  const autoLoadedInsightsJobIdRef = useRef<string | null>(null)
+  const latestInsightsRequestIdRef = useRef(0)
 
   const clearGeneratedVariantsState = () => {
     setGeneratedVariantsResponse(null)
@@ -812,7 +844,8 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
     availableGoalTemplates,
   })
   const CurrentMediaIcon = currentMediaOption.icon
-  const currentStage = resolveCurrentStage(uploadState.stage, analysisJob?.status)
+  const visibleProgress = resolveVisibleProgressState(analysisProgress, evaluationProgress)
+  const currentStage = resolveCurrentStage(visibleProgress?.stage, uploadState.stage, analysisJob?.status)
   const hasLocalDraft = selectedMediaType === 'text' ? Boolean(textContent.trim()) : Boolean(selectedFile)
   const hasGoalContext = Boolean(goalTemplate || channel || audienceSegment.trim() || objective.trim())
   const currentFlowStep = resolveAnalysisFlowStep({
@@ -848,6 +881,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         statusResponse.asset ??
         historyItem?.asset ??
         (uploadState.asset?.id === statusResponse.job.asset_id ? uploadState.asset : null)
+      const nextProgress = normalizeAnalysisProgressState(statusResponse.job.id, statusResponse.progress)
 
       if (nextAsset) {
         setActiveLibraryAssetId(nextAsset.id)
@@ -871,18 +905,20 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       setAnalysisJob(statusResponse.job)
       if (statusResponse.result) {
         setAnalysisPreviewResult(null)
-        setAnalysisProgress(null)
       } else {
         if (analysisPreviewResult?.job_id && analysisPreviewResult.job_id !== statusResponse.job.id) {
           setAnalysisPreviewResult(null)
         }
-        if (analysisProgress?.jobId && analysisProgress.jobId !== statusResponse.job.id) {
-          setAnalysisProgress(null)
-        }
+      }
+      if (nextProgress) {
+        setAnalysisProgress(nextProgress)
+      } else if (analysisProgress?.jobId && analysisProgress.jobId !== statusResponse.job.id) {
+        setAnalysisProgress(null)
+      } else if (statusResponse.job.status === 'failed') {
+        setAnalysisProgress(null)
       }
       if (statusResponse.job.status === 'failed') {
         setAnalysisPreviewResult(null)
-        setAnalysisProgress(null)
       }
       setAnalysisResult(statusResponse.result || null)
       setObjective(statusResponse.job.objective || '')
@@ -945,16 +981,36 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       setAnalysisPreviewResult(progressEvent.result)
     }
 
-    setAnalysisProgress({
-      jobId: progressEvent.job.id,
-      stage: progressEvent.stage || 'processing',
-      stageLabel: progressEvent.stage_label || null,
-      diagnostics: {
-        queueWaitMs: progressEvent.diagnostics?.queue_wait_ms ?? null,
-        timeToFirstResultMs: progressEvent.diagnostics?.time_to_first_result_ms ?? null,
-        resultDeliveryMs: progressEvent.diagnostics?.result_delivery_ms ?? null,
-        postprocessDurationMs: progressEvent.diagnostics?.postprocess_duration_ms ?? null,
-      },
+    const nextProgress = normalizeAnalysisProgressState(progressEvent.job.id, progressEvent)
+    if (nextProgress) {
+      setAnalysisProgress(nextProgress)
+    }
+  })
+
+  const handleEvaluationProgressSnapshot = useEffectEvent((progressSnapshot: AnalysisEvaluationProgressSnapshot | null) => {
+    if (!progressSnapshot) {
+      setEvaluationProgress(null)
+      return
+    }
+
+    setEvaluationProgress((current) => {
+      if (
+        current?.jobId === progressSnapshot.jobId &&
+        current.stage === progressSnapshot.stage &&
+        current.stageLabel === progressSnapshot.stageLabel
+      ) {
+        return current
+      }
+
+      return {
+        jobId: progressSnapshot.jobId,
+        stage: progressSnapshot.stage,
+        stageLabel: progressSnapshot.stageLabel,
+        diagnostics:
+          analysisProgress?.jobId === progressSnapshot.jobId
+            ? analysisProgress.diagnostics
+            : current?.diagnostics,
+      }
     })
   })
 
@@ -1163,6 +1219,9 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       return
     }
 
+    const requestId = latestInsightsRequestIdRef.current + 1
+    latestInsightsRequestIdRef.current = requestId
+
     setIsLoadingBenchmark(true)
     setIsLoadingExecutiveVerdict(true)
     setIsLoadingCalibration(true)
@@ -1178,6 +1237,10 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       apiRequest<AnalysisCalibrationResponse>(`/api/v1/analysis/jobs/${jobId}/calibration`, { sessionToken }),
       apiRequest<AnalysisGeneratedVariantListResponse>(`/api/v1/analysis/jobs/${jobId}/variants`, { sessionToken }),
     ])
+
+    if (latestInsightsRequestIdRef.current !== requestId) {
+      return
+    }
 
     if (benchmarkResult.status === 'fulfilled') {
       setBenchmarkResponse(benchmarkResult.value)
@@ -1318,13 +1381,22 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       reconnectCount: 0,
       lastError: null,
       lastConnectedAt: null,
+      lastHeartbeatAt: null,
     })
     streamConnectedJobIdRef.current = null
     streamFallbackJobIdRef.current = null
   }, [analysisJob?.id])
 
   useEffect(() => {
-    if (!analysisJob?.id || analysisJob.status !== 'completed' || !analysisResult) {
+    setEvaluationProgress(null)
+  }, [analysisJob?.id])
+
+  useEffect(() => {
+    const resultJobId = analysisResult?.job_id ?? null
+
+    if (!analysisJob?.id || analysisJob.status !== 'completed' || !resultJobId) {
+      autoLoadedInsightsJobIdRef.current = null
+      latestInsightsRequestIdRef.current += 1
       setBenchmarkResponse(null)
       setExecutiveVerdict(null)
       setCalibrationResponse(null)
@@ -1337,8 +1409,14 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       setIsGeneratingVariants(false)
       return
     }
-    void loadAnalysisInsights(analysisJob.id)
-  }, [analysisJob?.id, analysisJob?.status, analysisResult, loadAnalysisInsights])
+
+    if (autoLoadedInsightsJobIdRef.current === resultJobId) {
+      return
+    }
+
+    autoLoadedInsightsJobIdRef.current = resultJobId
+    void loadAnalysisInsights(resultJobId)
+  }, [analysisJob?.id, analysisJob?.status, analysisResult?.job_id])
 
   useEffect(() => {
     if (!analysisJob || !sessionToken) {
@@ -1370,6 +1448,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
             isConnected: true,
             lastError: null,
             lastConnectedAt: new Date().toISOString(),
+            lastHeartbeatAt: current.lastHeartbeatAt,
           }))
           void trackAnalysisClientEvent({
             eventName: 'analysis_stream_connected',
@@ -1380,6 +1459,16 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
               transport_mode: 'stream',
             },
           })
+        }
+        if (event === 'heartbeat') {
+          setAnalysisTransportDiagnostics((current) => ({
+            ...current,
+            mode: 'stream',
+            isConnected: true,
+            lastError: null,
+            lastHeartbeatAt: new Date().toISOString(),
+          }))
+          return
         }
         if (event === 'progress') {
           applyAnalysisProgress(data as AnalysisProgressEvent)
@@ -1395,7 +1484,9 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
           reconnectCount: current.reconnectCount + 1,
           lastError: error.message,
           lastConnectedAt: current.lastConnectedAt,
+          lastHeartbeatAt: current.lastHeartbeatAt,
         }))
+        streamConnectedJobIdRef.current = null
         if (streamFallbackJobIdRef.current !== analysisJob.id) {
           streamFallbackJobIdRef.current = analysisJob.id
           void trackAnalysisClientEvent({
@@ -1415,7 +1506,10 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
     return () => {
       unsubscribe()
     }
-  }, [analysisJob, analysisTransportMode, sessionToken])
+  // Use primitive deps (id + status) instead of the full object so that progress
+  // events — which replace `analysisJob` with a new object of the same id/status —
+  // do NOT tear down and re-open the stream on every message.
+  }, [analysisJob?.id, analysisJob?.status, analysisTransportMode, sessionToken])
 
   useEffect(() => {
     if (!pendingHistorySelection) {
@@ -1435,6 +1529,11 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   }, [pendingHistorySelection])
 
   const visibleAnalysisResult = analysisResult ?? analysisPreviewResult
+  const stageAvailability = resolveAnalysisStageAvailability({
+    analysisResult,
+    analysisPreviewResult,
+    currentStage,
+  })
 
   useEffect(() => {
     if (!visibleAnalysisResult) {
@@ -1462,11 +1561,13 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
           analysisProgress?.diagnostics?.timeToFirstResultMs ??
           calculateElapsedMs(analysisJob?.created_at ?? null, visibleAnalysisResult.created_at),
         queue_wait_ms: analysisProgress?.diagnostics?.queueWaitMs ?? null,
+        processing_duration_ms: analysisProgress?.diagnostics?.processingDurationMs ?? null,
       },
     })
   }, [
     analysisJob?.channel,
     analysisJob?.goal_template,
+    analysisProgress?.diagnostics?.processingDurationMs,
     analysisProgress?.stage,
     analysisResult?.job_id,
     channel,
@@ -1500,9 +1601,12 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
           analysisProgress?.diagnostics?.resultDeliveryMs ??
           calculateElapsedMs(analysisJob.created_at, analysisResult.created_at),
         queue_wait_ms: analysisProgress?.diagnostics?.queueWaitMs ?? null,
+        processing_duration_ms:
+          analysisProgress?.diagnostics?.processingDurationMs ??
+          calculateElapsedMs(analysisJob.started_at ?? null, analysisResult.created_at),
       },
     })
-  }, [analysisJob, analysisProgress?.diagnostics?.queueWaitMs, analysisProgress?.diagnostics?.resultDeliveryMs, analysisResult, channel, goalTemplate, trackAnalysisClientEvent])
+  }, [analysisJob, analysisProgress?.diagnostics?.processingDurationMs, analysisProgress?.diagnostics?.queueWaitMs, analysisProgress?.diagnostics?.resultDeliveryMs, analysisResult, channel, goalTemplate, trackAnalysisClientEvent])
 
   const handleMediaTypeChange = (nextMediaType: MediaType) => {
     if (nextMediaType === selectedMediaType) {
@@ -2140,6 +2244,11 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   const timelinePoints = visibleAnalysisResult?.timeline_json ?? placeholderTimeline
   const segmentsRows = visibleAnalysisResult?.segments_json ?? placeholderSegments
   const heatmapFrames = visibleAnalysisResult?.visualizations_json.heatmap_frames ?? placeholderHeatmapFrames
+  const frameBreakdownItems = buildFrameBreakdownItems({
+    timelinePoints,
+    segmentsRows,
+    heatmapFrames,
+  })
   const highAttentionIntervals = visibleAnalysisResult?.visualizations_json.high_attention_intervals ?? []
   const lowAttentionIntervals = visibleAnalysisResult?.visualizations_json.low_attention_intervals ?? []
   const recommendations = visibleAnalysisResult?.recommendations_json ?? []
@@ -2152,6 +2261,9 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   })
   const analysisCompleted = Boolean(analysisResult && (!analysisJob || analysisJob.status === 'completed'))
   const evaluationJobId = analysisResult?.job_id ?? analysisJob?.id ?? null
+  const summarySectionMessage = buildScoringPendingMessage(stageAvailability, currentStage)
+  const sceneSectionMessage = buildScenePendingMessage(stageAvailability, currentStage)
+  const recommendationsSectionMessage = buildRecommendationsPendingMessage(stageAvailability, currentStage)
 
   return (
     <Stack spacing={3}>
@@ -2494,12 +2606,12 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
               <Typography variant="h6">Flow status</Typography>
               <Chip
                 className={`analysis-status-chip is-${currentStage}`}
-                label={currentStage.toUpperCase()}
+                label={readableProgressStage(currentStage)}
                 sx={{ alignSelf: 'flex-start' }}
               />
-              {analysisProgress?.stageLabel ? (
+              {visibleProgress?.stageLabel ? (
                 <Typography color="text.secondary" variant="body2">
-                  {analysisProgress.stageLabel}
+                  {visibleProgress.stageLabel}
                 </Typography>
               ) : null}
               {stageRows(currentStage).map((row) => (
@@ -2580,8 +2692,13 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
 
       <ResultStateBanner
         analysisJob={analysisJob}
+        diagnostics={analysisTransportDiagnostics}
         progressLabel={analysisProgress?.stageLabel ?? null}
         resultState={resultState}
+        sessionToken={sessionToken}
+        onRerunSuccess={(updatedJob) => {
+          setAnalysisJob(updatedJob)
+        }}
       />
 
       <ResultsActionHub
@@ -2645,7 +2762,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         <AnalysisTransportDiagnosticsCard
           analysisJob={analysisJob}
           diagnostics={analysisTransportDiagnostics}
-          progress={analysisProgress}
+          progress={visibleProgress}
         />
 
         <ExecutiveVerdictCard
@@ -2694,12 +2811,16 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                 <Typography color="text.secondary" variant="overline">
                   {card.label}
                 </Typography>
-                <Typography variant="h3">{visibleAnalysisResult ? Math.round(card.value) : '--'}</Typography>
+                {stageAvailability.primaryScoringReady ? (
+                  <Typography variant="h3">{Math.round(card.value)}</Typography>
+                ) : (
+                  <Skeleton height={52} sx={{ transform: 'none' }} width={92} />
+                )}
               </Box>
               <Chip icon={<AutoGraphRounded />} label="/100" size="small" variant="outlined" />
             </Stack>
             <Typography color="text.secondary" variant="body2">
-              {visibleAnalysisResult ? card.helper : 'Results will populate after the worker completes.'}
+              {stageAvailability.primaryScoringReady ? card.helper : summarySectionMessage}
             </Typography>
           </Paper>
         ))}
@@ -2720,19 +2841,34 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {metricsRows.map((metric) => (
-                  <TableRow key={metric.key}>
-                    <TableCell>{metric.label}</TableCell>
-                    <TableCell align="right">
-                      {visibleAnalysisResult ? metric.value.toFixed(metric.unit === 'seconds' ? 2 : 1) : '--'} {metric.unit}
-                    </TableCell>
-                    <TableCell>{visibleAnalysisResult ? formatOptionalScore(metric.confidence) : '--'}</TableCell>
-                    <TableCell>{metric.source}</TableCell>
-                    <TableCell>{visibleAnalysisResult ? metric.detail || 'Derived dashboard metric' : 'Pending job output'}</TableCell>
-                  </TableRow>
-                ))}
+                {stageAvailability.primaryScoringReady
+                  ? metricsRows.map((metric) => (
+                      <TableRow key={metric.key}>
+                        <TableCell>{metric.label}</TableCell>
+                        <TableCell align="right">
+                          {metric.value.toFixed(metric.unit === 'seconds' ? 2 : 1)} {metric.unit}
+                        </TableCell>
+                        <TableCell>{formatOptionalScore(metric.confidence)}</TableCell>
+                        <TableCell>{metric.source}</TableCell>
+                        <TableCell>{metric.detail || 'Derived dashboard metric'}</TableCell>
+                      </TableRow>
+                    ))
+                  : Array.from({ length: 4 }).map((_, index) => (
+                      <TableRow key={`metric-skeleton-${index}`}>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="72%" /></TableCell>
+                        <TableCell align="right"><Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={72} /></TableCell>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width={64} /></TableCell>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="56%" /></TableCell>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="92%" /></TableCell>
+                      </TableRow>
+                    ))}
               </TableBody>
             </Table>
+            {!stageAvailability.primaryScoringReady ? (
+              <Typography color="text.secondary" variant="body2">
+                {summarySectionMessage}
+              </Typography>
+            ) : null}
           </Stack>
         </Paper>
 
@@ -2742,7 +2878,11 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
             <Typography color="text.secondary" variant="body2">
               Attention, engagement, and memory proxies aligned to processed timestamps.
             </Typography>
-            <TimelineChart points={timelinePoints} />
+            {stageAvailability.primaryScoringReady ? (
+              <TimelineChart points={timelinePoints} />
+            ) : (
+              <TimelineChartSkeleton label={summarySectionMessage} />
+            )}
           </Stack>
         </Paper>
       </Box>
@@ -2762,19 +2902,46 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                 </TableRow>
               </TableHead>
               <TableBody>
-                {segmentsRows.map((segment) => (
-                  <TableRow key={`${segment.label}-${segment.start_time_ms}`}>
-                    <TableCell>{segment.label}</TableCell>
-                    <TableCell>
-                      {formatDuration(segment.start_time_ms)} - {formatDuration(segment.end_time_ms)}
-                    </TableCell>
-                    <TableCell align="right">{visibleAnalysisResult ? Math.round(segment.attention_score) : '--'}</TableCell>
-                    <TableCell align="right">{visibleAnalysisResult ? formatSignedValue(segment.engagement_delta) : '--'}</TableCell>
-                    <TableCell>{visibleAnalysisResult ? segment.note : 'Pending segmentation'}</TableCell>
-                  </TableRow>
-                ))}
+                {stageAvailability.sceneStructureReady
+                  ? segmentsRows.map((segment) => (
+                      <TableRow key={`${segment.label}-${segment.start_time_ms}`}>
+                        <TableCell>{segment.label}</TableCell>
+                        <TableCell>
+                          {formatDuration(segment.start_time_ms)} - {formatDuration(segment.end_time_ms)}
+                        </TableCell>
+                        <TableCell align="right">
+                          {stageAvailability.primaryScoringReady ? (
+                            Math.round(segment.attention_score)
+                          ) : (
+                            <Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={44} />
+                          )}
+                        </TableCell>
+                        <TableCell align="right">
+                          {stageAvailability.primaryScoringReady ? (
+                            formatSignedValue(segment.engagement_delta)
+                          ) : (
+                            <Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={58} />
+                          )}
+                        </TableCell>
+                        <TableCell>{segment.note || sceneSectionMessage}</TableCell>
+                      </TableRow>
+                    ))
+                  : Array.from({ length: 4 }).map((_, index) => (
+                      <TableRow key={`segment-skeleton-${index}`}>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="64%" /></TableCell>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="78%" /></TableCell>
+                        <TableCell align="right"><Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={44} /></TableCell>
+                        <TableCell align="right"><Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={58} /></TableCell>
+                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="90%" /></TableCell>
+                      </TableRow>
+                    ))}
               </TableBody>
             </Table>
+            {!stageAvailability.sceneStructureReady ? (
+              <Typography color="text.secondary" variant="body2">
+                {sceneSectionMessage}
+              </Typography>
+            ) : null}
           </Stack>
         </Paper>
 
@@ -2784,19 +2951,41 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
             <Typography color="text.secondary" variant="body2">
               Brain plots are intentionally replaced with grid-based timestamp overlays derived from the processed timeline.
             </Typography>
-            <HeatmapFramesCard frames={heatmapFrames} hasResults={Boolean(visibleAnalysisResult)} />
+            <HeatmapFramesCard
+              frames={heatmapFrames}
+              isSceneReady={stageAvailability.sceneStructureReady}
+              isScoringReady={stageAvailability.primaryScoringReady}
+              loadingLabel={sceneSectionMessage}
+            />
           </Stack>
         </Paper>
       </Box>
+
+      <Paper className="dashboard-card" elevation={0}>
+        <Stack spacing={2}>
+          <Typography variant="h6">Frame-by-frame breakdown</Typography>
+          <Typography color="text.secondary" variant="body2">
+            Extracted frames at each analysis timestamp with attention zone and scene data.
+          </Typography>
+          <VideoFrameStrip
+            frames={frameBreakdownItems}
+            hasResults={stageAvailability.sceneStructureReady}
+            isScoringReady={stageAvailability.primaryScoringReady}
+            asset={resultsAsset}
+            sessionToken={sessionToken || null}
+          />
+        </Stack>
+      </Paper>
 
       <Box className="dashboard-grid dashboard-grid--content">
         <Paper className="dashboard-card" elevation={0}>
           <Stack spacing={2}>
             <Typography variant="h6">High and low attention intervals</Typography>
             <AttentionIntervalsCard
-              hasResults={Boolean(visibleAnalysisResult)}
+              hasResults={stageAvailability.primaryScoringReady}
               highAttentionIntervals={highAttentionIntervals}
               lowAttentionIntervals={lowAttentionIntervals}
+              loadingLabel={summarySectionMessage}
             />
           </Stack>
         </Paper>
@@ -2805,8 +2994,10 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
           <Stack spacing={2}>
             <Typography variant="h6">Recommendations</Typography>
             <RecommendationsCard
-              hasResults={Boolean(visibleAnalysisResult)}
+              hasResults={Boolean(analysisResult)}
               isPartial={!analysisResult && Boolean(analysisPreviewResult)}
+              isReady={stageAvailability.recommendationsReady}
+              loadingLabel={recommendationsSectionMessage}
               recommendations={recommendations}
               summary={summary}
             />
@@ -2817,6 +3008,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       <AnalysisEvaluationSection
         analysisCompleted={analysisCompleted}
         jobId={evaluationJobId}
+        onProgressSnapshot={handleEvaluationProgressSnapshot}
         sessionToken={sessionToken || null}
       />
 
@@ -3636,6 +3828,12 @@ function AnalysisTransportDiagnosticsCard({
   diagnostics: AnalysisTransportDiagnostics
   progress: AnalysisProgressState | null
 }) {
+  const queueWaitMs = progress?.diagnostics?.queueWaitMs ?? calculateElapsedMs(analysisJob?.created_at ?? null, analysisJob?.started_at ?? null)
+  const processingDurationMs =
+    progress?.diagnostics?.processingDurationMs ?? calculateElapsedMs(analysisJob?.started_at ?? null, analysisJob?.finished_at ?? null)
+  const resultDeliveryMs =
+    progress?.diagnostics?.resultDeliveryMs ?? calculateElapsedMs(analysisJob?.created_at ?? null, analysisJob?.finished_at ?? null)
+
   return (
     <Paper className="dashboard-card" elevation={0}>
       <Stack spacing={2}>
@@ -3643,7 +3841,7 @@ function AnalysisTransportDiagnosticsCard({
           <Box>
             <Typography variant="h6">Delivery diagnostics</Typography>
             <Typography color="text.secondary" variant="body2">
-              Transport mode, fallback state, and timing markers for the active analysis job.
+              Transport mode, heartbeat health, and timing markers for the active analysis job.
             </Typography>
           </Box>
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
@@ -3657,6 +3855,7 @@ function AnalysisTransportDiagnosticsCard({
           </Stack>
         </Stack>
         <Stack spacing={1.1}>
+          <DetailRow label="Current stage" value={readableProgressStage(progress?.stage ?? analysisJob?.status)} />
           <DetailRow label="Stream connected" value={diagnostics.isConnected ? 'Yes' : 'No'} />
           <DetailRow label="Reconnect count" value={String(diagnostics.reconnectCount)} />
           <DetailRow
@@ -3664,8 +3863,16 @@ function AnalysisTransportDiagnosticsCard({
             value={diagnostics.lastConnectedAt ? formatTimestamp(diagnostics.lastConnectedAt) : 'Not connected yet'}
           />
           <DetailRow
+            label="Last heartbeat"
+            value={diagnostics.lastHeartbeatAt ? formatTimestamp(diagnostics.lastHeartbeatAt) : 'Waiting for heartbeat'}
+          />
+          <DetailRow
             label="Queue wait"
-            value={progress?.diagnostics?.queueWaitMs != null ? `${progress.diagnostics.queueWaitMs} ms` : 'Pending'}
+            value={queueWaitMs != null ? `${queueWaitMs} ms` : 'Pending'}
+          />
+          <DetailRow
+            label="Processing time"
+            value={processingDurationMs != null ? `${processingDurationMs} ms` : 'Pending'}
           />
           <DetailRow
             label="First result"
@@ -3678,11 +3885,9 @@ function AnalysisTransportDiagnosticsCard({
           <DetailRow
             label="Delivery time"
             value={
-              progress?.diagnostics?.resultDeliveryMs != null
-                ? `${progress.diagnostics.resultDeliveryMs} ms`
-                : analysisJob?.status === 'completed'
-                  ? `${calculateElapsedMs(analysisJob.created_at, analysisJob.finished_at || null) ?? 0} ms`
-                  : 'Pending'
+              resultDeliveryMs != null
+                ? `${resultDeliveryMs} ms`
+                : 'Pending'
             }
           />
         </Stack>
@@ -3947,40 +4152,119 @@ function CalibrationPanel({
 function ResultStateBanner({
   resultState,
   analysisJob,
+  diagnostics,
   progressLabel,
+  sessionToken,
+  onRerunSuccess,
 }: {
   resultState: 'empty' | 'loading' | 'partial' | 'ready' | 'failed'
   analysisJob: AnalysisJob | null
+  diagnostics: AnalysisTransportDiagnostics
   progressLabel: string | null
+  sessionToken?: string
+  onRerunSuccess?: (job: AnalysisJob) => void
 }) {
+  const [rerunning, setRerunning] = useState(false)
+  const [rerunError, setRerunError] = useState<string | null>(null)
+
+  const transportAlert =
+    analysisJob && analysisJob.status !== 'completed' && analysisJob.status !== 'failed'
+      ? diagnostics.mode === 'polling'
+        ? (
+            <Alert severity="warning">
+              Live updates disconnected. The page switched to polling every 4 seconds for this run. {reconnectAttemptLabel(diagnostics.reconnectCount)} recorded.
+            </Alert>
+          )
+        : !diagnostics.isConnected
+          ? (
+              <Alert severity="info">
+                Connecting to live updates. The page will fall back to polling if the stream cannot stay open.
+              </Alert>
+            )
+          : null
+      : null
+
+  const handleRerun = async () => {
+    if (!analysisJob || !sessionToken) return
+    setRerunning(true)
+    setRerunError(null)
+    try {
+      const response = await apiRequest<{ job: AnalysisJob }>(
+        `/analysis/jobs/${analysisJob.id}/rerun`,
+        { method: 'POST', sessionToken }
+      )
+      onRerunSuccess?.(response.job)
+    } catch (err) {
+      setRerunError(err instanceof Error ? err.message : 'Failed to rerun job.')
+    } finally {
+      setRerunning(false)
+    }
+  }
+
   if (resultState === 'ready') {
     return null
   }
   if (resultState === 'failed') {
-    return <Alert severity="error">{analysisJob?.error_message || 'Analysis failed before results were produced.'}</Alert>
+    return (
+      <Stack spacing={1}>
+        {transportAlert}
+        <Alert
+          severity="error"
+          action={
+            sessionToken ? (
+              <Button
+                color="inherit"
+                size="small"
+                disabled={rerunning}
+                onClick={handleRerun}
+              >
+                {rerunning ? 'Retrying…' : 'Retry'}
+              </Button>
+            ) : undefined
+          }
+        >
+          {analysisJob?.error_message || 'Analysis failed before results were produced.'}
+        </Alert>
+        {rerunError ? <Alert severity="warning">{rerunError}</Alert> : null}
+      </Stack>
+    )
   }
   if (resultState === 'partial') {
     if (analysisJob?.status === 'completed' && !progressLabel) {
-      return <Alert severity="warning">The job completed, but the dashboard payload is still being fetched.</Alert>
+      return (
+        <Stack spacing={1}>
+          {transportAlert}
+          <Alert severity="warning">The job completed, but the dashboard payload is still being fetched.</Alert>
+        </Stack>
+      )
     }
     return (
-      <Alert severity="info">
-        {progressLabel || 'Provisional charts are ready.'} Recommendations and exports will unlock after postprocessing finishes.
-      </Alert>
+      <Stack spacing={1}>
+        {transportAlert}
+        <Alert severity="info">
+          {progressLabel || 'Provisional charts are ready.'} Recommendations and exports will unlock after postprocessing finishes.
+        </Alert>
+      </Stack>
     )
   }
   if (resultState === 'loading') {
     return (
-      <Alert severity="info">
-        {progressLabel || 'The worker is building events, running TRIBE inference, and postprocessing dashboard outputs.'}
-      </Alert>
+      <Stack spacing={1}>
+        {transportAlert}
+        <Alert severity="info">
+          {progressLabel || 'The worker is building events, running TRIBE inference, and postprocessing dashboard outputs.'}
+        </Alert>
+      </Stack>
     )
   }
   return (
-    <Alert severity="info">
-      Upload or select an asset, set the review goal, then start analysis. If you want to resume an earlier run instead,
-      open the recent analyses panel.
-    </Alert>
+    <Stack spacing={1}>
+      {transportAlert}
+      <Alert severity="info">
+        Upload or select an asset, set the review goal, then start analysis. If you want to resume an earlier run instead,
+        open the recent analyses panel.
+      </Alert>
+    </Stack>
   )
 }
 
@@ -4074,13 +4358,300 @@ function TimelineChart({ points }: { points: AnalysisTimelinePoint[] }) {
   )
 }
 
-function HeatmapFramesCard({
+function TimelineChartSkeleton({ label }: { label: string }) {
+  return (
+    <Stack spacing={1.5}>
+      <Box
+        className="analysis-timeline-chart"
+        sx={{
+          borderRadius: '24px',
+          border: '1px solid rgba(24, 34, 48, 0.08)',
+          p: 2,
+        }}
+      >
+        <Stack spacing={1.25}>
+          <Skeleton height={18} sx={{ transform: 'none' }} width="100%" />
+          <Skeleton height={18} sx={{ transform: 'none' }} width="92%" />
+          <Skeleton height={18} sx={{ transform: 'none' }} width="84%" />
+          <Skeleton height={18} sx={{ transform: 'none' }} width="76%" />
+          <Stack direction="row" justifyContent="space-between" spacing={1}>
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={`timeline-axis-${index}`} height={18} sx={{ transform: 'none' }} width={42} />
+            ))}
+          </Stack>
+        </Stack>
+      </Box>
+      <Typography color="text.secondary" variant="body2">
+        {label}
+      </Typography>
+    </Stack>
+  )
+}
+
+function VideoFrameStrip({
   frames,
   hasResults,
+  isScoringReady,
+  asset,
+  sessionToken,
+}: {
+  frames: AnalysisFrameBreakdownItem[]
+  hasResults: boolean
+  isScoringReady: boolean
+  asset: AnalysisAsset | null
+  sessionToken: string | null
+}) {
+  const [frameThumbnails, setFrameThumbnails] = useState<Record<number, string>>({})
+  const [thumbnailAspectRatio, setThumbnailAspectRatio] = useState('16 / 9')
+  const [thumbnailState, setThumbnailState] = useState<'idle' | 'loading' | 'ready' | 'failed'>('idle')
+  const frameTimestampsKey = frames.map((frame) => frame.timestamp_ms).join(',')
+  const thumbnailCacheRef = useRef(
+    new Map<string, { previewsByTimestamp: Record<number, string>; aspectRatio: string }>(),
+  )
+
+  useEffect(() => {
+    let isCancelled = false
+
+    if (!hasResults || !asset || asset.media_type !== 'video' || !sessionToken || frames.length === 0) {
+      setFrameThumbnails({})
+      setThumbnailAspectRatio('16 / 9')
+      setThumbnailState('idle')
+      return () => {
+        isCancelled = true
+      }
+    }
+
+    if (!canExtractVideoFrames(asset.mime_type)) {
+      setFrameThumbnails({})
+      setThumbnailAspectRatio('16 / 9')
+      setThumbnailState('failed')
+      return () => {
+        isCancelled = true
+      }
+    }
+
+    const controller = new AbortController()
+    const thumbnailCacheKey = `${asset.id}:${frameTimestampsKey}`
+
+    const cachedResult = thumbnailCacheRef.current.get(thumbnailCacheKey)
+    if (cachedResult) {
+      setFrameThumbnails(cachedResult.previewsByTimestamp)
+      setThumbnailAspectRatio(cachedResult.aspectRatio)
+      setThumbnailState('ready')
+      return () => {
+        isCancelled = true
+        controller.abort()
+      }
+    }
+
+    const loadThumbnails = async () => {
+      setThumbnailState('loading')
+      try {
+        const response = await apiFetch(`/api/v1/analysis/assets/${asset.id}/media`, {
+          sessionToken,
+          signal: controller.signal,
+        })
+        const blob = await response.blob()
+        if (isCancelled) {
+          return
+        }
+
+        const { previewsByTimestamp, aspectRatio } = await generateFrameThumbnailMap({
+          blob,
+          frames,
+          mimeType: asset.mime_type || 'video/mp4',
+          signal: controller.signal,
+        })
+
+        if (isCancelled) {
+          return
+        }
+
+        thumbnailCacheRef.current.set(thumbnailCacheKey, {
+          previewsByTimestamp,
+          aspectRatio,
+        })
+        setFrameThumbnails(previewsByTimestamp)
+        setThumbnailAspectRatio(aspectRatio)
+        setThumbnailState('ready')
+      } catch (error) {
+        if (isCancelled || controller.signal.aborted) {
+          return
+        }
+        setFrameThumbnails({})
+        setThumbnailAspectRatio('16 / 9')
+        setThumbnailState('failed')
+        console.warn('Unable to generate analysis frame thumbnails.', error)
+      }
+    }
+
+    void loadThumbnails()
+
+    return () => {
+      isCancelled = true
+      controller.abort()
+    }
+  }, [asset?.id, asset?.media_type, asset?.mime_type, frameTimestampsKey, frames, hasResults, sessionToken])
+
+  if (!hasResults) {
+    return (
+      <Box className="analysis-frame-strip" data-testid="frame-breakdown-strip">
+        <Typography color="text.secondary" sx={{ mb: 1.5 }} variant="body2">
+          Extracted frame previews will populate here once the analysis result is ready.
+        </Typography>
+        <Box className="analysis-frame-grid">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Box className="analysis-frame-card analysis-frame-card--placeholder" key={i}>
+              <Box className="analysis-frame-card__thumbnail analysis-frame-card__thumbnail--placeholder" />
+              <Box className="analysis-frame-card__title-skeleton" />
+              <Box className="analysis-frame-card__subtitle-skeleton" />
+            </Box>
+          ))}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (frames.length === 0) {
+    return (
+      <Typography color="text.secondary" variant="body2">
+        No analysis timestamps are available for this run yet.
+      </Typography>
+    )
+  }
+
+  return (
+    <Box
+      aria-label="Frame-by-frame breakdown"
+      className="analysis-frame-strip"
+      data-testid="frame-breakdown-strip"
+    >
+      <Box className="analysis-frame-grid">
+        {frames.map((frame) => {
+          const thumbnailSrc = frameThumbnails[frame.timestamp_ms]
+          const hasThumbnail = Boolean(thumbnailSrc)
+
+          return (
+            <Box
+              className="analysis-frame-card"
+              data-testid={`frame-breakdown-card-${frame.timestamp_ms}`}
+              key={frame.timestamp_ms}
+            >
+              <Box
+                className="analysis-frame-card__thumbnail"
+                sx={{ aspectRatio: thumbnailAspectRatio }}
+              >
+                {hasThumbnail ? (
+                  <Box
+                    alt={`${frame.label} preview`}
+                    className="analysis-frame-card__image"
+                    component="img"
+                    src={thumbnailSrc}
+                  />
+                ) : (
+                  <Box className="analysis-frame-card__thumbnail-fallback">
+                    <Typography variant="caption">
+                      {thumbnailState === 'loading' ? 'Loading frame...' : 'Preview unavailable'}
+                    </Typography>
+                  </Box>
+                )}
+                <Box className="analysis-frame-card__time-badge">
+                  <Typography variant="caption">{formatDuration(frame.timestamp_ms)}</Typography>
+                </Box>
+              </Box>
+
+              <Stack spacing={0.75}>
+                <Typography variant="subtitle2">{frame.label}</Typography>
+                <Typography color="text.secondary" variant="caption">
+                  {frame.scene_label}
+                </Typography>
+                <Chip
+                  label={frame.strongest_zone ? formatZoneLabel(frame.strongest_zone) : 'Zone unavailable'}
+                  size="small"
+                  variant="outlined"
+                />
+              </Stack>
+
+              <Box className="analysis-frame-card__scores">
+                <Box className="analysis-frame-card__score-row">
+                  <Typography color="text.secondary" variant="caption">
+                    Attention
+                  </Typography>
+                  {isScoringReady ? (
+                    <Typography variant="caption">{Math.round(frame.attention_score)}/100</Typography>
+                  ) : (
+                    <Skeleton height={18} sx={{ transform: 'none' }} width={54} />
+                  )}
+                </Box>
+                <Box className="analysis-frame-card__score-row">
+                  <Typography color="text.secondary" variant="caption">
+                    Engagement
+                  </Typography>
+                  {isScoringReady ? (
+                    <Typography variant="caption">{Math.round(frame.engagement_score)}/100</Typography>
+                  ) : (
+                    <Skeleton height={18} sx={{ transform: 'none' }} width={54} />
+                  )}
+                </Box>
+                <Box className="analysis-frame-card__score-row">
+                  <Typography color="text.secondary" variant="caption">
+                    Memory
+                  </Typography>
+                  {isScoringReady ? (
+                    <Typography variant="caption">{Math.round(frame.memory_proxy)}/100</Typography>
+                  ) : (
+                    <Skeleton height={18} sx={{ transform: 'none' }} width={54} />
+                  )}
+                </Box>
+              </Box>
+            </Box>
+          )
+        })}
+      </Box>
+    </Box>
+  )
+}
+
+function HeatmapFramesCard({
+  frames,
+  isSceneReady,
+  isScoringReady,
+  loadingLabel,
 }: {
   frames: AnalysisHeatmapFrame[]
-  hasResults: boolean
+  isSceneReady: boolean
+  isScoringReady: boolean
+  loadingLabel: string
 }) {
+  if (!isSceneReady) {
+    return (
+      <Stack spacing={1.25}>
+        {Array.from({ length: 2 }).map((_, index) => (
+          <Box className="analysis-heatmap-frame" key={`heatmap-skeleton-${index}`}>
+            <Stack direction="row" justifyContent="space-between" spacing={2}>
+              <Box sx={{ flex: 1 }}>
+                <Skeleton height={24} sx={{ transform: 'none' }} width="52%" />
+                <Skeleton height={18} sx={{ transform: 'none' }} width="68%" />
+              </Box>
+              <Skeleton height={30} sx={{ borderRadius: 999, transform: 'none' }} width={112} />
+            </Stack>
+            <Box
+              className="analysis-heatmap-frame__grid"
+              sx={{ gridTemplateColumns: 'repeat(3, minmax(44px, 1fr))' }}
+            >
+              {Array.from({ length: 9 }).map((__, cellIndex) => (
+                <Skeleton key={`heatmap-cell-${index}-${cellIndex}`} height={52} sx={{ transform: 'none' }} variant="rounded" />
+              ))}
+            </Box>
+          </Box>
+        ))}
+        <Typography color="text.secondary" variant="body2">
+          {loadingLabel}
+        </Typography>
+      </Stack>
+    )
+  }
+
   return (
     <Box className="analysis-heatmap-frame-list">
       {frames.map((frame) => (
@@ -4092,7 +4663,11 @@ function HeatmapFramesCard({
                 {frame.scene_label} at {formatDuration(frame.timestamp_ms)}
               </Typography>
             </Box>
-            <Chip label={formatZoneLabel(frame.strongest_zone)} size="small" variant="outlined" />
+            <Chip
+              label={isScoringReady ? formatZoneLabel(frame.strongest_zone) : 'Pending scoring'}
+              size="small"
+              variant="outlined"
+            />
           </Stack>
 
           <Box
@@ -4105,17 +4680,25 @@ function HeatmapFramesCard({
                   className="analysis-heatmap-frame__cell"
                   key={`${frame.timestamp_ms}-${rowIndex}-${columnIndex}`}
                   sx={{
-                    bgcolor: `rgba(59, 91, 219, ${Math.max(0.08, Math.min(0.9, value / 100))})`,
+                    bgcolor: isScoringReady
+                      ? `rgba(59, 91, 219, ${Math.max(0.08, Math.min(0.9, value / 100))})`
+                      : 'rgba(148, 163, 184, 0.14)',
                   }}
                 >
-                  <Typography variant="caption">{hasResults ? Math.round(value) : '--'}</Typography>
+                  {isScoringReady ? (
+                    <Typography variant="caption">{Math.round(value)}</Typography>
+                  ) : (
+                    <Skeleton height={18} sx={{ transform: 'none', mx: 'auto' }} width={22} />
+                  )}
                 </Box>
               )),
             )}
           </Box>
 
           <Typography color="text.secondary" variant="body2">
-            {frame.caption}
+            {isScoringReady
+              ? frame.caption
+              : 'Frame scaffolding is ready. Zone intensity scores will fill in after primary scoring completes.'}
           </Typography>
         </Box>
       ))}
@@ -4127,11 +4710,22 @@ function AttentionIntervalsCard({
   highAttentionIntervals,
   lowAttentionIntervals,
   hasResults,
+  loadingLabel,
 }: {
   highAttentionIntervals: AnalysisInterval[]
   lowAttentionIntervals: AnalysisInterval[]
   hasResults: boolean
+  loadingLabel: string
 }) {
+  if (!hasResults) {
+    return (
+      <Box className="analysis-interval-grid">
+        <IntervalSkeletonColumn title="High attention" loadingLabel={loadingLabel} />
+        <IntervalSkeletonColumn title="Low attention" loadingLabel={loadingLabel} />
+      </Box>
+    )
+  }
+
   return (
     <Box className="analysis-interval-grid">
       <IntervalColumn
@@ -4147,6 +4741,29 @@ function AttentionIntervalsCard({
         tone="#c2410c"
       />
     </Box>
+  )
+}
+
+function IntervalSkeletonColumn({
+  title,
+  loadingLabel,
+}: {
+  title: string
+  loadingLabel: string
+}) {
+  return (
+    <Stack spacing={1.5}>
+      <Typography variant="subtitle2">{title}</Typography>
+      <Box className="analysis-empty-state">
+        <Stack spacing={1.1} sx={{ width: '100%' }}>
+          <Skeleton height={56} sx={{ transform: 'none' }} variant="rounded" />
+          <Skeleton height={56} sx={{ transform: 'none' }} variant="rounded" />
+          <Typography color="text.secondary" variant="body2">
+            {loadingLabel}
+          </Typography>
+        </Stack>
+      </Box>
+    </Stack>
   )
 }
 
@@ -4198,20 +4815,44 @@ function RecommendationsCard({
   recommendations,
   hasResults,
   isPartial,
+  isReady,
+  loadingLabel,
   summary,
 }: {
   recommendations: AnalysisRecommendation[]
   hasResults: boolean
   isPartial: boolean
+  isReady: boolean
+  loadingLabel: string
   summary: AnalysisSummary
 }) {
-  if (!hasResults) {
+  if (!hasResults && !isPartial) {
     return (
       <Box className="analysis-empty-state">
         <Typography color="text.secondary" variant="body2">
           Recommendations are generated after postprocessing turns the TRIBE output into marketer-facing intervals and metrics.
         </Typography>
       </Box>
+    )
+  }
+
+  if (!isReady) {
+    return (
+      <Stack spacing={1.5}>
+        <Typography color="text.secondary" variant="body2">
+          {loadingLabel}
+        </Typography>
+        {Array.from({ length: 2 }).map((_, index) => (
+          <Box className="analysis-recommendation" key={`recommendation-skeleton-${index}`}>
+            <Stack direction="row" justifyContent="space-between" spacing={1.5}>
+              <Skeleton height={24} sx={{ transform: 'none' }} width="56%" />
+              <Skeleton height={30} sx={{ borderRadius: 999, transform: 'none' }} width={72} />
+            </Stack>
+            <Skeleton height={18} sx={{ transform: 'none', mt: 1 }} width="100%" />
+            <Skeleton height={18} sx={{ transform: 'none' }} width="82%" />
+          </Box>
+        ))}
+      </Stack>
     )
   }
 
@@ -4809,7 +5450,179 @@ function buildSummaryCards(summary: AnalysisSummary): SummaryCard[] {
   ]
 }
 
-function resolveCurrentStage(uploadStage: UploadStage, jobStatus?: AnalysisJob['status']) {
+function buildFrameBreakdownItems({
+  timelinePoints,
+  segmentsRows,
+  heatmapFrames,
+}: {
+  timelinePoints: AnalysisTimelinePoint[]
+  segmentsRows: AnalysisSegmentRow[]
+  heatmapFrames: AnalysisHeatmapFrame[]
+}): AnalysisFrameBreakdownItem[] {
+  const heatmapFrameByTimestamp = new Map(heatmapFrames.map((frame) => [frame.timestamp_ms, frame]))
+
+  return timelinePoints.map((point, index) => {
+    const matchingSegment =
+      segmentsRows[index] ??
+      segmentsRows.find((segment) => point.timestamp_ms >= segment.start_time_ms && point.timestamp_ms <= segment.end_time_ms) ??
+      [...segmentsRows].reverse().find((segment) => segment.start_time_ms <= point.timestamp_ms)
+    const matchingHeatmapFrame = heatmapFrameByTimestamp.get(point.timestamp_ms)
+
+    return {
+      timestamp_ms: point.timestamp_ms,
+      label: `Frame ${index + 1}`,
+      scene_label: matchingSegment?.label ?? matchingHeatmapFrame?.scene_label ?? `Scene ${String(index + 1).padStart(2, '0')}`,
+      strongest_zone: matchingHeatmapFrame?.strongest_zone ?? null,
+      attention_score: point.attention_score,
+      engagement_score: point.engagement_score,
+      memory_proxy: point.memory_proxy,
+    }
+  })
+}
+
+function canExtractVideoFrames(mimeType: string | null | undefined) {
+  if (typeof document === 'undefined') {
+    return false
+  }
+
+  const probe = document.createElement('video')
+  if (typeof probe.canPlayType !== 'function') {
+    return false
+  }
+
+  const resolvedMimeType = mimeType || 'video/mp4'
+  return probe.canPlayType(resolvedMimeType) !== ''
+}
+
+async function generateFrameThumbnailMap({
+  blob,
+  frames,
+  mimeType,
+  signal,
+}: {
+  blob: Blob
+  frames: AnalysisFrameBreakdownItem[]
+  mimeType: string
+  signal: AbortSignal
+}): Promise<{
+  previewsByTimestamp: Record<number, string>
+  aspectRatio: string
+}> {
+  const objectUrl = window.URL.createObjectURL(new Blob([blob], { type: mimeType || blob.type || 'video/mp4' }))
+  const video = document.createElement('video')
+  video.preload = 'auto'
+  video.muted = true
+  video.playsInline = true
+  video.src = objectUrl
+
+  try {
+    await waitForVideoEvent(video, 'loadedmetadata', signal)
+
+    const previewWidth = 320
+    const aspectRatioValue =
+      video.videoWidth > 0 && video.videoHeight > 0 ? `${video.videoWidth} / ${video.videoHeight}` : '16 / 9'
+    const previewHeight =
+      video.videoWidth > 0 && video.videoHeight > 0
+        ? Math.max(180, Math.round(previewWidth * (video.videoHeight / video.videoWidth)))
+        : 180
+    const canvas = document.createElement('canvas')
+    canvas.width = previewWidth
+    canvas.height = previewHeight
+    const context = canvas.getContext('2d')
+    if (!context) {
+      throw new Error('Canvas context is unavailable.')
+    }
+
+    const previewsByTimestamp: Record<number, string> = {}
+
+    for (const frame of frames) {
+      if (signal.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError')
+      }
+
+      const targetTimeSeconds = resolveThumbnailSeekTime({
+        durationSeconds: video.duration,
+        timestampMs: frame.timestamp_ms,
+      })
+      video.currentTime = targetTimeSeconds
+      await waitForVideoEvent(video, 'seeked', signal)
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      previewsByTimestamp[frame.timestamp_ms] = canvas.toDataURL('image/jpeg', 0.76)
+    }
+
+    return {
+      previewsByTimestamp,
+      aspectRatio: aspectRatioValue,
+    }
+  } finally {
+    window.URL.revokeObjectURL(objectUrl)
+    video.removeAttribute('src')
+    video.load()
+  }
+}
+
+function resolveThumbnailSeekTime({
+  durationSeconds,
+  timestampMs,
+}: {
+  durationSeconds: number
+  timestampMs: number
+}) {
+  const fallbackSeconds = Math.max(0.05, timestampMs / 1000)
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return fallbackSeconds
+  }
+
+  return Math.min(Math.max(0.05, timestampMs / 1000), Math.max(0.05, durationSeconds - 0.05))
+}
+
+function waitForVideoEvent(
+  video: HTMLVideoElement,
+  eventName: 'loadedmetadata' | 'seeked',
+  signal: AbortSignal,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup()
+      reject(new Error(`Timed out while waiting for video event: ${eventName}.`))
+    }, 4000)
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId)
+      video.removeEventListener(eventName, handleSuccess)
+      video.removeEventListener('error', handleError)
+      signal.removeEventListener('abort', handleAbort)
+    }
+
+    const handleSuccess = () => {
+      cleanup()
+      resolve()
+    }
+
+    const handleError = () => {
+      cleanup()
+      reject(new Error(`Unable to load video event: ${eventName}.`))
+    }
+
+    const handleAbort = () => {
+      cleanup()
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+
+    video.addEventListener(eventName, handleSuccess, { once: true })
+    video.addEventListener('error', handleError, { once: true })
+    signal.addEventListener('abort', handleAbort, { once: true })
+  })
+}
+
+function resolveCurrentStage(
+  progressStage: string | null | undefined,
+  uploadStage: UploadStage,
+  jobStatus?: AnalysisJob['status'],
+) {
+  if (progressStage) {
+    return progressStage
+  }
   if (jobStatus) {
     return jobStatus
   }
@@ -4826,6 +5639,73 @@ function resolveCurrentStage(uploadStage: UploadStage, jobStatus?: AnalysisJob['
     return 'failed'
   }
   return 'idle'
+}
+
+function resolveVisibleProgressState(
+  analysisProgress: AnalysisProgressState | null,
+  evaluationProgress: AnalysisProgressState | null,
+): AnalysisProgressState | null {
+  if (!evaluationProgress) {
+    return analysisProgress
+  }
+
+  return {
+    ...evaluationProgress,
+    diagnostics:
+      analysisProgress?.jobId === evaluationProgress.jobId
+        ? analysisProgress.diagnostics
+        : evaluationProgress.diagnostics,
+  }
+}
+
+function resolveAnalysisStageAvailability({
+  analysisResult,
+  analysisPreviewResult,
+  currentStage,
+}: {
+  analysisResult: AnalysisResult | null
+  analysisPreviewResult: AnalysisResult | null
+  currentStage: string
+}) {
+  if (analysisResult) {
+    return {
+      sceneStructureReady: true,
+      primaryScoringReady: true,
+      recommendationsReady: true,
+    }
+  }
+
+  const sceneReadyStages = new Set([
+    'scene_extraction_ready',
+    'primary_scoring_started',
+    'primary_scoring_ready',
+    'postprocessing_started',
+    'recommendations_ready',
+    'completed',
+    'evaluation_queued',
+    'evaluation_started',
+  ])
+  const scoringReadyStages = new Set([
+    'primary_scoring_ready',
+    'postprocessing_started',
+    'recommendations_ready',
+    'completed',
+    'evaluation_queued',
+    'evaluation_started',
+  ])
+  const recommendationReadyStages = new Set([
+    'recommendations_ready',
+    'completed',
+    'evaluation_queued',
+    'evaluation_started',
+  ])
+  const hasPreview = Boolean(analysisPreviewResult)
+
+  return {
+    sceneStructureReady: hasPreview && sceneReadyStages.has(currentStage),
+    primaryScoringReady: hasPreview && scoringReadyStages.has(currentStage),
+    recommendationsReady: hasPreview && recommendationReadyStages.has(currentStage),
+  }
 }
 
 function resolveResultState({
@@ -4887,13 +5767,58 @@ function stageRows(currentStage: string) {
     },
     {
       label: 'Queued',
-      detail: 'The worker job has been created and handed off to Celery.',
+      detail: 'Upload finalization is done and the worker job is waiting for capacity.',
       isActive: currentStage === 'queued',
     },
     {
-      label: 'Processing',
-      detail: 'The worker is resolving the asset, generating events, running TRIBE, and postprocessing results.',
-      isActive: currentStage === 'processing',
+      label: 'Worker started',
+      detail: 'A worker claimed the job and is loading the creative inputs.',
+      isActive: currentStage === 'worker_started',
+    },
+    {
+      label: 'Asset resolved',
+      detail: 'Creative metadata and storage references are resolved for inference.',
+      isActive: currentStage === 'asset_resolved',
+    },
+    {
+      label: 'Inference started',
+      detail: 'TRIBE event extraction is running on the uploaded asset.',
+      isActive: currentStage === 'inference_started' || currentStage === 'processing',
+    },
+    {
+      label: 'Scene extraction ready',
+      detail: 'Scene windows and frame scaffolding are ready while scoring continues.',
+      isActive: currentStage === 'scene_extraction_ready',
+    },
+    {
+      label: 'Primary scoring started',
+      detail: 'Attention, memory, and cognitive-load metrics are being computed.',
+      isActive: currentStage === 'primary_scoring_started',
+    },
+    {
+      label: 'Primary scoring ready',
+      detail: 'Scored charts and provisional metrics are available while recommendations are pending.',
+      isActive: currentStage === 'primary_scoring_ready',
+    },
+    {
+      label: 'Post-processing started',
+      detail: 'Intervals and recommendation candidates are being composed from the scored output.',
+      isActive: currentStage === 'postprocessing_started',
+    },
+    {
+      label: 'Recommendations ready',
+      detail: 'Recommendation output is ready and the final dashboard payload is being persisted.',
+      isActive: currentStage === 'recommendations_ready',
+    },
+    {
+      label: 'Evaluation queued',
+      detail: 'LLM critique was requested and is waiting for evaluation worker capacity.',
+      isActive: currentStage === 'evaluation_queued',
+    },
+    {
+      label: 'Evaluation started',
+      detail: 'The evaluation worker is reading the completed analysis snapshot and drafting critique sections.',
+      isActive: currentStage === 'evaluation_started',
     },
     {
       label: 'Completed / Failed',
@@ -4901,6 +5826,54 @@ function stageRows(currentStage: string) {
       isActive: currentStage === 'completed' || currentStage === 'failed',
     },
   ]
+}
+
+function buildScenePendingMessage(stageAvailability: {
+  sceneStructureReady: boolean
+  primaryScoringReady: boolean
+  recommendationsReady: boolean
+}, currentStage: string) {
+  if (['idle', 'validating', 'uploading', 'uploaded'].includes(currentStage)) {
+    return 'Start analysis to populate scene windows and frame scaffolding.'
+  }
+  if (stageAvailability.sceneStructureReady) {
+    return 'Scene extraction is complete. Attention and engagement scores are still being computed.'
+  }
+  return 'Scene windows and frame scaffolding will appear after inference finishes extracting the first structure pass.'
+}
+
+function buildScoringPendingMessage(stageAvailability: {
+  sceneStructureReady: boolean
+  primaryScoringReady: boolean
+  recommendationsReady: boolean
+}, currentStage: string) {
+  if (['idle', 'validating', 'uploading', 'uploaded'].includes(currentStage)) {
+    return 'Start analysis to unlock scored attention, memory, and cognitive-load metrics.'
+  }
+  if (stageAvailability.sceneStructureReady) {
+    return 'Scene extraction is complete. Primary scoring is filling in attention, memory, and cognitive-load metrics now.'
+  }
+  return 'Primary metrics unlock after the first scene-extraction pass completes.'
+}
+
+function buildRecommendationsPendingMessage(stageAvailability: {
+  sceneStructureReady: boolean
+  primaryScoringReady: boolean
+  recommendationsReady: boolean
+}, currentStage: string) {
+  if (['idle', 'validating', 'uploading', 'uploaded'].includes(currentStage)) {
+    return 'Recommendations appear after a completed analysis run unlocks scoring and post-processing.'
+  }
+  if (stageAvailability.recommendationsReady) {
+    return 'Recommendations are ready.'
+  }
+  if (stageAvailability.primaryScoringReady) {
+    return 'Scored charts are ready. Recommendations are still being composed from the post-processed signals.'
+  }
+  if (stageAvailability.sceneStructureReady) {
+    return 'Recommendations unlock after the scored metrics and interval pass complete.'
+  }
+  return 'Recommendations appear after scene extraction, scoring, and post-processing finish.'
 }
 
 function buildSeriesPath(
@@ -5007,6 +5980,65 @@ function calculateElapsedMs(startValue: string | null | undefined, endValue: str
     return null
   }
   return Math.max(0, Math.round(endedAt.getTime() - startedAt.getTime()))
+}
+
+function normalizeAnalysisProgressState(
+  jobId: string,
+  progress:
+    | AnalysisJobStatusResponse['progress']
+    | Pick<AnalysisProgressEvent, 'stage' | 'stage_label' | 'diagnostics'>
+    | null
+    | undefined,
+): AnalysisProgressState | null {
+  if (!progress?.stage) {
+    return null
+  }
+
+  return {
+    jobId,
+    stage: progress.stage,
+    stageLabel: progress.stage_label || null,
+    diagnostics: {
+      queueWaitMs: progress.diagnostics?.queue_wait_ms ?? null,
+      processingDurationMs: progress.diagnostics?.processing_duration_ms ?? null,
+      timeToFirstResultMs: progress.diagnostics?.time_to_first_result_ms ?? null,
+      resultDeliveryMs: progress.diagnostics?.result_delivery_ms ?? null,
+      postprocessDurationMs: progress.diagnostics?.postprocess_duration_ms ?? null,
+    },
+  }
+}
+
+function readableProgressStage(value: string | null | undefined) {
+  if (!value) {
+    return 'Pending'
+  }
+
+  const labels: Record<string, string> = {
+    idle: 'Idle',
+    validating: 'Validating',
+    uploading: 'Uploading',
+    uploaded: 'Uploaded',
+    queued: 'Queued',
+    worker_started: 'Worker started',
+    asset_resolved: 'Asset resolved',
+    inference_started: 'Inference started',
+    scene_extraction_ready: 'Scene extraction ready',
+    primary_scoring_started: 'Primary scoring started',
+    primary_scoring_ready: 'Primary scoring ready',
+    postprocessing_started: 'Post-processing started',
+    recommendations_ready: 'Recommendations ready',
+    evaluation_queued: 'Evaluation queued',
+    evaluation_started: 'Evaluation started',
+    completed: 'Completed',
+    failed: 'Failed',
+    processing: 'Processing',
+  }
+
+  return labels[value] || value.replaceAll('_', ' ')
+}
+
+function reconnectAttemptLabel(count: number) {
+  return `${count} reconnect attempt${count === 1 ? '' : 's'}`
 }
 
 export default AnalysisPage
