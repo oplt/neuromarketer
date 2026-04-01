@@ -69,15 +69,24 @@ class AnalysisEvaluationApplicationService:
                         creative_version=self._get_loaded_creative_version(job),
                     )
                 evaluator = get_evaluator(mode)
+                route_preview = self._get_engine().preview_route(mode)
                 record = await self.evaluations.queue_evaluation(
                     existing=existing,
                     job_id=job.id,
                     user_id=user_id,
                     mode=mode,
-                    model_provider=settings.llm_provider,
-                    model_name=settings.llm_model,
+                    model_provider=route_preview.provider,
+                    model_name=route_preview.model,
                     prompt_version=evaluator.prompt_version,
                     input_snapshot_json=snapshot,
+                    metadata_json={
+                        "routing_preview": {
+                            "route_id": route_preview.route_id,
+                            "provider": route_preview.provider,
+                            "model": route_preview.model,
+                            "candidate_order": route_preview.candidate_order,
+                        }
+                    },
                 )
                 records.append(record)
                 dispatched_modes.append(mode)
@@ -167,6 +176,7 @@ class AnalysisEvaluationApplicationService:
                     model_provider=response.provider,
                     model_name=response.model,
                     prompt_version=response.prompt_version,
+                    metadata_json=response.telemetry,
                 )
                 await self.session.commit()
                 completed_record = await self.evaluations.get_for_job_and_mode(job_id=job_id, mode=mode)
@@ -185,7 +195,12 @@ class AnalysisEvaluationApplicationService:
                 await self.session.rollback()
                 refreshed_record = await self.evaluations.get_for_job_and_mode(job_id=job_id, mode=mode)
                 if refreshed_record is not None:
-                    await self.evaluations.mark_failed(record=refreshed_record, error_message=str(exc))
+                    failure_metadata = getattr(exc, "telemetry", None)
+                    await self.evaluations.mark_failed(
+                        record=refreshed_record,
+                        error_message=str(exc),
+                        metadata_json=failure_metadata if isinstance(failure_metadata, dict) else refreshed_record.metadata_json,
+                    )
                     await self.session.commit()
                     failed_record = await self.evaluations.get_for_job_and_mode(job_id=job_id, mode=mode)
                     if failed_record is None:
@@ -250,6 +265,7 @@ class AnalysisEvaluationApplicationService:
             model_name=record.model_name,
             prompt_version=record.prompt_version,
             evaluation_json=evaluation_json,
+            metadata_json=record.metadata_json or {},
             error_message=record.error_message,
             created_at=record.created_at,
             updated_at=record.updated_at,
@@ -269,6 +285,7 @@ class AnalysisEvaluationApplicationService:
         await self.evaluations.mark_failed(
             record=record,
             error_message="Evaluation processing timed out. Retry the evaluation.",
+            metadata_json=record.metadata_json,
         )
         await self.session.commit()
         refreshed_record = await self.evaluations.get_for_job_and_mode(job_id=record.job_id, mode=record.mode)
@@ -286,6 +303,7 @@ class AnalysisEvaluationApplicationService:
             await self.evaluations.mark_failed(
                 record=record,
                 error_message="Evaluation processing timed out. Retry the evaluation.",
+                metadata_json=record.metadata_json,
             )
 
         await self.session.commit()

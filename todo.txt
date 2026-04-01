@@ -1,0 +1,394 @@
+NeuroMarketer Sprint Plan
+Date: 2026-03-31
+
+Legend
+- [x] Implemented
+- [~] In progress
+- [ ] Planned
+
+Recommended build order
+- Sprint 1: P0-01, P0-02, P0-06
+- Sprint 2: P0-03, P0-04
+- Sprint 3: P0-05, P1-01
+- Sprint 4: P1-02, P1-04
+- Sprint 5+: P1-05, P2-02, P2-03
+
+Sprint 1: Guided analysis setup, structured goal context, product analytics
+Goal
+- Reduce first-session friction and make analysis setup understandable to non-technical marketing users.
+
+Success metrics
+- Decrease abandonment between upload and first completed analysis.
+- Increase share of users who finish the setup flow on first visit.
+- Capture clean event telemetry for every step from upload to completed analysis.
+
+Workstreams
+
+[x] P0-01 Guided analysis wizard
+Objective
+- Replace the single dense workflow with a clearer setup sequence: Asset -> Goal -> Results.
+
+Frontend tasks
+- [x] Add a visible flow overview so users understand where they are in the process.
+- [x] Split setup intent into explicit sections instead of relying on one long page.
+- [x] Promote the goal step so the user sets campaign intent before reviewing results.
+- [x] Move analysis history into a collapsible panel or secondary route to reduce clutter in the main flow.
+- [x] Promote compare/export/generate actions as primary actions in the results state once those features exist.
+- [x] Add empty-state guidance and recommended next action copy for users with no history.
+
+Backend tasks
+- [x] Keep job creation payloads aligned with the wizard fields and future compare/export actions.
+- [x] Ensure the job status response always returns enough state for the wizard to restore itself after refresh.
+
+Acceptance criteria
+- [x] A new user can identify the current step at a glance.
+- [x] The goal setup is visible and not hidden behind free-form text only.
+- [x] Refreshing the page preserves the current step and loaded job context.
+- [x] History no longer competes visually with the primary analysis path.
+
+[x] P0-02 Structured presets and job context
+Objective
+- Replace loosely structured campaign setup with predictable fields that improve consistency, downstream comparisons, and future benchmarking.
+
+Frontend tasks
+- [x] Add goal template presets.
+- [x] Add channel selection.
+- [x] Add audience segment input.
+- [x] Show the selected goal context in the workflow summary and analysis payload.
+- [x] Add validation and better default suggestions based on uploaded asset type.
+- [x] Add reusable preset groups for common workflows such as paid social, landing page hero, email, explainer, brand film, and UGC.
+
+Backend tasks
+- [x] Accept and validate `goal_template`, `channel`, and `audience_segment` in the analysis job request schema.
+- [x] Persist structured goal context in the job payload and processing pipeline.
+- [x] Pass goal context through post-processing and LLM context building so downstream recommendations use it.
+- [x] Add a dedicated endpoint for goal presets if product wants server-driven configuration later.
+- [x] Normalize channel and template values to controlled enums once the taxonomy stabilizes.
+
+Data and analytics tasks
+- [x] Record the selected goal template, channel, and audience segment in product telemetry.
+- [x] Track which presets lead to faster completion and higher compare usage.
+
+Acceptance criteria
+- [x] Structured goal context is captured end-to-end from UI to backend processing.
+- [x] Completed analysis results can display the stored goal context.
+- [x] Goal context is queryable for future comparison and benchmark features.
+
+[ ] P0-06 Product analytics and UX research hooks
+Objective
+- Instrument the user journey so product decisions are based on funnel evidence instead of intuition.
+
+Frontend tasks
+- [x] Track events for `upload_started`, `upload_completed`, `analysis_started`, `first_result_seen`, `analysis_completed`, `compare_clicked`, and `export_clicked`.
+- [x] Capture basic UX context such as asset type, selected goal template, channel, and whether the user is new or returning.
+- [x] Add instrumentation for error states, upload validation failures, and analysis retries.
+
+Backend tasks
+- [x] Provide a lightweight analytics ingestion path or integrate the existing logging pipeline with product events.
+- [ ] Include job timing metadata for queue wait time, processing time, and result delivery time.
+- [x] Make sure analytics collection is safe for authenticated multi-user environments.
+
+Research tasks
+- [ ] Create a small review template for usability interviews and funnel review notes.
+- [ ] Schedule 5-8 initial user sessions across performance marketers, creative strategists, and agency reviewers.
+- [ ] Define a research readout format with top friction points, direct quotes, and observed task failures.
+
+Acceptance criteria
+- [x] Product can answer where users drop off in the flow.
+- [ ] Product can measure time to first useful result.
+- [x] Product can segment behavior by channel and goal template.
+
+Sprint 2: Live transport and progressive analysis delivery
+Goal
+- Improve perceived speed and reduce uncertainty while jobs are running.
+
+Success metrics
+- Lower median time from job creation to first visible update.
+- Reduce support questions about whether the system is stalled.
+- Preserve analysis continuity during long-running jobs.
+
+Workstreams
+
+[x] P0-03 Live progress transport
+Objective
+- Replace naive polling with a live event stream for active analysis jobs.
+
+Frontend tasks
+- [x] Add an event-stream client helper.
+- [x] Subscribe active jobs to `/analysis/jobs/{job_id}/events`.
+- [x] Fall back to polling if the event stream fails.
+- [ ] Surface transport mode in diagnostics or developer tooling so support can debug live-update issues.
+- [ ] Add UI messaging for reconnect attempts and degraded polling mode.
+
+Backend tasks
+- [x] Add an authenticated SSE endpoint for job events.
+- [x] Publish job lifecycle events for running, completed, and failed states.
+- [x] Support Redis pub/sub when available and DB-based snapshot fallback when Redis is unavailable.
+- [ ] Add heartbeat events so proxies do not silently close long-lived streams.
+- [ ] Add more granular stage events such as upload finalized, queued, inference started, post-processing started, and evaluation started.
+
+Operations tasks
+- [ ] Validate SSE behavior behind the deployed reverse proxy and hosting stack.
+- [ ] Add observability for stream error rates, reconnect counts, and fallback frequency.
+
+Acceptance criteria
+- [x] Active jobs receive live status updates without relying on fixed-interval polling.
+- [x] If the stream fails, the UI continues via polling instead of breaking.
+- [ ] Stream behavior is validated in a real worker plus Redis environment.
+
+[x] P0-04 Progressive result rendering
+Objective
+- Deliver useful partial output before the full analysis is complete.
+
+Frontend tasks
+- [x] Render job metadata as soon as it exists.
+- [x] Show extracted scenes or frame summaries before final scoring is ready.
+- [x] Display provisional metrics with clear "updating" treatment.
+- [x] Reveal recommendations and LLM critique only when those stages complete.
+- [ ] Add skeleton states that align with actual pipeline stages rather than generic loading spinners.
+
+Backend tasks
+- [ ] Emit intermediate snapshots for scene extraction, primary scoring, post-processing, and evaluation.
+- [x] Define a stable partial-result schema so the UI can progressively hydrate sections.
+- [ ] Persist staged outputs only if needed for retries or page refresh restoration.
+- [x] Ensure partial payloads do not expose invalid or misleading "final" values.
+
+Acceptance criteria
+- [x] Users see meaningful intermediate progress within seconds of a job starting.
+- [x] The results page can render partial sections without throwing when later sections are absent.
+- [x] Final results replace provisional states cleanly with no data loss or flicker.
+
+Sprint 3: Comparison workflow and benchmark layer
+Goal
+- Turn the product from a single-asset analysis tool into a decision system for choosing winners.
+
+Success metrics
+- Increase compare usage per active account.
+- Increase repeat usage from teams reviewing multiple variants.
+- Give users a defensible sense of whether a score is good relative to peers.
+
+Workstreams
+
+[x] P0-05 Compare workspace
+Objective
+- Make side-by-side comparison a first-class workflow in the UI and data model.
+
+Frontend tasks
+- [x] Add a dedicated compare route or workspace entry point.
+- [x] Support selecting 2-5 assets or analyses for side-by-side review.
+- [x] Show a ranked winner card with key reasons.
+- [x] Add score-delta views, scene-by-scene differences, and recommendation overlap/differences.
+- [x] Persist compare history so users can revisit earlier decisions.
+
+Backend tasks
+- [x] Reuse and harden the existing compare endpoint for production UI use.
+- [x] Add list/get comparison endpoints if the current API is write-only or transient.
+- [x] Store compare sessions, selected variants, benchmark context, and chosen winner.
+
+Acceptance criteria
+- [x] A user can compare multiple assets from the product without manual copy/paste.
+- [x] The product clearly identifies a likely winner and the strongest reasons behind that decision.
+- [x] Compare history can be reopened later by the same authenticated user or workspace.
+
+[ ] P1-01 Benchmark service and percentile UI
+Objective
+- Put every score in context so users know whether an asset is strong, average, or weak for its cohort.
+
+Backend tasks
+- [ ] Design benchmark dimensions: channel, objective, asset type, duration bucket, and possibly region.
+- [ ] Add tables or materialized aggregates for cohort statistics.
+- [ ] Build a service that returns percentiles, cohort size, and benchmark metadata for a given analysis.
+- [ ] Add jobs to recalculate benchmark aggregates regularly.
+
+Frontend tasks
+- [ ] Show percentile bars and clear cohort labels.
+- [ ] Add traffic-light verdicts backed by benchmark position.
+- [ ] Show benchmark source context such as "Meta feed videos 15-30s, conversion objective".
+- [ ] Add compare overlays that show which variant wins by benchmarked percentile rather than raw score alone.
+
+Data tasks
+- [ ] Seed benchmarks from existing internal analysis history.
+- [ ] Define data quality thresholds so small cohorts do not produce misleading percentiles.
+
+Acceptance criteria
+- [ ] Analysis results show percentile context for the main metrics.
+- [ ] Benchmarks are cohort-aware and not global averages.
+- [ ] The UI explains what the benchmark cohort means in plain language.
+
+[x] P1-03 Collaboration and review ops
+Objective
+- Make analysis and comparison workflows usable by real teams, not just a single operator.
+
+Backend tasks
+- [x] Add persisted collaboration review records keyed to analysis jobs and saved comparisons.
+- [x] Add timestamp comment records with author, optional timestamp, and segment labels.
+- [x] Expose collaboration API endpoints for workspace members, review state, assignee updates, and comment creation.
+- [x] Validate that collaboration targets belong to the active analysis workspace surface.
+
+Frontend tasks
+- [x] Add a reusable collaboration panel with review status, assignee, summary, and comment composer.
+- [x] Mount review ops directly inside the analysis workspace for per-run timestamp feedback.
+- [x] Mount review ops inside the compare workspace for saved winner decisions.
+- [x] Keep the collaboration surface inert until a concrete analysis or comparison is selected.
+
+Acceptance criteria
+- [x] Users can assign a review owner and update status on an analysis run.
+- [x] Users can leave timestamp comments on analysis runs and general comments on comparisons.
+- [x] Review state persists on saved compare decisions instead of disappearing on refresh.
+
+Sprint 4: Executive outputs and outcome calibration
+Goal
+- Make results shareable with stakeholders and tie model predictions to actual campaign outcomes.
+
+Success metrics
+- Increase report/export usage.
+- Increase trust via prediction-vs-actual calibration.
+- Improve retention among performance teams and agencies.
+
+Workstreams
+
+[ ] P1-02 Executive verdict and exports
+Objective
+- Summarize complex analysis into a fast decision output that can be shared safely.
+
+Frontend tasks
+- [ ] Add a clear verdict component: Ship, Iterate, or High risk.
+- [ ] Show the top strengths, top risks, and top recommended fixes in a compact executive summary.
+- [ ] Add export actions for PDF and CSV.
+- [ ] Add presentation mode or share view for stakeholder-friendly readouts.
+
+Backend tasks
+- [ ] Build export payload generation and file responses.
+- [ ] Add signed share links with expiry if guest viewing is required.
+- [ ] Ensure exports include selected goal context and benchmark context once available.
+
+Acceptance criteria
+- [ ] A user can share the core conclusion without opening the full detailed analysis.
+- [ ] Exports render consistently and omit internal-only UI noise.
+- [ ] Executive summary wording matches the underlying metric logic.
+
+[ ] P1-04 Outcome import and calibration dashboard
+Objective
+- Close the loop between predicted performance and actual campaign results.
+
+Backend tasks
+- [ ] Add CSV import for outcomes from Meta, TikTok, YouTube, Google Ads, and GA4 as the first delivery step.
+- [ ] Map campaign and asset identifiers to analyzed creative versions.
+- [ ] Use `OutcomeEvent` and `CalibrationObservation` to persist ground truth.
+- [ ] Build services to aggregate predicted vs actual performance over time.
+
+Frontend tasks
+- [ ] Add an integrations or imports screen.
+- [ ] Add calibration charts for predicted versus actual CTR, CVR, watch time, completion rate, and similar metrics.
+- [ ] Show model confidence and calibration drift summaries.
+- [ ] Surface cases where the model systematically over- or under-predicts.
+
+Acceptance criteria
+- [ ] Product supports at least one practical outcome import workflow.
+- [ ] Users can see prediction-vs-actual results on a dashboard.
+- [ ] Calibration views identify both model fit and weak spots.
+
+Sprint 5+: Account controls, generated variants, cost-aware model routing
+Goal
+- Make the system operationally viable for teams while differentiating with action-oriented AI workflows.
+
+Success metrics
+- Reduce manual admin overhead.
+- Increase acceptance and usage of generated recommendations.
+- Keep LLM latency and cost predictable as usage scales.
+
+Workstreams
+
+[x] P1-05 Real account and admin controls
+Objective
+- Replace placeholder account settings with production-ready workspace controls.
+
+Frontend tasks
+- [x] Build pages for API keys, webhook endpoints, workspace members, usage, and billing-relevant usage summaries.
+- [x] Add clear states for admins versus regular members.
+
+Backend tasks
+- [x] Add API key management, rotation, and revocation.
+- [x] Add webhook configuration and secret rotation.
+- [x] Add member role management for the active workspace.
+- [x] Strengthen audit logging for account and workspace actions.
+
+Acceptance criteria
+- [x] An admin can manage keys, webhooks, and members without manual database work.
+- [x] Sensitive account actions are logged and reviewable.
+
+[x] P2-02 AI-generated variants
+Objective
+- Turn recommendations into editable creative variants instead of stopping at diagnosis.
+
+Frontend tasks
+- [x] Add "Generate variants" actions for hook rewrite, CTA rewrite, shorter script, and thumbnail concept generation.
+- [x] Show generated outputs side by side with the original.
+- [x] Allow users to save, compare, or regenerate variants.
+
+Backend tasks
+- [x] Wire optimization services to create and store generated variants.
+- [x] Store source-suggestion metadata and projected score deltas with each generated variant.
+- [x] Support projected original-versus-variant comparison directly from the analysis workflow.
+
+Acceptance criteria
+- [x] Users can generate at least one useful alternative directly from an analysis result.
+- [x] Generated variants are stored and linked to the source analysis.
+- [x] The product can compare original versus generated outputs.
+
+[x] P2-03 Cost-aware LLM router
+Objective
+- Keep AI-assisted evaluation reliable and affordable as volume increases.
+
+Backend tasks
+- [x] Add provider routing rules by feature, cost, latency, and fallback priority.
+- [x] Add per-request budgets and hard fail-safe limits.
+- [x] Add timeouts, retries, and circuit breakers around provider calls.
+- [ ] Add shadow evaluation paths for quality checks on cheaper providers.
+- [x] Record provider-level cost, latency, and failure metrics.
+
+Frontend tasks
+- [x] Show model provenance or evaluation source where it matters for trust.
+- [x] Surface degraded mode or retry messaging if premium evaluation is unavailable.
+
+Acceptance criteria
+- [x] LLM-backed features stay within target cost per completed analysis.
+- [x] Provider failures degrade gracefully instead of causing full job failure.
+- [x] Product can compare cost and quality across provider routes.
+
+[x] P2-04 Auth hardening
+Objective
+- Move authentication beyond prototype-grade bearer tokens with invites, MFA, revocable sessions, and enterprise-ready SSO configuration scaffolding.
+
+Frontend tasks
+- [x] Add invite management, MFA setup and recovery-code flows, current-session visibility, and SSO settings to the account tab.
+- [x] Update the home auth surface to handle invite acceptance and MFA verification.
+- [x] Revoke the server-side session on sign-out instead of only clearing browser storage.
+
+Backend tasks
+- [x] Add persisted workspace invites, user sessions, MFA credentials, and organization SSO configuration tables.
+- [x] Enforce server-side session validation with idle timeout, absolute expiry, revocation, and last-seen touch updates.
+- [x] Add invite preview and acceptance flows, including existing-user acceptance.
+- [x] Add TOTP MFA setup, verification, disable, and recovery-code regeneration endpoints.
+- [x] Add account APIs for session listing/revocation and SSO configuration updates.
+
+Acceptance criteria
+- [x] Workspace admins can issue and revoke invites from the account tab.
+- [x] Users can enable MFA and complete MFA-gated sign-in.
+- [x] Sessions are persisted server-side and can be revoked.
+- [x] SSO settings are stored with readiness checks for future IdP handshake work.
+
+Cross-sprint dependencies
+- Benchmarking depends on structured goal context from Sprint 1.
+- Progressive rendering depends on live transport from Sprint 2.
+- Compare workspace benefits significantly from benchmark context in Sprint 3.
+- Executive verdicts are stronger once benchmarks exist.
+- Calibration depends on stable asset and campaign identifiers in earlier sprints.
+- Generated variants become more credible once compare and calibration flows exist.
+
+Open decisions
+- Decide whether benchmark cohorts are global, workspace-specific, or hybrid.
+- Decide whether progressive result snapshots should be persisted or computed ephemerally.
+- Decide whether share links require guest access or authenticated access only.
+- Decide which ad platform should be the first direct integration after CSV import.
+- Decide whether generated variants should stay text-first initially or include media transformations.

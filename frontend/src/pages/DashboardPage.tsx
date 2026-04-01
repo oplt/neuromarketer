@@ -1,12 +1,15 @@
+import { Suspense, lazy } from 'react'
 import AutoGraphRounded from '@mui/icons-material/AutoGraphRounded'
 import BoltRounded from '@mui/icons-material/BoltRounded'
 import CheckCircleRounded from '@mui/icons-material/CheckCircleRounded'
+import CompareArrowsRounded from '@mui/icons-material/CompareArrowsRounded'
 import HomeRounded from '@mui/icons-material/HomeRounded'
 import LogoutRounded from '@mui/icons-material/LogoutRounded'
 import ManageAccountsRounded from '@mui/icons-material/ManageAccountsRounded'
 import PersonRounded from '@mui/icons-material/PersonRounded'
 import PlayCircleRounded from '@mui/icons-material/PlayCircleRounded'
 import PsychologyRounded from '@mui/icons-material/PsychologyRounded'
+import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import {
   Avatar,
   Box,
@@ -18,14 +21,18 @@ import {
   ListItemIcon,
   ListItemText,
   Paper,
+  Skeleton,
   Stack,
   Typography,
 } from '@mui/material'
 import type { AuthSession, DashboardTab } from '../lib/session'
-import AccountPage from './AccountPage'
-import AnalysisPage from './AnalysisPage'
-import ProfilePage from './ProfilePage'
 import './dashboard-page.css'
+
+const AccountPage = lazy(() => import('./AccountPage'))
+const AnalysisPage = lazy(() => import('./AnalysisPage'))
+const ComparePage = lazy(() => import('./ComparePage'))
+const ProfilePage = lazy(() => import('./ProfilePage'))
+const SettingsPage = lazy(() => import('./SettingsPage'))
 
 type DashboardPageProps = {
   session: AuthSession
@@ -39,6 +46,8 @@ const menuItems = [
   { id: 'account', label: 'Account', icon: ManageAccountsRounded },
   { id: 'profile', label: 'Profile', icon: PersonRounded },
   { id: 'analysis', label: 'Analysis', icon: AutoGraphRounded },
+  { id: 'compare', label: 'Compare', icon: CompareArrowsRounded },
+  { id: 'settings', label: 'Settings', icon: SettingsRounded },
 ] as const satisfies ReadonlyArray<{
   id: DashboardTab
   label: string
@@ -182,7 +191,9 @@ function DashboardPage({
             </Stack>
           </Paper>
 
-          {renderActivePage(activeTab, session)}
+          <Suspense fallback={<DashboardTabFallback tab={activeTab} />}>
+            {renderActivePage(activeTab, session, onTabChange)}
+          </Suspense>
         </Box>
       </Box>
     </Box>
@@ -278,7 +289,45 @@ function HomeTab() {
   )
 }
 
-function renderActivePage(tab: DashboardTab, session: AuthSession) {
+function DashboardTabFallback({ tab }: { tab: DashboardTab }) {
+  const title = getDashboardTitle(tab)
+  return (
+    <Stack spacing={3}>
+      <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
+        <Stack spacing={2.5}>
+          <Chip color="primary" label={`Loading ${title}`} sx={{ alignSelf: 'flex-start' }} />
+          <Typography variant="h4">Preparing the {title.toLowerCase()} workspace.</Typography>
+          <Typography color="text.secondary" variant="body1">
+            This page is loaded only when needed so the main dashboard shell stays lighter.
+          </Typography>
+          <Skeleton animation="wave" height={24} sx={{ borderRadius: 999, maxWidth: 280 }} variant="rounded" />
+          <Skeleton animation="wave" height={18} sx={{ borderRadius: 999, maxWidth: 360 }} variant="rounded" />
+        </Stack>
+      </Paper>
+
+      <Box className="dashboard-grid dashboard-grid--content">
+        <Paper className="dashboard-card" elevation={0}>
+          <Stack spacing={2}>
+            <Skeleton animation="wave" height={28} sx={{ borderRadius: 2, maxWidth: 220 }} variant="rounded" />
+            <Skeleton animation="wave" height={18} sx={{ borderRadius: 2 }} variant="rounded" />
+            <Skeleton animation="wave" height={18} sx={{ borderRadius: 2, maxWidth: '82%' }} variant="rounded" />
+            <Skeleton animation="wave" height={18} sx={{ borderRadius: 2, maxWidth: '68%' }} variant="rounded" />
+          </Stack>
+        </Paper>
+
+        <Paper className="dashboard-card" elevation={0}>
+          <Stack spacing={2}>
+            <Skeleton animation="wave" height={28} sx={{ borderRadius: 2, maxWidth: 180 }} variant="rounded" />
+            <Skeleton animation="wave" height={18} sx={{ borderRadius: 2 }} variant="rounded" />
+            <Skeleton animation="wave" height={120} sx={{ borderRadius: 4 }} variant="rounded" />
+          </Stack>
+        </Paper>
+      </Box>
+    </Stack>
+  )
+}
+
+function renderActivePage(tab: DashboardTab, session: AuthSession, onTabChange: (tab: DashboardTab) => void) {
   if (tab === 'account') {
     return <AccountPage session={session} />
   }
@@ -286,7 +335,13 @@ function renderActivePage(tab: DashboardTab, session: AuthSession) {
     return <ProfilePage session={session} />
   }
   if (tab === 'analysis') {
-    return <AnalysisPage session={session} />
+    return <AnalysisPage onOpenCompareWorkspace={() => onTabChange('compare')} session={session} />
+  }
+  if (tab === 'compare') {
+    return <ComparePage session={session} />
+  }
+  if (tab === 'settings') {
+    return <SettingsPage session={session} />
   }
   return <HomeTab />
 }
@@ -301,6 +356,12 @@ function getDashboardTitle(tab: DashboardTab): string {
   if (tab === 'analysis') {
     return 'Analysis'
   }
+  if (tab === 'compare') {
+    return 'Compare'
+  }
+  if (tab === 'settings') {
+    return 'Settings'
+  }
   return 'Home'
 }
 
@@ -313,6 +374,12 @@ function getDashboardSubtitle(tab: DashboardTab): string {
   }
   if (tab === 'analysis') {
     return 'Upload video, audio, or text assets and stage them for multimodal review.'
+  }
+  if (tab === 'compare') {
+    return 'Select completed analyses, rank likely winners, and revisit past comparison decisions.'
+  }
+  if (tab === 'settings') {
+    return 'Manage backend environment variables, persisted workspace settings, and restart-sensitive controls.'
   }
   return 'Creative prediction activity, queue health, and immediate operating context.'
 }

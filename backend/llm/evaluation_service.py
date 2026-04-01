@@ -9,21 +9,18 @@ from backend.core.config import settings
 from backend.core.logging import get_logger, log_event, log_exception
 from backend.schemas.evaluators import EvaluationMode, EvaluationResult
 
-from .llm_client import (
-    BaseLLMClient,
-    LLMClientConfig,
-    LLMClientError,
-    LLMResponseFormatError,
-    LLMTransportError,
-    create_llm_client,
-)
 from .llm_evaluators.registry import get_evaluator
+from .router import LLMRoutePreview, LLMRouter, LLMRoutingError
 
 logger = get_logger(__name__)
 
 
 class EvaluationServiceError(Exception):
     """Base error for low-level evaluation failures."""
+
+    def __init__(self, message: str, *, telemetry: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.telemetry = telemetry or {}
 
 
 class UnsupportedEvaluationModeError(EvaluationServiceError):
@@ -43,31 +40,25 @@ class EvaluationRequest:
 @dataclass(slots=True)
 class EvaluationResponse:
     result: EvaluationResult
+    provider_id: str
     provider: str
     model: str
     tokens_in: int
     tokens_out: int
     prompt_version: str
+    telemetry: dict[str, Any]
 
 
 class EvaluationService:
-    def __init__(self, llm_client: BaseLLMClient) -> None:
-        self.llm_client = llm_client
+    def __init__(self, router: LLMRouter) -> None:
+        self.router = router
 
     @classmethod
     def from_settings(cls) -> "EvaluationService":
-        config = LLMClientConfig(
-            provider=settings.llm_provider,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            api_key=settings.llm_api_key,
-            timeout_seconds=settings.llm_timeout_seconds,
-            temperature=settings.llm_temperature,
-            top_p=settings.llm_top_p,
-            max_tokens=settings.llm_max_tokens,
-            think=settings.llm_ollama_think,
-        )
-        return cls(llm_client=create_llm_client(config))
+        return cls(router=LLMRouter.from_settings(settings))
+
+    def preview_route(self, mode: EvaluationMode) -> LLMRoutePreview:
+        return self.router.preview_route(mode=mode)
 
     def _validate_context(self, context: dict[str, Any]) -> None:
         if not isinstance(context, dict):
@@ -90,21 +81,23 @@ class EvaluationService:
 
         prompt_payload = evaluator.build_prompt(request.context)
         try:
-            generation = await self.llm_client.generate_structured_with_repair(
+            generation = await self.router.generate_structured(
+                mode=request.mode,
                 messages=prompt_payload["messages"],
                 response_schema=prompt_payload["response_schema"],
             )
-        except (LLMTransportError, LLMResponseFormatError, LLMClientError) as exc:
+        except LLMRoutingError as exc:
             log_exception(
                 logger,
                 "llm_evaluation_failed",
                 exc,
                 mode=request.mode.value,
-                provider=self.llm_client.config.provider,
-                model=self.llm_client.config.model,
+                provider=exc.telemetry.get("selected_provider"),
+                model=exc.telemetry.get("selected_model"),
+                route_id=exc.telemetry.get("selected_route_id"),
                 status="failed",
             )
-            raise EvaluationServiceError(f"LLM evaluation failed: {exc}") from exc
+            raise EvaluationServiceError(f"LLM evaluation failed: {exc}", telemetry=exc.telemetry) from exc
 
         try:
             validated_result = EvaluationResult.model_validate(generation.parsed_json)
@@ -114,14 +107,25 @@ class EvaluationService:
                 "llm_evaluation_schema_mismatch",
                 level="warning",
                 mode=request.mode.value,
-                provider=self.llm_client.config.provider,
-                model=self.llm_client.config.model,
+                provider=generation.metadata.get("provider"),
+                model=generation.metadata.get("model"),
+                route_id=generation.metadata.get("provider_id"),
                 error_type=exc.__class__.__name__,
                 error_message=str(exc),
                 raw_text_char_count=len(str(generation.metadata.get("raw_text") or "")),
                 status="invalid",
             )
-            raise EvaluationServiceError(f"Model JSON did not match EvaluationResult schema: {exc}") from exc
+            raise EvaluationServiceError(
+                f"Model JSON did not match EvaluationResult schema: {exc}",
+                telemetry={
+                    "route_id": generation.metadata.get("provider_id"),
+                    "provider": generation.metadata.get("provider"),
+                    "model": generation.metadata.get("model"),
+                    "provider_attempts": generation.metadata.get("provider_attempts") or [],
+                    "estimated_cost_usd": generation.metadata.get("estimated_cost_usd"),
+                    "actual_cost_usd": generation.metadata.get("actual_cost_usd"),
+                },
+            ) from exc
 
         normalized_result = validated_result.model_dump(mode="json")
         normalized_result["mode"] = request.mode.value
@@ -130,6 +134,13 @@ class EvaluationService:
             "model": generation.metadata["model"],
             "tokens_in": generation.metadata["tokens_in"],
             "tokens_out": generation.metadata["tokens_out"],
+            "provider_id": generation.metadata.get("provider_id"),
+            "attempts": generation.metadata.get("attempts"),
+            "fallback_count": generation.metadata.get("fallback_count"),
+            "latency_ms": generation.metadata.get("latency_ms"),
+            "estimated_cost_usd": generation.metadata.get("estimated_cost_usd"),
+            "actual_cost_usd": generation.metadata.get("actual_cost_usd"),
+            "budget_usd": generation.metadata.get("budget_usd"),
         }
 
         try:
@@ -139,9 +150,22 @@ class EvaluationService:
 
         return EvaluationResponse(
             result=final_result,
+            provider_id=str(generation.metadata.get("provider_id") or generation.metadata["provider"]),
             provider=generation.metadata["provider"],
             model=generation.metadata["model"],
             tokens_in=int(generation.metadata["tokens_in"]),
             tokens_out=int(generation.metadata["tokens_out"]),
             prompt_version=evaluator.prompt_version,
+            telemetry={
+                "route_id": generation.metadata.get("provider_id"),
+                "provider": generation.metadata.get("provider"),
+                "model": generation.metadata.get("model"),
+                "provider_attempts": generation.metadata.get("provider_attempts") or [],
+                "attempts": int(generation.metadata.get("attempts") or 1),
+                "fallback_count": int(generation.metadata.get("fallback_count") or 0),
+                "latency_ms": int(generation.metadata.get("latency_ms") or 0),
+                "estimated_cost_usd": float(generation.metadata.get("estimated_cost_usd") or 0.0),
+                "actual_cost_usd": float(generation.metadata.get("actual_cost_usd") or 0.0),
+                "budget_usd": generation.metadata.get("budget_usd"),
+            },
         )

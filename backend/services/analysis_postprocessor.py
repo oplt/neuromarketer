@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from backend.services.scoring import ScoringBundle
 from backend.services.tribe_runtime import TribeRuntimeOutput
@@ -38,7 +40,11 @@ class AnalysisPostprocessor:
         scoring_bundle: ScoringBundle,
         modality: str,
         objective: str | None,
+        goal_template: str | None,
+        channel: str | None,
+        audience_segment: str | None,
         source_label: str | None,
+        include_recommendations: bool = True,
     ) -> AnalysisDashboardPayload:
         reduced_feature_vector = runtime_output.reduced_feature_vector or {}
         segment_features = list(reduced_feature_vector.get("segment_features", []))
@@ -78,6 +84,9 @@ class AnalysisPostprocessor:
             confidence_score=confidence_score,
             completeness_score=completeness_score,
             objective=objective,
+            goal_template=goal_template,
+            channel=channel,
+            audience_segment=audience_segment,
             source_label=source_label,
             total_duration_ms=total_duration_ms,
             segment_count=len(segment_rows),
@@ -108,14 +117,18 @@ class AnalysisPostprocessor:
             "low_attention_intervals": low_attention_intervals,
             "visualization_mode": "frame_grid_fallback",
         }
-        recommendations_json = self._build_recommendations(
-            summary_json=summary_json,
-            timeline_rows=timeline_rows,
-            segment_rows=segment_rows,
-            high_attention_intervals=high_attention_intervals,
-            low_attention_intervals=low_attention_intervals,
-            scoring_bundle=scoring_bundle,
-            total_duration_ms=total_duration_ms,
+        recommendations_json = (
+            self._build_recommendations(
+                summary_json=summary_json,
+                timeline_rows=timeline_rows,
+                segment_rows=segment_rows,
+                high_attention_intervals=high_attention_intervals,
+                low_attention_intervals=low_attention_intervals,
+                scoring_bundle=scoring_bundle,
+                total_duration_ms=total_duration_ms,
+            )
+            if include_recommendations
+            else []
         )
 
         return AnalysisDashboardPayload(
@@ -127,6 +140,25 @@ class AnalysisPostprocessor:
             recommendations_json=recommendations_json,
         )
 
+    def build_result_payload(
+        self,
+        *,
+        job_id: UUID,
+        dashboard_payload: AnalysisDashboardPayload,
+        created_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        timestamp = created_at or datetime.now(timezone.utc)
+        return {
+            "job_id": str(job_id),
+            "summary_json": dashboard_payload.summary_json,
+            "metrics_json": dashboard_payload.metrics_json,
+            "timeline_json": dashboard_payload.timeline_json,
+            "segments_json": dashboard_payload.segments_json,
+            "visualizations_json": dashboard_payload.visualizations_json,
+            "recommendations_json": dashboard_payload.recommendations_json,
+            "created_at": timestamp.isoformat(),
+        }
+
     def _build_summary_json(
         self,
         *,
@@ -136,6 +168,9 @@ class AnalysisPostprocessor:
         confidence_score: float,
         completeness_score: float,
         objective: str | None,
+        goal_template: str | None,
+        channel: str | None,
+        audience_segment: str | None,
         source_label: str | None,
         total_duration_ms: int,
         segment_count: int,
@@ -178,6 +213,9 @@ class AnalysisPostprocessor:
             ),
             "metadata": {
                 "objective": objective,
+                "goal_template": goal_template,
+                "channel": channel,
+                "audience_segment": audience_segment,
                 "source_label": source_label,
                 "segment_count": segment_count,
                 "duration_ms": total_duration_ms,

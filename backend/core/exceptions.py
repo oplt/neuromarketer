@@ -38,6 +38,11 @@ class UnauthorizedAppError(AppError):
     code = "unauthorized"
 
 
+class ForbiddenAppError(AppError):
+    status_code = 403
+    code = "forbidden"
+
+
 class ConfigurationAppError(AppError):
     status_code = 503
     code = "configuration_error"

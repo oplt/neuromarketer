@@ -7,10 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from asgi_correlation_id import CorrelationIdMiddleware
 
 from backend.api.errors import register_exception_handlers
+from backend.api.router.account import router as account_router
 from backend.api.router.analysis import router as analysis_router
 from backend.api.router.auth import router as auth_router
 from backend.api.router.creative_versions import router as creative_versions_router
 from backend.api.router.predict import router as predict_router
+from backend.api.router.settings import router as settings_router
 from backend.api.router.uploads import router as uploads_router
 from backend.core.config import settings
 from backend.core.logging import configure_logging
@@ -56,10 +58,12 @@ app.add_middleware(
 register_exception_handlers(app)
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)
+app.include_router(account_router, prefix=settings.api_v1_prefix)
 app.include_router(analysis_router, prefix=settings.api_v1_prefix)
 app.include_router(predict_router, prefix=settings.api_v1_prefix)
 app.include_router(uploads_router, prefix=settings.api_v1_prefix)
 app.include_router(creative_versions_router, prefix=settings.api_v1_prefix)
+app.include_router(settings_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/health/live", response_model=HealthResponse)

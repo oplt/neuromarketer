@@ -34,6 +34,7 @@ class LLMClientConfig:
     base_url: str
     model: str
     api_key: str | None = None
+    provider_id: str | None = None
     timeout_seconds: int = 120
     temperature: float = 0.2
     top_p: float = 0.9
@@ -134,6 +135,7 @@ class BaseLLMClient(ABC):
                 error_type=first_exc.__class__.__name__,
                 error_message=str(first_exc),
                 status="retrying",
+                provider_id=self.config.provider_id or self.config.provider,
             )
             repair_content = (
                 "Your previous answer was malformed. Return exactly one valid JSON object "
@@ -207,6 +209,7 @@ class OllamaLLMClient(BaseLLMClient):
 
         parsed_json = parse_json_object(content)
         metadata = {
+            "provider_id": self.config.provider_id or self.config.provider,
             "provider": self.config.provider,
             "model": self.config.model,
             "tokens_in": int(response_json.get("prompt_eval_count") or 0),
@@ -289,6 +292,7 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
         parsed_json = parse_json_object(content)
         usage = response_json.get("usage") if isinstance(response_json.get("usage"), dict) else {}
         metadata = {
+            "provider_id": self.config.provider_id or self.config.provider,
             "provider": self.config.provider,
             "model": self.config.model,
             "tokens_in": int(usage.get("prompt_tokens") or 0),

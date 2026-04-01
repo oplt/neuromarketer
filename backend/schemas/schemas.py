@@ -57,6 +57,9 @@ class AuthResponse(BaseModel):
     organization: AuthOrganizationRead | None = None
     default_project: AuthProjectRead | None = None
     session_token: str | None = None
+    requires_mfa: bool = False
+    mfa_challenge_token: str | None = None
+    available_mfa_methods: list[str] = Field(default_factory=list)
 
     @classmethod
     def from_user_and_org(
@@ -94,6 +97,26 @@ class AuthResponse(BaseModel):
             ),
             session_token=session_token,
         )
+
+
+class MfaChallengeVerifyRequest(BaseModel):
+    challenge_token: str = Field(min_length=16)
+    code: str | None = Field(default=None, min_length=6, max_length=16)
+    recovery_code: str | None = Field(default=None, min_length=6, max_length=32)
+
+
+class InvitePreviewRead(BaseModel):
+    workspace_name: str
+    workspace_slug: str
+    email: str
+    role: Literal["owner", "admin", "member", "viewer"]
+    expires_at: datetime
+
+
+class AcceptInviteRequest(BaseModel):
+    invite_token: str = Field(min_length=16)
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
 
 
 # ---------------------------------------------------------------------

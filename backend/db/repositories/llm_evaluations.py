@@ -51,6 +51,7 @@ class LLMEvaluationRepository:
         model_name: str,
         prompt_version: str,
         input_snapshot_json: dict,
+        metadata_json: dict | None = None,
     ) -> LLMEvaluationRecord:
         if existing is None:
             record = LLMEvaluationRecord(
@@ -61,6 +62,7 @@ class LLMEvaluationRepository:
                 model_name=model_name,
                 prompt_version=prompt_version,
                 input_snapshot_json=input_snapshot_json,
+                metadata_json=metadata_json or {},
                 status=EvaluationStatus.QUEUED.value,
                 error_message=None,
             )
@@ -74,6 +76,7 @@ class LLMEvaluationRepository:
         existing.model_name = model_name
         existing.prompt_version = prompt_version
         existing.input_snapshot_json = input_snapshot_json
+        existing.metadata_json = metadata_json or {}
         existing.status = EvaluationStatus.QUEUED.value
         existing.error_message = None
         await self.session.flush()
@@ -123,6 +126,7 @@ class LLMEvaluationRepository:
         model_provider: str,
         model_name: str,
         prompt_version: str,
+        metadata_json: dict | None = None,
     ) -> None:
         record.status = EvaluationStatus.COMPLETED.value
         record.error_message = None
@@ -130,9 +134,12 @@ class LLMEvaluationRepository:
         record.model_name = model_name
         record.prompt_version = prompt_version
         record.evaluation_json = evaluation_json
+        record.metadata_json = metadata_json or {}
         await self.session.flush()
 
-    async def mark_failed(self, *, record: LLMEvaluationRecord, error_message: str) -> None:
+    async def mark_failed(self, *, record: LLMEvaluationRecord, error_message: str, metadata_json: dict | None = None) -> None:
         record.status = EvaluationStatus.FAILED.value
         record.error_message = error_message
+        if metadata_json is not None:
+            record.metadata_json = metadata_json
         await self.session.flush()

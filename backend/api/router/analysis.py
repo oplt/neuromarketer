@@ -1,27 +1,55 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
+from backend.application.services.analysis_comparisons import AnalysisComparisonApplicationService
 from backend.application.services.analysis_evaluations import AnalysisEvaluationApplicationService
+from backend.application.services.analysis_generated_variants import AnalysisGeneratedVariantsApplicationService
+from backend.application.services.analysis_insights import AnalysisInsightsApplicationService
+from backend.application.services.collaboration import CollaborationApplicationService
 from backend.application.services.analysis import AnalysisApplicationService
 from backend.core.config import settings
-from backend.db.session import get_db
+from backend.db.models import CollaborationEntityType
+from backend.db.session import AsyncSessionLocal, get_db
+from backend.services.analysis_job_events import close_analysis_job_subscription, open_analysis_job_subscription
+from backend.services.analysis_goal_taxonomy import AnalysisChannel, GoalTemplate
 from backend.schemas.analysis import (
     AnalysisAssetListResponse,
+    AnalysisComparisonCreateRequest,
+    AnalysisComparisonListResponse,
+    AnalysisComparisonRead,
+    AnalysisBenchmarkResponse,
+    AnalysisCalibrationResponse,
     AnalysisConfigResponse,
+    AnalysisClientEventRequest,
+    AnalysisExecutiveVerdictRead,
+    AnalysisGeneratedVariantCreateRequest,
+    AnalysisGeneratedVariantListResponse,
     AnalysisJobCreateRequest,
     AnalysisJobListResponse,
     AnalysisJobStatusResponse,
+    AnalysisGoalPresetsResponse,
+    AnalysisOutcomeImportResponse,
     AnalysisResultRead,
     AnalysisUploadCompleteRequest,
     AnalysisUploadCompleteResponse,
     AnalysisUploadCreateRequest,
     AnalysisUploadCreateResponse,
     MediaType,
+)
+from backend.schemas.collaboration import (
+    CollaborationCommentCreateRequest,
+    CollaborationReviewRead,
+    CollaborationReviewUpdateRequest,
+    WorkspaceMemberListResponse,
 )
 from backend.schemas.evaluators import (
     EvaluationDispatchRequest,
@@ -32,6 +60,28 @@ from backend.schemas.evaluators import (
 from backend.tasks import dispatch_prediction_job
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
+
+
+def _encode_sse_event(*, event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _decode_analysis_job_event_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not message:
+        return None
+    raw_payload = message.get("data")
+    if not isinstance(raw_payload, str) or not raw_payload.strip():
+        return None
+    try:
+        decoded = json.loads(raw_payload)
+    except json.JSONDecodeError:
+        return None
+    return decoded if isinstance(decoded, dict) else None
+
+
+async def _load_analysis_job_snapshot(*, user_id: UUID, job_id: UUID) -> AnalysisJobStatusResponse:
+    async with AsyncSessionLocal() as session:
+        return await AnalysisApplicationService(session).get_analysis_job(user_id=user_id, job_id=job_id)
 
 
 @router.get("/config", response_model=AnalysisConfigResponse)
@@ -47,6 +97,125 @@ async def get_analysis_config(
             "audio": settings.analysis_allowed_audio_mime_types,
             "text": settings.analysis_allowed_text_mime_types,
         },
+    )
+
+
+@router.get("/goal-presets", response_model=AnalysisGoalPresetsResponse)
+async def get_analysis_goal_presets(
+    db: AsyncSession = Depends(get_db),
+    _: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisGoalPresetsResponse:
+    return AnalysisApplicationService(db).get_goal_presets()
+
+
+@router.post("/events", status_code=status.HTTP_202_ACCEPTED)
+async def track_analysis_client_event(
+    payload: AnalysisClientEventRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> dict[str, str]:
+    await AnalysisApplicationService(db).track_client_event(
+        user_id=auth.user.id,
+        payload=payload,
+    )
+    return {"status": "accepted"}
+
+
+@router.get("/comparisons", response_model=AnalysisComparisonListResponse)
+async def list_analysis_comparisons(
+    limit: int = Query(default=12, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisComparisonListResponse:
+    return await AnalysisComparisonApplicationService(db).list_comparisons(
+        project_id=auth.default_project.id,
+        limit=limit,
+    )
+
+
+@router.post("/comparisons", response_model=AnalysisComparisonRead, status_code=status.HTTP_201_CREATED)
+async def create_analysis_comparison(
+    payload: AnalysisComparisonCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisComparisonRead:
+    return await AnalysisComparisonApplicationService(db).create_comparison(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        payload=payload,
+    )
+
+
+@router.get("/comparisons/{comparison_id}", response_model=AnalysisComparisonRead)
+async def get_analysis_comparison(
+    comparison_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisComparisonRead:
+    return await AnalysisComparisonApplicationService(db).get_comparison(
+        project_id=auth.default_project.id,
+        comparison_id=comparison_id,
+    )
+
+
+@router.get("/collaboration/members", response_model=WorkspaceMemberListResponse)
+async def list_collaboration_members(
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> WorkspaceMemberListResponse:
+    return await CollaborationApplicationService(db).list_workspace_members(
+        organization_id=auth.organization.id,
+    )
+
+
+@router.get("/collaboration/{entity_type}/{entity_id}", response_model=CollaborationReviewRead)
+async def get_collaboration_review(
+    entity_type: CollaborationEntityType,
+    entity_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> CollaborationReviewRead:
+    return await CollaborationApplicationService(db).get_review(
+        project_id=auth.default_project.id,
+        organization_id=auth.organization.id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+    )
+
+
+@router.put("/collaboration/{entity_type}/{entity_id}", response_model=CollaborationReviewRead)
+async def update_collaboration_review(
+    entity_type: CollaborationEntityType,
+    entity_id: UUID,
+    payload: CollaborationReviewUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> CollaborationReviewRead:
+    return await CollaborationApplicationService(db).update_review(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        organization_id=auth.organization.id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload,
+    )
+
+
+@router.post("/collaboration/{entity_type}/{entity_id}/comments", response_model=CollaborationReviewRead, status_code=status.HTTP_201_CREATED)
+async def create_collaboration_comment(
+    entity_type: CollaborationEntityType,
+    entity_id: UUID,
+    payload: CollaborationCommentCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> CollaborationReviewRead:
+    return await CollaborationApplicationService(db).add_comment(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        organization_id=auth.organization.id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload,
     )
 
 
@@ -68,6 +237,9 @@ async def list_analysis_assets(
 @router.get("/jobs", response_model=AnalysisJobListResponse)
 async def list_analysis_jobs(
     media_type: MediaType | None = Query(default=None),
+    goal_template: GoalTemplate | None = Query(default=None),
+    channel: AnalysisChannel | None = Query(default=None),
+    audience_contains: str | None = Query(default=None, max_length=255),
     limit: int = Query(default=12, ge=1, le=50),
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
@@ -76,6 +248,9 @@ async def list_analysis_jobs(
         user_id=auth.user.id,
         project_id=auth.default_project.id,
         media_type=media_type,
+        goal_template=goal_template,
+        channel=channel,
+        audience_contains=audience_contains,
         limit=limit,
     )
 
@@ -141,6 +316,9 @@ async def create_analysis_job(
         asset_id=payload.asset_id,
         project_id=auth.default_project.id,
         objective=payload.objective,
+        goal_template=payload.goal_template,
+        channel=payload.channel,
+        audience_segment=payload.audience_segment,
     )
     await dispatch_prediction_job(response.job.id)
     return await service.get_analysis_job(user_id=auth.user.id, job_id=response.job.id)
@@ -158,6 +336,89 @@ async def get_analysis_job(
     )
 
 
+@router.get("/jobs/{job_id}/events")
+async def stream_analysis_job_events(
+    job_id: UUID,
+    request: Request,
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> StreamingResponse:
+    await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+
+    async def event_stream():
+        subscription = await open_analysis_job_subscription(job_id)
+        last_snapshot_json: str | None = None
+        heartbeat_elapsed = 0.0
+
+        try:
+            initial_snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+            initial_payload = initial_snapshot.model_dump(mode="json")
+            last_snapshot_json = json.dumps(initial_payload, sort_keys=True)
+            yield _encode_sse_event(event="status", data=initial_payload)
+
+            if initial_snapshot.job.status in {"completed", "failed"}:
+                yield _encode_sse_event(event="done", data=initial_payload)
+                return
+
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                if subscription is None:
+                    await asyncio.sleep(1.0)
+                else:
+                    _, pubsub = subscription
+                    message = await pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=10.0,
+                    )
+                    if message is None:
+                        heartbeat_elapsed += 10.0
+                        if heartbeat_elapsed >= 15.0:
+                            yield ": keep-alive\n\n"
+                            heartbeat_elapsed = 0.0
+                    else:
+                        heartbeat_elapsed = 0.0
+                        decoded_message = _decode_analysis_job_event_message(message)
+                        if decoded_message is not None and decoded_message.get("event_type") == "job_progress":
+                            progress_payload = decoded_message.get("payload") or {}
+                            snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+                            yield _encode_sse_event(
+                                event="progress",
+                                data={
+                                    "job": snapshot.job.model_dump(mode="json"),
+                                    "asset": snapshot.asset.model_dump(mode="json") if snapshot.asset is not None else None,
+                                    "result": progress_payload.get("partial_result"),
+                                    "stage": progress_payload.get("stage"),
+                                    "stage_label": progress_payload.get("stage_label"),
+                                    "diagnostics": progress_payload.get("diagnostics") or {},
+                                    "is_partial": True,
+                                },
+                            )
+
+                snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+                payload = snapshot.model_dump(mode="json")
+                snapshot_json = json.dumps(payload, sort_keys=True)
+                if snapshot_json != last_snapshot_json:
+                    yield _encode_sse_event(event="status", data=payload)
+                    last_snapshot_json = snapshot_json
+
+                if snapshot.job.status in {"completed", "failed"}:
+                    yield _encode_sse_event(event="done", data=payload)
+                    break
+        finally:
+            await close_analysis_job_subscription(subscription)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/jobs/{job_id}/results", response_model=AnalysisResultRead)
 async def get_analysis_results(
     job_id: UUID,
@@ -167,6 +428,85 @@ async def get_analysis_results(
     return await AnalysisApplicationService(db).get_analysis_result(
         user_id=auth.user.id,
         job_id=job_id,
+    )
+
+
+@router.get("/jobs/{job_id}/benchmarks", response_model=AnalysisBenchmarkResponse)
+async def get_analysis_benchmarks(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisBenchmarkResponse:
+    return await AnalysisInsightsApplicationService(db).get_benchmark(
+        user_id=auth.user.id,
+        job_id=job_id,
+    )
+
+
+@router.get("/jobs/{job_id}/verdict", response_model=AnalysisExecutiveVerdictRead)
+async def get_analysis_executive_verdict(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisExecutiveVerdictRead:
+    return await AnalysisInsightsApplicationService(db).get_executive_verdict(
+        user_id=auth.user.id,
+        job_id=job_id,
+    )
+
+
+@router.get("/jobs/{job_id}/calibration", response_model=AnalysisCalibrationResponse)
+async def get_analysis_calibration(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisCalibrationResponse:
+    return await AnalysisInsightsApplicationService(db).get_calibration(
+        user_id=auth.user.id,
+        job_id=job_id,
+    )
+
+
+@router.get("/jobs/{job_id}/variants", response_model=AnalysisGeneratedVariantListResponse)
+async def list_generated_variants(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisGeneratedVariantListResponse:
+    return await AnalysisGeneratedVariantsApplicationService(db).list_variants(
+        user_id=auth.user.id,
+        job_id=job_id,
+    )
+
+
+@router.post(
+    "/jobs/{job_id}/variants",
+    response_model=AnalysisGeneratedVariantListResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def generate_analysis_variants(
+    job_id: UUID,
+    payload: AnalysisGeneratedVariantCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisGeneratedVariantListResponse:
+    return await AnalysisGeneratedVariantsApplicationService(db).generate_variants(
+        user_id=auth.user.id,
+        job_id=job_id,
+        payload=payload,
+    )
+
+
+@router.post("/outcomes/import", response_model=AnalysisOutcomeImportResponse, status_code=status.HTTP_201_CREATED)
+async def import_analysis_outcomes(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisOutcomeImportResponse:
+    return await AnalysisInsightsApplicationService(db).import_outcomes_csv(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        file=file,
     )
 
 

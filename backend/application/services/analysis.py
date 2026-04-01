@@ -26,6 +26,8 @@ from backend.schemas.analysis import (
     AnalysisAssetRead,
     AnalysisAssetListResponse,
     AnalysisConfigResponse,
+    AnalysisClientEventRequest,
+    AnalysisGoalPresetsResponse,
     AnalysisJobRead,
     AnalysisJobListItemRead,
     AnalysisJobListResponse,
@@ -37,6 +39,11 @@ from backend.schemas.analysis import (
     AnalysisUploadSessionRead,
 )
 from backend.schemas.schemas import PredictRequest
+from backend.services.analysis_goal_taxonomy import (
+    get_goal_presets_payload,
+    normalize_analysis_channel,
+    normalize_goal_template,
+)
 from backend.services.preprocess import PreprocessService
 from backend.services.storage import ObjectStorageService, UploadedObject
 
@@ -69,6 +76,28 @@ class AnalysisApplicationService:
             },
         )
 
+    def get_goal_presets(self) -> AnalysisGoalPresetsResponse:
+        return AnalysisGoalPresetsResponse.model_validate(get_goal_presets_payload())
+
+    async def track_client_event(
+        self,
+        *,
+        user_id: UUID,
+        payload: AnalysisClientEventRequest,
+    ) -> None:
+        log_event(
+            logger,
+            payload.event_name,
+            user_id=str(user_id),
+            job_id=str(payload.job_id) if payload.job_id is not None else None,
+            media_type=payload.media_type,
+            goal_template=payload.goal_template,
+            channel=payload.channel,
+            audience_segment=payload.audience_segment,
+            metadata_json=payload.metadata_json,
+            status="accepted",
+        )
+
     async def list_assets(
         self,
         *,
@@ -96,16 +125,32 @@ class AnalysisApplicationService:
         user_id: UUID,
         project_id: UUID,
         media_type: str | None,
+        goal_template: str | None,
+        channel: str | None,
+        audience_contains: str | None,
         limit: int,
     ) -> AnalysisJobListResponse:
+        fetch_limit = max(limit * 10, 50) if goal_template or channel or audience_contains else limit
         jobs = await self.predictions.inference.list_analysis_jobs_for_user(
             project_id=project_id,
             created_by_user_id=user_id,
             media_type=media_type,
-            limit=limit,
+            limit=fetch_limit,
         )
         items: list[AnalysisJobListItemRead] = []
         for job in jobs:
+            campaign_context = (job.request_payload or {}).get("campaign_context") or {}
+            normalized_goal_template = normalize_goal_template(campaign_context.get("goal_template"))
+            normalized_channel = normalize_analysis_channel(campaign_context.get("channel"))
+            normalized_audience_segment = str(campaign_context.get("audience_segment") or "").strip() or None
+            if goal_template is not None and normalized_goal_template != goal_template:
+                continue
+            if channel is not None and normalized_channel != channel:
+                continue
+            if audience_contains is not None:
+                audience_query = audience_contains.strip().lower()
+                if not audience_query or audience_query not in str(normalized_audience_segment or "").lower():
+                    continue
             asset = None
             raw_asset_id = (job.runtime_params or {}).get("asset_id")
             if raw_asset_id:
@@ -121,6 +166,8 @@ class AnalysisApplicationService:
                     result_created_at=job.analysis_result_record.created_at if job.analysis_result_record is not None else None,
                 )
             )
+            if len(items) >= limit:
+                break
         return AnalysisJobListResponse(items=items)
 
     async def create_upload_session(
@@ -564,6 +611,9 @@ class AnalysisApplicationService:
         asset_id: UUID,
         project_id: UUID,
         objective: str | None,
+        goal_template: str | None,
+        channel: str | None,
+        audience_segment: str | None,
     ) -> AnalysisJobStatusResponse:
         asset = await self.uploads.get_stored_artifact(asset_id)
         if asset is None or asset.created_by_user_id != user_id or asset.project_id != project_id:
@@ -574,6 +624,10 @@ class AnalysisApplicationService:
             raise ConflictAppError("The selected asset is not ready for analysis.")
 
         media_type = str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type))
+        normalized_goal_template = normalize_goal_template(goal_template)
+        normalized_channel = normalize_analysis_channel(channel)
+        normalized_objective = (objective or "").strip() or None
+        normalized_audience_segment = (audience_segment or "").strip() or None
         job = await self.predictions.create_prediction_job(
             PredictRequest(
                 project_id=project_id,
@@ -582,7 +636,10 @@ class AnalysisApplicationService:
                 created_by_user_id=user_id,
                 audience_context={},
                 campaign_context={
-                    "objective": (objective or "").strip() or None,
+                    "objective": normalized_objective,
+                    "goal_template": normalized_goal_template,
+                    "channel": normalized_channel,
+                    "audience_segment": normalized_audience_segment,
                     "media_type": media_type,
                     "surface": "analysis",
                 },
@@ -594,7 +651,20 @@ class AnalysisApplicationService:
             )
         )
         await self.session.refresh(job)
-        return AnalysisJobStatusResponse(job=self._build_job_read(job), result=self._build_result(job))
+        log_event(
+            logger,
+            "analysis_job_requested",
+            job_id=str(job.id),
+            project_id=str(project_id),
+            asset_id=str(asset.id),
+            media_type=media_type,
+            goal_template=normalized_goal_template,
+            channel=normalized_channel,
+            audience_segment=normalized_audience_segment,
+            has_objective=normalized_objective is not None,
+            status=job.status.value,
+        )
+        return await self._build_job_status_response(job)
 
     async def get_analysis_job(
         self,
@@ -604,7 +674,7 @@ class AnalysisApplicationService:
     ) -> AnalysisJobStatusResponse:
         job = await self.predictions.get_job(job_id)
         self._ensure_job_ownership(job, user_id=user_id)
-        return AnalysisJobStatusResponse(job=self._build_job_read(job), result=self._build_result(job))
+        return await self._build_job_status_response(job)
 
     async def get_analysis_result(
         self,
@@ -684,14 +754,36 @@ class AnalysisApplicationService:
             created_at=upload_session.created_at,
         )
 
+    async def _build_job_status_response(self, job: InferenceJob) -> AnalysisJobStatusResponse:
+        asset = await self._load_job_asset(job)
+        return AnalysisJobStatusResponse(
+            job=self._build_job_read(job),
+            result=self._build_result(job),
+            asset=self._build_asset_read(asset) if asset is not None else None,
+        )
+
+    async def _load_job_asset(self, job: InferenceJob):
+        raw_asset_id = (job.runtime_params or {}).get("asset_id")
+        if raw_asset_id is None:
+            return None
+        try:
+            return await self.uploads.get_stored_artifact(UUID(str(raw_asset_id)))
+        except (TypeError, ValueError):
+            return None
+
     def _build_job_read(self, job: InferenceJob) -> AnalysisJobRead:
-        objective = ((job.request_payload or {}).get("campaign_context") or {}).get("objective")
-        asset_id = UUID(str((job.runtime_params or {}).get("asset_id")))
+        campaign_context = (job.request_payload or {}).get("campaign_context") or {}
+        objective = campaign_context.get("objective")
+        raw_asset_id = (job.runtime_params or {}).get("asset_id")
+        asset_id = UUID(str(raw_asset_id)) if raw_asset_id is not None else UUID(int=0)
         return AnalysisJobRead(
             id=job.id,
             asset_id=asset_id,
             status=self._map_job_status(job.status),
             objective=objective,
+            goal_template=normalize_goal_template(campaign_context.get("goal_template")),
+            channel=normalize_analysis_channel(campaign_context.get("channel")),
+            audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
             started_at=job.started_at,
             finished_at=job.completed_at,
             error_message=job.error_message,

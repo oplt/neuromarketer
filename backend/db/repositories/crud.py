@@ -146,6 +146,41 @@ async def get_primary_organization_for_user(
     return result.scalar_one_or_none()
 
 
+async def get_organization_for_user(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> Organization | None:
+    result = await db.execute(
+        select(Organization)
+        .join(OrganizationMembership, OrganizationMembership.organization_id == Organization.id)
+        .where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_membership_for_user(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> OrganizationMembership | None:
+    result = await db.execute(
+        select(OrganizationMembership)
+        .where(
+            OrganizationMembership.user_id == user_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_default_project_for_organization(
     db: AsyncSession,
     organization_id: UUID,

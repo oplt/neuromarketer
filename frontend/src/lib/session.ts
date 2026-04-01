@@ -1,4 +1,4 @@
-export type DashboardTab = 'home' | 'account' | 'profile' | 'analysis'
+export type DashboardTab = 'home' | 'account' | 'profile' | 'analysis' | 'compare' | 'settings'
 
 export type AuthSession = {
   userId?: string

@@ -29,6 +29,10 @@ class Base(DeclarativeBase):
     pass
 
 
+def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
+    return [str(item.value) for item in enum_cls]
+
+
 # ---------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------
@@ -135,6 +139,34 @@ class ApiKeyStatus(str, enum.Enum):
     REVOKED = "revoked"
 
 
+class WorkspaceInviteStatus(str, enum.Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REVOKED = "revoked"
+    EXPIRED = "expired"
+
+
+class MfaMethodType(str, enum.Enum):
+    TOTP = "totp"
+
+
+class SsoProviderType(str, enum.Enum):
+    OIDC = "oidc"
+    SAML = "saml"
+
+
+class CollaborationEntityType(str, enum.Enum):
+    ANALYSIS_JOB = "analysis_job"
+    ANALYSIS_COMPARISON = "analysis_comparison"
+
+
+class ReviewStatus(str, enum.Enum):
+    DRAFT = "draft"
+    IN_REVIEW = "in_review"
+    CHANGES_REQUESTED = "changes_requested"
+    APPROVED = "approved"
+
+
 # ---------------------------------------------------------------------
 # Mixins
 # ---------------------------------------------------------------------
@@ -229,6 +261,126 @@ class OrganizationMembership(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     organization: Mapped["Organization"] = relationship(back_populates="users")
     user: Mapped["User"] = relationship(back_populates="memberships")
+
+
+class WorkspaceInvite(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "workspace_invites"
+    __table_args__ = (
+        Index("ix_workspace_invites_org_status", "organization_id", "status"),
+        Index("ix_workspace_invites_email_status", "email", "status"),
+        UniqueConstraint("token_hash", name="uq_workspace_invites_token_hash"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    invited_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    accepted_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[OrgRole] = mapped_column(
+        Enum(OrgRole, name="org_role"), nullable=False
+    )
+    token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[WorkspaceInviteStatus] = mapped_column(
+        Enum(WorkspaceInviteStatus, name="workspace_invite_status", values_callable=_enum_values),
+        nullable=False,
+        default=WorkspaceInviteStatus.PENDING,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class UserSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        Index("ix_user_sessions_user_revoked", "user_id", "revoked_at"),
+        Index("ix_user_sessions_org_user", "organization_id", "user_id"),
+        UniqueConstraint("token_hash", name="uq_user_sessions_token_hash"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    session_family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, default=uuid.uuid4
+    )
+    token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    replaced_by_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("user_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class UserMfaCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "user_mfa_credentials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "method_type", name="uq_user_mfa_credential_method"),
+        Index("ix_user_mfa_credentials_user_enabled", "user_id", "is_enabled"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    method_type: Mapped[MfaMethodType] = mapped_column(
+        Enum(MfaMethodType, name="mfa_method_type", values_callable=_enum_values),
+        nullable=False,
+        default=MfaMethodType.TOTP,
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pending_secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recovery_code_hashes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class OrganizationSsoConfig(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "organization_sso_configs"
+    __table_args__ = (
+        UniqueConstraint("organization_id", name="uq_organization_sso_config_org"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    updated_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    provider_type: Mapped[SsoProviderType] = mapped_column(
+        Enum(SsoProviderType, name="sso_provider_type", values_callable=_enum_values),
+        nullable=False,
+        default=SsoProviderType.OIDC,
+    )
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    issuer_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    entrypoint_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    metadata_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    audience: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    client_secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scopes_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    attribute_mapping_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    certificate_pem: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    login_hint_domain: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -603,6 +755,7 @@ class LLMEvaluationRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     prompt_version: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     input_snapshot_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     evaluation_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -880,6 +1033,97 @@ class CalibrationObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     actual_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+# ---------------------------------------------------------------------
+# Workspace settings
+# ---------------------------------------------------------------------
+
+class Setting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "settings"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "key", name="uq_settings_org_key"),
+        Index("ix_settings_org_group", "organization_id", "group_id"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    updated_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    key: Mapped[str] = mapped_column(String(120), nullable=False)
+    env_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    value_type: Mapped[str] = mapped_column(String(40), nullable=False, default="string")
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, default="env_file")
+
+
+# ---------------------------------------------------------------------
+# Collaboration
+# ---------------------------------------------------------------------
+
+class CollaborationReview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "collaboration_reviews"
+    __table_args__ = (
+        UniqueConstraint("project_id", "entity_type", "entity_id", name="uq_collaboration_review_entity"),
+        Index("ix_collaboration_reviews_project_status", "project_id", "status"),
+        Index("ix_collaboration_reviews_project_assignee", "project_id", "assignee_user_id"),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    entity_type: Mapped[CollaborationEntityType] = mapped_column(
+        Enum(CollaborationEntityType, name="collaboration_entity_type", values_callable=_enum_values),
+        nullable=False,
+    )
+    entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    assignee_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[ReviewStatus] = mapped_column(
+        Enum(ReviewStatus, name="review_status", values_callable=_enum_values),
+        nullable=False,
+        default=ReviewStatus.DRAFT,
+    )
+    review_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    comments: Mapped[list["CollaborationComment"]] = relationship(
+        back_populates="review", cascade="all, delete-orphan"
+    )
+
+
+class CollaborationComment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "collaboration_comments"
+    __table_args__ = (
+        Index("ix_collaboration_comments_review_created_at", "review_id", "created_at"),
+    )
+
+    review_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("collaboration_reviews.id", ondelete="CASCADE"), nullable=False
+    )
+    author_user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    segment_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+    review: Mapped["CollaborationReview"] = relationship(back_populates="comments")
 
 
 # ---------------------------------------------------------------------

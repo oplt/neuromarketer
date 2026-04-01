@@ -21,6 +21,7 @@ from backend.core.log_context import bound_log_context
 from backend.core.logging import duration_ms, get_logger, log_event, log_exception
 from backend.core.metrics import metrics
 from backend.db.session import AsyncSessionLocal
+from backend.services.analysis_job_events import publish_analysis_job_event
 from backend.schemas.evaluators import EvaluationMode
 
 logger = get_logger(__name__)
@@ -37,6 +38,11 @@ async def _run_prediction_job(job_id: UUID) -> None:
             await db.rollback()
             await PredictionApplicationService(db).mark_job_failed(job_id, str(exc))
             await db.commit()
+            await publish_analysis_job_event(
+                job_id=job_id,
+                event_type="job_failed",
+                payload={"status": "failed", "error_message": str(exc)},
+            )
             raise
 
 
@@ -50,7 +56,12 @@ async def _run_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> None:
             await db.rollback()
             record = await service.evaluations.get_for_job_and_mode(job_id=job_id, mode=mode)
             if record is not None:
-                await service.evaluations.mark_failed(record=record, error_message=str(exc))
+                failure_metadata = getattr(exc, "telemetry", None)
+                await service.evaluations.mark_failed(
+                    record=record,
+                    error_message=str(exc),
+                    metadata_json=failure_metadata if isinstance(failure_metadata, dict) else record.metadata_json,
+                )
                 await db.commit()
             raise
 

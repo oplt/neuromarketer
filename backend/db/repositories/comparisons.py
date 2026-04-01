@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -34,12 +34,13 @@ class ComparisonRepository:
         self.session.add(comparison)
         await self.session.flush()
 
-        for creative_id, creative_version_id in creative_items:
+        for index, (creative_id, creative_version_id) in enumerate(creative_items, start=1):
             self.session.add(
                 CreativeComparisonItem(
                     comparison_id=comparison.id,
                     creative_id=creative_id,
                     creative_version_id=creative_version_id,
+                    candidate_rank=index,
                 )
             )
 
@@ -94,3 +95,35 @@ class ComparisonRepository:
             .where(CreativeComparisonResult.comparison_id == comparison_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_comparison(self, comparison_id: UUID, *, project_id: UUID) -> CreativeComparison | None:
+        result = await self.session.execute(
+            select(CreativeComparison)
+            .options(
+                selectinload(CreativeComparison.items),
+                selectinload(CreativeComparison.result).selectinload(CreativeComparisonResult.item_results),
+            )
+            .where(
+                CreativeComparison.id == comparison_id,
+                CreativeComparison.project_id == project_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_comparisons_for_project(
+        self,
+        *,
+        project_id: UUID,
+        limit: int,
+    ) -> list[CreativeComparison]:
+        result = await self.session.execute(
+            select(CreativeComparison)
+            .options(
+                selectinload(CreativeComparison.items),
+                selectinload(CreativeComparison.result).selectinload(CreativeComparisonResult.item_results),
+            )
+            .where(CreativeComparison.project_id == project_id)
+            .order_by(desc(CreativeComparison.created_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())

@@ -80,6 +80,13 @@ class ModelMetadata(StrictSchemaModel):
     model: str = Field(min_length=1, max_length=200)
     tokens_in: int = Field(default=0, ge=0)
     tokens_out: int = Field(default=0, ge=0)
+    provider_id: str | None = Field(default=None, max_length=120)
+    attempts: int | None = Field(default=None, ge=1)
+    fallback_count: int | None = Field(default=None, ge=0)
+    latency_ms: int | None = Field(default=None, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    actual_cost_usd: float | None = Field(default=None, ge=0)
+    budget_usd: float | None = Field(default=None, ge=0)
 
 
 class BaseEvaluationResult(StrictSchemaModel):
@@ -180,6 +187,7 @@ class EvaluationRecordRead(StrictSchemaModel):
     model_name: str | None = None
     prompt_version: str | None = None
     evaluation_json: EvaluationResult | None = None
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
     error_message: str | None = None
     created_at: datetime
     updated_at: datetime

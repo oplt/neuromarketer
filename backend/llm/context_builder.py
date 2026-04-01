@@ -6,6 +6,7 @@ from typing import Any
 from backend.core.logging import get_logger, log_event
 from backend.db.models import AnalysisResultRecord, CreativeVersion, InferenceJob
 from backend.services.asset_loader import AssetLoader
+from backend.services.analysis_goal_taxonomy import normalize_analysis_channel, normalize_goal_template
 
 logger = get_logger(__name__)
 
@@ -58,7 +59,8 @@ class EvaluationContextBuilder:
     ) -> dict[str, Any]:
         summary_metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
         extracted_metadata = creative_version.extracted_metadata if creative_version is not None else {}
-        objective = ((job.request_payload or {}).get("campaign_context") or {}).get("objective")
+        campaign_context = (job.request_payload or {}).get("campaign_context") or {}
+        objective = campaign_context.get("objective")
         title = None
         if extracted_metadata:
             title = extracted_metadata.get("filename")
@@ -69,6 +71,13 @@ class EvaluationContextBuilder:
             "job_id": str(job.id),
             "creative_version_id": str(job.creative_version_id),
             "objective": objective,
+            "goal_template": normalize_goal_template(
+                campaign_context.get("goal_template") or summary_metadata.get("goal_template"),
+            ),
+            "channel": normalize_analysis_channel(
+                campaign_context.get("channel") or summary_metadata.get("channel"),
+            ),
+            "audience_segment": campaign_context.get("audience_segment") or summary_metadata.get("audience_segment"),
             "media_type": summary.get("modality") or (creative_version.preprocessing_summary or {}).get("modality"),
             "title": title,
             "duration_ms": summary_metadata.get("duration_ms") or extracted_metadata.get("duration_ms"),

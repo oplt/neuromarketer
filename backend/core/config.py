@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -59,6 +59,11 @@ class Settings(BaseSettings):
         default=60 * 24 * 7,
         validation_alias=AliasChoices("SESSION_TTL_MINUTES", "JWT_EXP_MINUTES"),
     )
+    session_idle_ttl_minutes: int = Field(default=60 * 24, validation_alias="SESSION_IDLE_TTL_MINUTES")
+    session_touch_interval_seconds: int = Field(default=60, validation_alias="SESSION_TOUCH_INTERVAL_SECONDS")
+    mfa_challenge_ttl_minutes: int = Field(default=10, validation_alias="MFA_CHALLENGE_TTL_MINUTES")
+    invite_ttl_hours: int = Field(default=24 * 7, validation_alias="INVITE_TTL_HOURS")
+    sso_enforcement_default: bool = Field(default=False, validation_alias="SSO_ENFORCEMENT_DEFAULT")
 
     aws_region: str = Field(default="eu-west-1", validation_alias="AWS_REGION")
     s3_bucket_name: str = Field(default="neuromarketing-dev", validation_alias="S3_BUCKET_NAME")
@@ -158,6 +163,31 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
     llm_top_p: float = Field(default=0.9, validation_alias="LLM_TOP_P")
     llm_ollama_think: bool = Field(default=False, validation_alias="LLM_OLLAMA_THINK")
+    llm_router_providers_json: list[dict[str, Any]] = Field(
+        default_factory=list,
+        validation_alias="LLM_ROUTER_PROVIDERS_JSON",
+    )
+    llm_routing_modes_json: dict[str, list[str]] = Field(
+        default_factory=dict,
+        validation_alias="LLM_ROUTING_MODES_JSON",
+    )
+    llm_mode_request_budgets_json: dict[str, float] = Field(
+        default_factory=dict,
+        validation_alias="LLM_MODE_REQUEST_BUDGETS_JSON",
+    )
+    llm_request_budget_usd: float = Field(default=0.25, validation_alias="LLM_REQUEST_BUDGET_USD")
+    llm_retry_max_attempts: int = Field(default=2, validation_alias="LLM_RETRY_MAX_ATTEMPTS")
+    llm_retry_backoff_seconds: float = Field(default=1.0, validation_alias="LLM_RETRY_BACKOFF_SECONDS")
+    llm_circuit_breaker_failure_threshold: int = Field(
+        default=3,
+        validation_alias="LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+    )
+    llm_circuit_breaker_reset_seconds: int = Field(
+        default=300,
+        validation_alias="LLM_CIRCUIT_BREAKER_RESET_SECONDS",
+    )
+    llm_cost_input_per_1k_tokens: float = Field(default=0.0, validation_alias="LLM_COST_INPUT_PER_1K_TOKENS")
+    llm_cost_output_per_1k_tokens: float = Field(default=0.0, validation_alias="LLM_COST_OUTPUT_PER_1K_TOKENS")
     llm_processing_stale_after_seconds: int = Field(
         default=900,
         validation_alias="LLM_PROCESSING_STALE_AFTER_SECONDS",
@@ -187,6 +217,34 @@ class Settings(BaseSettings):
     def _parse_analysis_allowed_mime_types(cls, value: object) -> object:
         if isinstance(value, str):
             return cls._parse_listish_value(value)
+        return value
+
+    @field_validator("llm_router_providers_json", mode="before")
+    @classmethod
+    def _parse_llm_router_providers_json(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return []
+            return parsed if isinstance(parsed, list) else []
+        return value
+
+    @field_validator("llm_routing_modes_json", "llm_mode_request_budgets_json", mode="before")
+    @classmethod
+    def _parse_llm_routing_json(cls, value: object) -> object:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return {}
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
         return value
 
     @field_validator("api_v1_prefix")

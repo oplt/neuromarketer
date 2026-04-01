@@ -6,10 +6,11 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.application.services.auth_service import AuthApplicationService
 from backend.core.exceptions import UnauthorizedAppError
 from backend.core.log_context import bind_log_context
 from backend.core.security import verify_session_token
-from backend.db.models import Organization, Project, User
+from backend.db.models import Organization, Project, User, UserSession
 from backend.db.repositories import crud
 from backend.db.session import get_db
 
@@ -21,6 +22,7 @@ class AuthenticatedRequestContext:
     user: User
     organization: Organization
     default_project: Project
+    session: UserSession
     session_token: str
 
 
@@ -38,7 +40,18 @@ async def require_authenticated_context(
     if user.email.strip().lower() != claims.email:
         raise UnauthorizedAppError("Authentication is required.")
 
-    organization = await crud.get_primary_organization_for_user(db, user.id)
+    session_record = await AuthApplicationService(db).validate_session_token(
+        session_id=claims.session_id,
+        token=credentials.credentials,
+        user_id=user.id,
+        organization_id=claims.organization_id,
+    )
+
+    organization = await crud.get_organization_for_user(
+        db,
+        user_id=user.id,
+        organization_id=claims.organization_id,
+    )
     if organization is None or organization.id != claims.organization_id or not organization.is_active:
         raise UnauthorizedAppError("Authentication is required.")
 
@@ -56,5 +69,6 @@ async def require_authenticated_context(
         user=user,
         organization=organization,
         default_project=default_project,
+        session=session_record,
         session_token=credentials.credentials,
     )

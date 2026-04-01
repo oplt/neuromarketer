@@ -169,6 +169,15 @@
   gap: 12px;
 }
 
+.analysis-inline-summary {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.84);
+}
+
 .analysis-asset-library__item {
   padding: 14px 16px;
   border-radius: 18px;
@@ -216,6 +225,79 @@
   border-color: rgba(59, 91, 219, 0.6);
   transform: translateY(-2px);
   background: linear-gradient(180deg, rgba(59, 91, 219, 0.08), rgba(59, 91, 219, 0.02));
+}
+
+.analysis-flow-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.analysis-flow-card {
+  padding: 16px 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.72);
+  transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.analysis-flow-card.is-active {
+  border-color: rgba(59, 91, 219, 0.28);
+  background: linear-gradient(180deg, rgba(59, 91, 219, 0.1), rgba(255, 255, 255, 0.96));
+  transform: translateY(-1px);
+}
+
+.analysis-flow-card.is-complete {
+  border-color: rgba(20, 184, 166, 0.26);
+  background: linear-gradient(180deg, rgba(20, 184, 166, 0.08), rgba(255, 255, 255, 0.96));
+}
+
+.analysis-goal-template-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.analysis-goal-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.analysis-action-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.analysis-compare-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.analysis-action-card {
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: linear-gradient(180deg, rgba(248, 250, 252, 0.88), rgba(255, 255, 255, 0.98));
+}
+
+.analysis-action-card.is-disabled {
+  opacity: 0.72;
+}
+
+.analysis-history-drawer {
+  width: min(100vw, 440px);
+  padding: 22px;
+  border-left: 1px solid rgba(24, 34, 48, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(244, 247, 252, 0.98)) !important;
+}
+
+.analysis-history-drawer__content {
+  height: 100%;
+  overflow: auto;
 }
 
 .analysis-status-chip {
@@ -428,6 +510,38 @@
   gap: 10px;
 }
 
+.compare-selected-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compare-selected-card,
+.compare-winner-card,
+.compare-detail-card {
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(24, 34, 48, 0.08);
+  background: rgba(248, 250, 252, 0.84) !important;
+}
+
+.compare-selected-card.is-baseline {
+  border-color: rgba(59, 91, 219, 0.3);
+  background: linear-gradient(180deg, rgba(59, 91, 219, 0.08), rgba(255, 255, 255, 0.96)) !important;
+}
+
+.compare-winner-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1.1fr repeat(2, minmax(0, 0.9fr));
+}
+
+.compare-winner-card {
+  background:
+    linear-gradient(135deg, rgba(20, 184, 166, 0.08), rgba(59, 91, 219, 0.08)),
+    rgba(255, 255, 255, 0.94) !important;
+}
+
 .analysis-priority-chip {
   text-transform: capitalize;
   font-weight: 800 !important;
@@ -459,6 +573,13 @@
     grid-template-columns: 1fr;
   }
 
+  .analysis-flow-grid,
+  .analysis-goal-template-grid,
+  .analysis-goal-grid,
+  .analysis-action-grid,
+  .analysis-compare-grid,
+  .compare-selected-grid,
+  .compare-winner-grid,
   .analysis-evaluation-grid,
   .analysis-evaluation-mode-grid,
   .analysis-interval-grid {
