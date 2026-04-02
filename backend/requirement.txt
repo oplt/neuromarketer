@@ -18,6 +18,8 @@ celery[redis]>=5.6.0
 redis>=5.0.0
 slowapi>=0.1.9
 python-magic>=0.4.27
+pypdf>=5.4.0
+striprtf>=0.0.29
 
 # Public TRIBE v2 runtime and upstream-aligned inference dependencies.
 tribev2 @ git+https://github.com/facebookresearch/tribev2.git

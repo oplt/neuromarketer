@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import importlib
 import os
+import re
 import shutil
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -68,17 +69,59 @@ class TribeRuntime:
     _shared_model: Any | None = None
     _shared_module: Any | None = None
     _resolved_device: str | None = None
+    _local_hf_model_path_patch_applied: bool = False
 
     def __init__(self) -> None:
         self.model_repo_id = settings.tribe_model_repo_id
         self.checkpoint_name = settings.tribe_checkpoint_name
         self.cache_folder = self._resolve_cache_folder(Path(settings.tribe_cache_folder).expanduser())
         self.device = settings.tribe_device
+        self.text_feature_model_name = self._resolve_text_feature_model_name(
+            settings.tribe_text_feature_model_name
+        )
         self.feature_cluster = settings.tribe_feature_cluster
         self.hf_token = settings.tribe_hf_token
         self.enable_roi_summary = settings.tribe_enable_roi_summary
         self.text_preprocessor = TextPreprocessService()
         self.model_name = self.model_repo_id
+
+    def _project_root(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _resolve_text_feature_model_name(self, configured_name: str) -> str:
+        resolved_local_path = self._resolve_local_model_path(configured_name)
+        if resolved_local_path is not None:
+            return str(resolved_local_path)
+
+        default_remote_model = "microsoft/Phi-3-mini-4k-instruct"
+        default_local_model = self._project_root() / "models" / "phi3-mini-4k-instruct"
+        if configured_name.strip() == default_remote_model and default_local_model.is_dir():
+            resolved_path = default_local_model.resolve()
+            log_event(
+                logger,
+                "tribe_text_feature_model_local_fallback",
+                configured_name=configured_name,
+                resolved_path=str(resolved_path),
+                status="fallback",
+            )
+            return str(resolved_path)
+
+        return configured_name
+
+    def _resolve_local_model_path(self, model_name: str | None) -> Path | None:
+        if not model_name or not model_name.strip():
+            return None
+
+        configured_path = Path(model_name).expanduser()
+        candidates = [configured_path]
+        if not configured_path.is_absolute():
+            candidates.append(self._project_root() / configured_path)
+
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate.resolve()
+
+        return None
 
     def _resolve_cache_folder(self, configured_path: Path) -> Path:
         candidates = self._candidate_cache_folders(configured_path)
@@ -184,6 +227,7 @@ class TribeRuntime:
                 return
 
             self.validate_environment()
+            self._enable_local_huggingface_model_paths()
             self._authenticate_huggingface()
             load_started_at = time.perf_counter()
             log_event(
@@ -219,10 +263,7 @@ class TribeRuntime:
                     duration_ms=duration_ms(load_started_at, load_finished_at),
                     status="failed",
                 )
-                raise ConfigurationAppError(
-                    "Failed to load TRIBE v2 from the configured checkpoint. "
-                    "Check model availability, Hugging Face access, and runtime dependencies."
-                ) from exc
+                raise ConfigurationAppError(self._format_load_error(exc)) from exc
 
             self.__class__._shared_module = tribe_module
             self.__class__._shared_model = model
@@ -275,24 +316,56 @@ class TribeRuntime:
         return model.get_events_dataframe(audio_path=str(path))
 
     def _prepare_text_events(self, *, model: Any, payload: TribeRuntimeInput) -> tuple[Any, Path | None]:
-        if payload.raw_text and payload.raw_text.strip():
-            processed = self.text_preprocessor.preprocess(payload.raw_text)
-            tmp = tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False)
-            with tmp:
-                tmp.write(processed.normalized_text)
-            temp_path = Path(tmp.name)
-            return model.get_events_dataframe(text_path=str(temp_path)), temp_path
+        raw_text = payload.raw_text
+        if not raw_text or not raw_text.strip():
+            path = self._require_local_file(payload.local_path, suffix_hint="text")
+            raw_text = path.read_text(encoding="utf-8", errors="ignore")
 
-        path = self._require_local_file(payload.local_path, suffix_hint="text")
-        return model.get_events_dataframe(text_path=str(path)), None
+        processed = self.text_preprocessor.preprocess(raw_text)
+        return self._build_text_events_dataframe(processed.normalized_text), None
+
+    def _build_text_events_dataframe(self, text: str) -> Any:
+        try:
+            import pandas as pd
+            from neuralset.events.utils import standardize_events
+        except Exception as exc:  # pragma: no cover - dependency resolution path
+            raise DependencyAppError(
+                "TRIBE text event preparation dependencies are not installed."
+            ) from exc
+
+        tokens = [token for token in re.findall(r"(?u)\b[\w'-]+\b", text) if token.strip()]
+        if not tokens:
+            raise ValidationAppError("TRIBE text inference requires at least one readable word.")
+
+        context_window: deque[str] = deque(maxlen=128)
+        rows: list[dict[str, Any]] = []
+        start_seconds = 0.0
+
+        for index, token in enumerate(tokens):
+            context_window.append(token)
+            duration_seconds = max(0.18, min(0.75, len(token) * 0.045))
+            rows.append(
+                {
+                    "type": "Word",
+                    "text": token,
+                    "context": " ".join(context_window),
+                    "start": round(start_seconds, 6),
+                    "duration": round(duration_seconds, 6),
+                    "timeline": "default",
+                    "subject": "default",
+                    "sequence_id": index,
+                }
+            )
+            start_seconds += duration_seconds
+
+        events = pd.DataFrame(rows)
+        return standardize_events(events)
 
     def _predict(self, *, model: Any, events: Any) -> tuple[np.ndarray, list[Any]]:
         try:
             predictions, segments = model.predict(events=events)
         except Exception as exc:
-            raise ValidationAppError(
-                f"TRIBE v2 prediction failed for the prepared events payload: {exc}"
-            ) from exc
+            raise ValidationAppError(self._format_prediction_error(exc)) from exc
 
         array = np.asarray(predictions, dtype=np.float32)
         if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] == 0:
@@ -345,6 +418,9 @@ class TribeRuntime:
                 "subject_basis": "average_subject",
                 "device": self._get_resolved_device(),
             },
+            "feature_extractors": {
+                "text_feature_model_name": self.text_feature_model_name,
+            },
             "input_modality": payload.modality,
             "event_summary": event_summary,
             "prediction_summary": {
@@ -364,6 +440,9 @@ class TribeRuntime:
                 "checkpoint_name": self.checkpoint_name,
                 "device": self._get_resolved_device(),
             },
+            "feature_extractors": {
+                "text_feature_model_name": self.text_feature_model_name,
+            },
             "official_api_path": {
                 "from_pretrained": True,
                 "get_events_dataframe": True,
@@ -372,7 +451,7 @@ class TribeRuntime:
             "contract_notes": [
                 "The public TRIBE v2 API predicts average-subject responses on the fsaverage5 cortical mesh.",
                 "This service stores only summaries and derived internal features, not raw cortical mesh predictions.",
-                "Business-facing scores are computed downstream by NeuroScoringService and are not direct TRIBE outputs.",
+                "Business-facing scores are evaluated downstream by an LLM scoring layer and are not direct TRIBE outputs.",
             ],
         }
 
@@ -593,6 +672,41 @@ class TribeRuntime:
         except Exception as exc:
             raise ConfigurationAppError("Configured Hugging Face credentials could not be applied.") from exc
 
+    @classmethod
+    def _enable_local_huggingface_model_paths(cls) -> None:
+        if cls._local_hf_model_path_patch_applied:
+            return
+
+        try:
+            base_module = importlib.import_module("neuralset.extractors.base")
+            mixin_cls = getattr(base_module, "HuggingFaceMixin")
+        except Exception:
+            return
+
+        original_repo_exists = getattr(mixin_cls, "_neuromarketer_original_repo_exists", None)
+        if original_repo_exists is None:
+            original_repo_exists = mixin_cls.repo_exists
+            setattr(mixin_cls, "_neuromarketer_original_repo_exists", original_repo_exists)
+
+        if getattr(mixin_cls, "_neuromarketer_local_path_patch_applied", False):
+            cls._local_hf_model_path_patch_applied = True
+            return
+
+        def repo_exists_with_local_paths(mixin_self: Any) -> bool:
+            model_name = str(getattr(mixin_self, "model_name", "") or "").strip()
+            if model_name:
+                configured_path = Path(model_name).expanduser()
+                candidates = [configured_path]
+                if not configured_path.is_absolute():
+                    candidates.append(Path(__file__).resolve().parents[2] / configured_path)
+                if any(candidate.is_dir() for candidate in candidates):
+                    return True
+            return original_repo_exists(mixin_self)
+
+        mixin_cls.repo_exists = repo_exists_with_local_paths
+        setattr(mixin_cls, "_neuromarketer_local_path_patch_applied", True)
+        cls._local_hf_model_path_patch_applied = True
+
     def _get_loaded_model(self) -> Any:
         model = self.__class__._shared_model
         if model is None:
@@ -621,6 +735,7 @@ class TribeRuntime:
 
     def _build_runtime_config_update(self, requested_device: str) -> dict[str, Any]:
         config_update: dict[str, Any] = {
+            "data.text_feature.model_name": self.text_feature_model_name,
             "data.text_feature.device": requested_device,
             "data.audio_feature.device": requested_device,
             "data.image_feature.image.device": requested_device,
@@ -683,6 +798,40 @@ class TribeRuntime:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    def _format_prediction_error(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        lowered = message.lower()
+
+        if "gated repo" in lowered or "cannot access gated repo" in lowered:
+            return (
+                "TRIBE v2 prediction failed because a configured Hugging Face feature model is gated. "
+                f"Configured text feature model: {self.text_feature_model_name}. "
+                "Set TRIBE_TEXT_FEATURE_MODEL_NAME to a public compatible model or provide TRIBE_HF_TOKEN with access. "
+                f"Original error: {message}"
+            )
+
+        return f"TRIBE v2 prediction failed for the prepared events payload: {message}"
+
+    def _format_load_error(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        lowered = message.lower()
+
+        if self._resolve_local_model_path(self.text_feature_model_name) is not None and "does not exist" in lowered:
+            return (
+                "Failed to load TRIBE v2 because the configured local text feature model path was rejected "
+                "during runtime validation. "
+                f"Configured text feature model: {self.text_feature_model_name}. "
+                "Verify the directory exists inside the running API/worker environment and contains a full "
+                "Hugging Face model snapshot. "
+                f"Original error: {message}"
+            )
+
+        return (
+            "Failed to load TRIBE v2 from the configured checkpoint. "
+            "Check model availability, Hugging Face access, and runtime dependencies. "
+            f"Original error: {message}"
+        )
 
 
 _shared_runtime: TribeRuntime | None = None

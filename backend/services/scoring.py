@@ -3,16 +3,36 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable
 
 from backend.core.logging import duration_ms, get_logger, log_event
 from backend.db.models import SuggestionStatus, SuggestionType, VisualizationType
+from backend.llm.analysis_scoring_service import AnalysisScoringResponse, AnalysisScoringService
+from backend.schemas.llm_scoring import MetricAssessment, TimelineMetricPoint
 
 logger = get_logger(__name__)
 
 
 def _decimal(value: float, *, precision: int = 2) -> Decimal:
     return Decimal(str(round(value, precision)))
+
+
+def _score_decimal(value: int | float) -> Decimal:
+    return _decimal(float(value), precision=2)
+
+
+def _normalize_notes(values: Iterable[str], *, limit: int = 6) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values:
+        text = str(raw_value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+        if len(normalized) >= limit:
+            break
+    return normalized
 
 
 @dataclass(slots=True)
@@ -61,6 +81,7 @@ class ScoringBundle:
     visualizations: list[VisualizationItem]
     timeline_points: list[TimelinePointItem]
     suggestions: list[SuggestionItem]
+    notes: list[str]
 
 
 class NeuroScoringService:
@@ -75,18 +96,14 @@ class NeuroScoringService:
     - business-facing neuromarketing scores
     - visualizations and suggestions for marketers
 
-    These public scores are our interpretation layer. They are not direct TRIBE outputs.
+    These public scores are an LLM interpretation layer grounded in TRIBE-derived evidence.
+    They are not direct TRIBE outputs.
     """
 
-    SCORE_MODEL_NAME = "neuro_scorer_v3"
+    SCORE_MODEL_NAME = "llm_analysis_scorer_v1"
 
-    @staticmethod
-    def _clip01(value: float) -> float:
-        return max(0.0, min(1.0, float(value)))
-
-    @classmethod
-    def _to_pct(cls, value: float) -> Decimal:
-        return _decimal(cls._clip01(value) * 100.0)
+    def __init__(self, analysis_scoring_service: AnalysisScoringService | None = None) -> None:
+        self.analysis_scoring_service = analysis_scoring_service or AnalysisScoringService.from_settings()
 
     async def score(
         self,
@@ -97,16 +114,7 @@ class NeuroScoringService:
         modality: str,
     ) -> ScoringBundle:
         started_at = time.perf_counter()
-        engagement = float(reduced_feature_vector.get("derived_neural_engagement_signal", 0.5))
-        peak_focus = float(reduced_feature_vector.get("derived_peak_focus_signal", 0.5))
-        temporal_dynamics = float(reduced_feature_vector.get("derived_temporal_dynamics_signal", 0.3))
-        temporal_consistency = float(reduced_feature_vector.get("derived_temporal_consistency_signal", 0.5))
-        linguistic_load = float(reduced_feature_vector.get("derived_linguistic_load_signal", 0.4))
-        context_density = float(reduced_feature_vector.get("derived_context_density_signal", 0.4))
-        hemisphere_balance = float(reduced_feature_vector.get("derived_hemisphere_balance_signal", 0.5))
-        audio_language_mix = float(reduced_feature_vector.get("derived_audio_language_mix_signal", 0.3))
         segment_features = list(reduced_feature_vector.get("segment_features", []))
-        hemisphere_summary = region_activation_summary.get("hemisphere_summary", {})
 
         log_event(
             logger,
@@ -116,117 +124,36 @@ class NeuroScoringService:
             segment_count=len(segment_features),
         )
 
-        attention_value = self._clip01(
-            (engagement * 0.46)
-            + (peak_focus * 0.28)
-            + (temporal_consistency * 0.18)
-            + (hemisphere_balance * 0.08)
-        )
-        emotion_value = self._clip01(
-            (engagement * 0.34)
-            + (temporal_dynamics * 0.24)
-            + (audio_language_mix * 0.18)
-            + (peak_focus * 0.12)
-            + 0.12
-        )
-        memory_value = self._clip01(
-            (temporal_consistency * 0.38)
-            + (engagement * 0.32)
-            + (peak_focus * 0.18)
-            + (hemisphere_balance * 0.12)
-        )
-        cognitive_load_value = self._clip01(
-            (linguistic_load * 0.5)
-            + (context_density * 0.3)
-            + ((1.0 - temporal_consistency) * 0.2)
-        )
-        conversion_proxy_value = self._clip01(
-            (attention_value * 0.29)
-            + (emotion_value * 0.17)
-            + (memory_value * 0.27)
-            + (peak_focus * 0.12)
-            + (audio_language_mix * 0.08)
-            - (cognitive_load_value * 0.13)
-            + 0.09
-        )
-
-        score_values = {
-            "attention": attention_value,
-            "emotion": emotion_value,
-            "memory": memory_value,
-            "cognitive_load": cognitive_load_value,
-            "conversion_proxy": conversion_proxy_value,
-        }
-        confidence_value = self._compute_confidence(
-            segment_count=len(segment_features),
-            context_density=context_density,
+        scoring_context = self._build_scoring_context(
+            reduced_feature_vector=reduced_feature_vector,
+            region_activation_summary=region_activation_summary,
+            context=context,
             modality=modality,
         )
+        scoring_response = await self.analysis_scoring_service.score(scoring_context)
 
-        scores = [
-            self._build_score_item(
-                score_type="attention",
-                normalized_value=attention_value,
-                raw_value=engagement,
-                confidence_value=confidence_value,
-                modality=modality,
-                feature_basis=["derived_neural_engagement_signal", "derived_peak_focus_signal"],
-            ),
-            self._build_score_item(
-                score_type="emotion",
-                normalized_value=emotion_value,
-                raw_value=(temporal_dynamics + audio_language_mix) / 2,
-                confidence_value=confidence_value,
-                modality=modality,
-                feature_basis=["derived_temporal_dynamics_signal", "derived_audio_language_mix_signal"],
-            ),
-            self._build_score_item(
-                score_type="memory",
-                normalized_value=memory_value,
-                raw_value=temporal_consistency,
-                confidence_value=confidence_value,
-                modality=modality,
-                feature_basis=["derived_temporal_consistency_signal", "derived_peak_focus_signal"],
-            ),
-            self._build_score_item(
-                score_type="cognitive_load",
-                normalized_value=cognitive_load_value,
-                raw_value=linguistic_load,
-                confidence_value=confidence_value,
-                modality=modality,
-                feature_basis=["derived_linguistic_load_signal", "derived_context_density_signal"],
-            ),
-            self._build_score_item(
-                score_type="conversion_proxy",
-                normalized_value=conversion_proxy_value,
-                raw_value=conversion_proxy_value,
-                confidence_value=max(0.5, confidence_value - 0.06),
-                modality=modality,
-                feature_basis=["attention", "emotion", "memory", "cognitive_load"],
-            ),
-        ]
-
+        score_values = self._score_values_from_response(scoring_response)
         bundle = ScoringBundle(
-            scores=scores,
+            scores=self._build_scores(
+                scoring_response=scoring_response,
+                modality=modality,
+            ),
             visualizations=self._build_visualizations(
                 score_values=score_values,
                 segment_features=segment_features,
                 region_activation_summary=region_activation_summary,
                 modality=modality,
+                scoring_response=scoring_response,
             ),
             timeline_points=self._build_timeline(
-                score_values=score_values,
+                scoring_response=scoring_response,
                 segment_features=segment_features,
             ),
-            suggestions=self._build_suggestions(
-                score_values=score_values,
-                modality=modality,
-                context=context,
-                reduced_feature_vector=reduced_feature_vector,
-                hemisphere_summary=hemisphere_summary,
-            ),
+            suggestions=self._build_suggestions(scoring_response=scoring_response),
+            notes=self._build_notes(scoring_response=scoring_response),
         )
         finished_at = time.perf_counter()
+
         log_event(
             logger,
             "scoring_finished",
@@ -235,40 +162,87 @@ class NeuroScoringService:
             duration_ms=duration_ms(started_at, finished_at),
             suggestion_count=len(bundle.suggestions),
             timeline_points=len(bundle.timeline_points),
-            score_summary={key: round(value * 100.0, 2) for key, value in score_values.items()},
+            score_summary={
+                score.score_type: round(float(score.normalized_score), 2)
+                for score in bundle.scores
+            },
+            provider=scoring_response.provider,
+            model=scoring_response.model,
+            prompt_version=scoring_response.prompt_version,
         )
         return bundle
+
+    def _build_scores(
+        self,
+        *,
+        scoring_response: AnalysisScoringResponse,
+        modality: str,
+    ) -> list[ScoreItem]:
+        assessments = scoring_response.result.scores
+        return [
+            self._build_score_item(
+                score_type="attention",
+                assessment=assessments.attention,
+                modality=modality,
+                scoring_response=scoring_response,
+            ),
+            self._build_score_item(
+                score_type="emotion",
+                assessment=assessments.emotion,
+                modality=modality,
+                scoring_response=scoring_response,
+            ),
+            self._build_score_item(
+                score_type="memory",
+                assessment=assessments.memory,
+                modality=modality,
+                scoring_response=scoring_response,
+            ),
+            self._build_score_item(
+                score_type="cognitive_load",
+                assessment=assessments.cognitive_load,
+                modality=modality,
+                scoring_response=scoring_response,
+            ),
+            self._build_score_item(
+                score_type="conversion_proxy",
+                assessment=assessments.conversion_proxy,
+                modality=modality,
+                scoring_response=scoring_response,
+            ),
+        ]
 
     def _build_score_item(
         self,
         *,
         score_type: str,
-        normalized_value: float,
-        raw_value: float,
-        confidence_value: float,
+        assessment: MetricAssessment,
         modality: str,
-        feature_basis: list[str],
+        scoring_response: AnalysisScoringResponse,
     ) -> ScoreItem:
-        percentile = self._to_pct(normalized_value)
+        normalized_score = _score_decimal(assessment.score)
+        evidence = _normalize_notes(assessment.evidence, limit=4)
         return ScoreItem(
             score_type=score_type,
-            normalized_score=percentile,
-            raw_value=_decimal(raw_value, precision=6),
-            confidence=_decimal(confidence_value, precision=4),
-            percentile=percentile,
+            normalized_score=normalized_score,
+            raw_value=None,
+            confidence=_decimal(assessment.confidence, precision=4),
+            percentile=normalized_score,
             metadata_json={
                 "model": self.SCORE_MODEL_NAME,
                 "modality": modality,
-                "feature_basis": feature_basis,
-                "interpretation_layer": "Derived product score built on TRIBE v2 internal features.",
+                "provider": scoring_response.provider,
+                "provider_id": scoring_response.provider_id,
+                "model_name": scoring_response.model,
+                "prompt_version": scoring_response.prompt_version,
+                "reason": assessment.reason,
+                "evidence": evidence,
+                "telemetry": scoring_response.telemetry,
+                "interpretation_layer": (
+                    "LLM-evaluated product score grounded in TRIBE-derived internal features and summaries."
+                ),
             },
         )
-
-    def _compute_confidence(self, *, segment_count: int, context_density: float, modality: str) -> float:
-        modality_bonus = 0.05 if modality in {"video", "audio"} else 0.0
-        segment_bonus = min(0.16, max(0.0, (segment_count - 1) * 0.02))
-        density_bonus = min(0.08, context_density * 0.08)
-        return self._clip01(0.58 + modality_bonus + segment_bonus + density_bonus)
 
     def _build_visualizations(
         self,
@@ -277,6 +251,7 @@ class NeuroScoringService:
         segment_features: list[dict[str, Any]],
         region_activation_summary: dict[str, Any],
         modality: str,
+        scoring_response: AnalysisScoringResponse,
     ) -> list[VisualizationItem]:
         timeline_curve = [
             {
@@ -297,7 +272,10 @@ class NeuroScoringService:
                     "modality": modality,
                     "curve": timeline_curve,
                     "summary_scores": {key: round(value * 100.0, 2) for key, value in score_values.items()},
-                    "note": "Timeline values are derived from internal features computed over TRIBE segment predictions.",
+                    "note": "Summary scores are LLM-evaluated from TRIBE-derived evidence. Timeline curve values come from TRIBE segment features.",
+                    "provider": scoring_response.provider,
+                    "model_name": scoring_response.model,
+                    "prompt_version": scoring_response.prompt_version,
                 },
             ),
             VisualizationItem(
@@ -311,198 +289,212 @@ class NeuroScoringService:
     def _build_timeline(
         self,
         *,
-        score_values: dict[str, float],
+        scoring_response: AnalysisScoringResponse,
         segment_features: list[dict[str, Any]],
     ) -> list[TimelinePointItem]:
-        if not segment_features:
-            return [
-                TimelinePointItem(
-                    timestamp_ms=0,
-                    attention_score=self._to_pct(score_values["attention"]),
-                    emotion_score=self._to_pct(score_values["emotion"]),
-                    memory_score=self._to_pct(score_values["memory"]),
-                    cognitive_load_score=self._to_pct(score_values["cognitive_load"]),
-                    conversion_proxy_score=self._to_pct(score_values["conversion_proxy"]),
-                    metadata_json={"segment_index": 0, "derived": True},
+        overall_scores = scoring_response.result.scores
+        points_by_index = {
+            int(point.segment_index): point
+            for point in scoring_response.result.timeline_points
+        }
+
+        if segment_features:
+            timeline: list[TimelinePointItem] = []
+            for index, segment in enumerate(segment_features):
+                point = points_by_index.get(index)
+                timestamp_ms = int(
+                    segment.get(
+                        "start_ms",
+                        point.timestamp_ms if point is not None else index * 1000,
+                    )
                 )
+                timeline.append(
+                    self._timeline_item_from_point(
+                        point=point,
+                        timestamp_ms=timestamp_ms,
+                        segment_index=index,
+                        scoring_response=scoring_response,
+                        fallback_scores=overall_scores,
+                        segment=segment,
+                    )
+                )
+            return timeline
+
+        if scoring_response.result.timeline_points:
+            return [
+                self._timeline_item_from_point(
+                    point=point,
+                    timestamp_ms=int(point.timestamp_ms),
+                    segment_index=int(point.segment_index),
+                    scoring_response=scoring_response,
+                    fallback_scores=overall_scores,
+                    segment=None,
+                )
+                for point in scoring_response.result.timeline_points
             ]
 
-        timeline: list[TimelinePointItem] = []
-        for item in segment_features:
-            engagement = float(item.get("engagement_signal", 0.0))
-            peak_focus = float(item.get("peak_focus_signal", 0.0))
-            consistency = float(item.get("consistency_signal", 0.0))
-            temporal_change = float(item.get("temporal_change_signal", 0.0))
-            balance = float(item.get("hemisphere_balance_signal", 0.0))
+        return [
+            TimelinePointItem(
+                timestamp_ms=0,
+                attention_score=_score_decimal(overall_scores.attention.score),
+                emotion_score=_score_decimal(overall_scores.emotion.score),
+                memory_score=_score_decimal(overall_scores.memory.score),
+                cognitive_load_score=_score_decimal(overall_scores.cognitive_load.score),
+                conversion_proxy_score=_score_decimal(overall_scores.conversion_proxy.score),
+                metadata_json={
+                    "segment_index": 0,
+                    "source": "llm_analysis_scoring",
+                    "provider": scoring_response.provider,
+                    "model_name": scoring_response.model,
+                },
+            )
+        ]
 
-            attention_value = self._clip01(
-                (engagement * 0.5)
-                + (peak_focus * 0.32)
-                + (consistency * 0.18)
-            )
-            emotion_value = self._clip01(
-                (engagement * 0.38)
-                + (temporal_change * 0.32)
-                + (peak_focus * 0.14)
-                + 0.12
-            )
-            memory_value = self._clip01(
-                (consistency * 0.44)
-                + (engagement * 0.26)
-                + (peak_focus * 0.2)
-                + (balance * 0.1)
-            )
-            cognitive_load_value = self._clip01(
-                (temporal_change * 0.22)
-                + ((1.0 - consistency) * 0.38)
-                + ((1.0 - balance) * 0.16)
-                + 0.24
-            )
-            conversion_proxy_value = self._clip01(
-                (attention_value * 0.3)
-                + (emotion_value * 0.16)
-                + (memory_value * 0.28)
-                - (cognitive_load_value * 0.12)
-                + 0.1
-            )
-
-            timeline.append(
-                TimelinePointItem(
-                    timestamp_ms=int(item.get("start_ms", 0)),
-                    attention_score=self._to_pct(attention_value),
-                    emotion_score=self._to_pct(emotion_value),
-                    memory_score=self._to_pct(memory_value),
-                    cognitive_load_score=self._to_pct(cognitive_load_value),
-                    conversion_proxy_score=self._to_pct(conversion_proxy_value),
-                    metadata_json={
-                        "segment_index": int(item.get("segment_index", len(timeline))),
-                        "event_count": int(item.get("event_count", 0)),
-                        "event_types": list(item.get("event_types", [])),
-                        "derived_from": "TRIBE segment prediction summaries",
-                    },
-                )
-            )
-        return timeline
-
-    def _build_suggestions(
+    def _timeline_item_from_point(
         self,
         *,
-        score_values: dict[str, float],
-        modality: str,
-        context: dict[str, Any],
-        reduced_feature_vector: dict[str, Any],
-        hemisphere_summary: dict[str, Any],
-    ) -> list[SuggestionItem]:
-        suggestions: list[SuggestionItem] = []
+        point: TimelineMetricPoint | None,
+        timestamp_ms: int,
+        segment_index: int,
+        scoring_response: AnalysisScoringResponse,
+        fallback_scores: Any,
+        segment: dict[str, Any] | None,
+    ) -> TimelinePointItem:
+        rationale = point.rationale if point is not None else None
+        metadata_json = {
+            "segment_index": segment_index,
+            "source": "llm_analysis_scoring",
+            "provider": scoring_response.provider,
+            "model_name": scoring_response.model,
+        }
+        if rationale:
+            metadata_json["rationale"] = rationale
+        if segment is not None:
+            metadata_json["event_count"] = int(segment.get("event_count", 0))
+            metadata_json["event_types"] = list(segment.get("event_types", []))
 
-        if score_values["conversion_proxy"] < 0.68:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.CTA,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Clarify the decision moment",
-                    rationale=(
-                        "Derived conversion potential trails the engagement profile. "
-                        "Strengthen the primary action cue near the highest-engagement segment."
-                    ),
-                    proposed_change_json={
-                        "action": "increase_cta_prominence",
-                        "modality": modality,
-                        "audience_context": context.get("audience_context", {}),
-                    },
-                    expected_score_lift_json={"conversion_proxy": 4.2, "attention": 1.8},
-                    confidence=_decimal(0.8, precision=4),
-                )
-            )
-
-        if score_values["attention"] < 0.66:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.FRAMING if modality == "text" else SuggestionType.PACING,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Front-load the strongest cue",
-                    rationale=(
-                        "The derived engagement and peak-focus signals suggest the opening is not capturing attention quickly enough."
-                    ),
-                    proposed_change_json={"action": "move_key_message_earlier", "modality": modality},
-                    expected_score_lift_json={"attention": 5.1, "memory": 2.1},
-                    confidence=_decimal(0.76, precision=4),
-                )
-            )
-
-        if score_values["memory"] < 0.64:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.BRANDING,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Reinforce the brand anchor at the peak segment",
-                    rationale=(
-                        "Temporal consistency is moderate, which weakens downstream recall. "
-                        "Repeat the brand or product anchor when the message is already landing."
-                    ),
-                    proposed_change_json={
-                        "action": "repeat_brand_anchor",
-                        "target_moment": "highest_engagement_segment",
-                    },
-                    expected_score_lift_json={"memory": 4.3, "conversion_proxy": 1.9},
-                    confidence=_decimal(0.74, precision=4),
-                )
-            )
-
-        if score_values["cognitive_load"] > 0.58:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.COPY if modality == "text" else SuggestionType.PACING,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Reduce message density",
-                    rationale=(
-                        "Derived linguistic-load and context-density signals indicate more decoding effort than ideal."
-                    ),
-                    proposed_change_json={
-                        "action": "simplify_message",
-                        "hemisphere_balance_signal": hemisphere_summary.get("hemisphere_balance_signal"),
-                    },
-                    expected_score_lift_json={"cognitive_load": -6.0, "conversion_proxy": 2.2},
-                    confidence=_decimal(0.82, precision=4),
-                )
-            )
-
-        if score_values["emotion"] < 0.63 and modality in {"video", "audio"}:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.FRAMING,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Add a stronger emotional contrast beat",
-                    rationale=(
-                        "Temporal dynamics are present, but the affective arc is still flatter than target."
-                    ),
-                    proposed_change_json={"action": "increase_emotional_contrast", "modality": modality},
-                    expected_score_lift_json={"emotion": 3.2, "attention": 1.4},
-                    confidence=_decimal(0.69, precision=4),
-                )
-            )
-
-        if not suggestions:
-            suggestions.append(
-                SuggestionItem(
-                    suggestion_type=SuggestionType.FRAMING,
-                    status=SuggestionStatus.PROPOSED,
-                    title="Test a sharper value proposition variant",
-                    rationale=(
-                        "The current prediction is balanced. Incremental upside is more likely to come from message framing than structural change."
-                    ),
-                    proposed_change_json={
-                        "action": "test_value_proposition_variant",
-                        "current_context_density": reduced_feature_vector.get("derived_context_density_signal"),
-                    },
-                    expected_score_lift_json={"emotion": 1.5, "conversion_proxy": 1.1},
-                    confidence=_decimal(0.63, precision=4),
-                )
-            )
-
-        suggestions.sort(
-            key=lambda item: float(item.expected_score_lift_json.get("conversion_proxy", 0.0))
-            + float(item.confidence or 0),
-            reverse=True,
+        return TimelinePointItem(
+            timestamp_ms=timestamp_ms,
+            attention_score=_score_decimal(
+                point.attention_score if point is not None else fallback_scores.attention.score
+            ),
+            emotion_score=_score_decimal(
+                point.emotion_score if point is not None else fallback_scores.emotion.score
+            ),
+            memory_score=_score_decimal(
+                point.memory_score if point is not None else fallback_scores.memory.score
+            ),
+            cognitive_load_score=_score_decimal(
+                point.cognitive_load_score if point is not None else fallback_scores.cognitive_load.score
+            ),
+            conversion_proxy_score=_score_decimal(
+                point.conversion_proxy_score if point is not None else fallback_scores.conversion_proxy.score
+            ),
+            metadata_json=metadata_json,
         )
+
+    def _build_suggestions(self, *, scoring_response: AnalysisScoringResponse) -> list[SuggestionItem]:
+        suggestions: list[SuggestionItem] = []
+        for suggestion in scoring_response.result.suggestions:
+            proposed_change_json = dict(suggestion.proposed_change_json or {})
+            if suggestion.timestamp_ms is not None:
+                proposed_change_json.setdefault("timestamp_ms", int(suggestion.timestamp_ms))
+            suggestions.append(
+                SuggestionItem(
+                    suggestion_type=SuggestionType(suggestion.suggestion_type),
+                    status=SuggestionStatus.PROPOSED,
+                    title=suggestion.title,
+                    rationale=suggestion.rationale,
+                    proposed_change_json=proposed_change_json,
+                    expected_score_lift_json={
+                        key: round(float(value), 2)
+                        for key, value in suggestion.expected_score_lift_json.items()
+                    },
+                    confidence=_decimal(suggestion.confidence, precision=4),
+                )
+            )
         return suggestions
+
+    def _build_notes(self, *, scoring_response: AnalysisScoringResponse) -> list[str]:
+        return _normalize_notes(
+            [
+                scoring_response.result.overall_summary,
+                *scoring_response.result.notes,
+            ]
+        )
+
+    def _build_scoring_context(
+        self,
+        *,
+        reduced_feature_vector: dict[str, Any],
+        region_activation_summary: dict[str, Any],
+        context: dict[str, Any],
+        modality: str,
+    ) -> dict[str, Any]:
+        campaign_context = context.get("campaign_context") if isinstance(context, dict) else {}
+        campaign_context = campaign_context if isinstance(campaign_context, dict) else {}
+        audience_context = context.get("audience_context") if isinstance(context, dict) else {}
+        audience_context = audience_context if isinstance(audience_context, dict) else {}
+        segment_features = list(reduced_feature_vector.get("segment_features", []))
+
+        scalar_features = {
+            key: reduced_feature_vector.get(key)
+            for key in (
+                "feature_contract_version",
+                "global_abs_mean_activation",
+                "global_abs_peak_activation",
+                "segment_count",
+                "event_row_count",
+                "derived_neural_engagement_signal",
+                "derived_peak_focus_signal",
+                "derived_temporal_dynamics_signal",
+                "derived_temporal_consistency_signal",
+                "derived_linguistic_load_signal",
+                "derived_context_density_signal",
+                "derived_hemisphere_balance_signal",
+                "derived_audio_language_mix_signal",
+            )
+            if key in reduced_feature_vector
+        }
+
+        return {
+            "modality": modality,
+            "campaign_context": {
+                "objective": campaign_context.get("objective"),
+                "goal_template": campaign_context.get("goal_template"),
+                "channel": campaign_context.get("channel"),
+                "audience_segment": campaign_context.get("audience_segment"),
+            },
+            "audience_context": audience_context,
+            "tribe_feature_summary": scalar_features,
+            "segment_features": [
+                {
+                    "segment_index": int(segment.get("segment_index", index)),
+                    "start_ms": int(segment.get("start_ms", index * 1000)),
+                    "duration_ms": int(segment.get("duration_ms", 1000)),
+                    "event_count": int(segment.get("event_count", 0)),
+                    "event_types": list(segment.get("event_types", [])),
+                    "engagement_signal": float(segment.get("engagement_signal", 0.0)),
+                    "peak_focus_signal": float(segment.get("peak_focus_signal", 0.0)),
+                    "consistency_signal": float(segment.get("consistency_signal", 0.0)),
+                    "temporal_change_signal": float(segment.get("temporal_change_signal", 0.0)),
+                    "hemisphere_balance_signal": float(segment.get("hemisphere_balance_signal", 0.0)),
+                }
+                for index, segment in enumerate(segment_features)
+            ],
+            "region_activation_summary": {
+                "mesh": region_activation_summary.get("mesh"),
+                "hemisphere_summary": region_activation_summary.get("hemisphere_summary"),
+                "top_rois": list(region_activation_summary.get("top_rois") or [])[:8],
+            },
+        }
+
+    def _score_values_from_response(self, scoring_response: AnalysisScoringResponse) -> dict[str, float]:
+        assessments = scoring_response.result.scores
+        return {
+            "attention": float(assessments.attention.score) / 100.0,
+            "emotion": float(assessments.emotion.score) / 100.0,
+            "memory": float(assessments.memory.score) / 100.0,
+            "cognitive_load": float(assessments.cognitive_load.score) / 100.0,
+            "conversion_proxy": float(assessments.conversion_proxy.score) / 100.0,
+        }

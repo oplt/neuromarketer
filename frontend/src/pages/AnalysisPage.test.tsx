@@ -15,11 +15,13 @@ vi.mock('../lib/api', () => ({
   uploadToSignedUrl: vi.fn(),
 }))
 
-import { apiFetch, apiRequest, subscribeToEventStream } from '../lib/api'
+import { apiFetch, apiRequest, subscribeToEventStream, uploadToApi, uploadToSignedUrl } from '../lib/api'
 
 const mockedApiFetch = vi.mocked(apiFetch)
 const mockedApiRequest = vi.mocked(apiRequest)
 const mockedSubscribeToEventStream = vi.mocked(subscribeToEventStream)
+const mockedUploadToApi = vi.mocked(uploadToApi)
+const mockedUploadToSignedUrl = vi.mocked(uploadToSignedUrl)
 
 const session = {
   email: 'analyst@example.com',
@@ -352,7 +354,22 @@ function mockConfig() {
     allowed_mime_types: {
       video: ['video/mp4'],
       audio: ['audio/mpeg'],
-      text: ['text/plain'],
+      text: [
+        'text/plain',
+        'text/markdown',
+        'text/csv',
+        'text/tab-separated-values',
+        'application/json',
+        'text/html',
+        'application/xml',
+        'text/xml',
+        'application/pdf',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/vnd.oasis.opendocument.text',
+        'application/rtf',
+        'text/rtf',
+      ],
     },
   }
 }
@@ -476,7 +493,124 @@ describe('AnalysisPage', () => {
     mockedApiRequest.mockReset()
     mockedSubscribeToEventStream.mockReset()
     mockedSubscribeToEventStream.mockImplementation(() => vi.fn())
+    mockedUploadToApi.mockReset()
+    mockedUploadToSignedUrl.mockReset()
+    mockedUploadToSignedUrl.mockResolvedValue()
     window.sessionStorage.clear()
+  })
+
+  it('uploads PDF documents from the text analysis step', async () => {
+    const pendingAsset = {
+      id: 'asset-pdf',
+      media_type: 'text',
+      original_filename: 'brief.pdf',
+      mime_type: 'application/pdf',
+      size_bytes: 24,
+      bucket: 'analysis',
+      object_key: 'raw/brief.pdf',
+      object_uri: 's3://analysis/raw/brief.pdf',
+      upload_status: 'pending',
+      created_at: '2026-03-31T09:54:00.000Z',
+    }
+    const storedAsset = {
+      ...pendingAsset,
+      creative_id: 'creative-pdf',
+      creative_version_id: 'creative-version-pdf',
+      upload_status: 'uploaded',
+    }
+
+    mockedApiRequest.mockImplementation(async (path, options) => {
+      const collaborationResponse = maybeHandleCollaborationRequest(path)
+      if (collaborationResponse !== undefined) {
+        return collaborationResponse
+      }
+      if (path === '/api/v1/analysis/config') {
+        return mockConfig()
+      }
+      if (path === '/api/v1/analysis/goal-presets') {
+        return mockGoalPresets()
+      }
+      if (path === '/api/v1/analysis/events') {
+        return { status: 'accepted' }
+      }
+      if (path.startsWith('/api/v1/analysis/assets?media_type=')) {
+        return { items: [] }
+      }
+      if (path.startsWith('/api/v1/analysis/jobs?media_type=')) {
+        return { items: [] }
+      }
+      if (path === '/api/v1/analysis/uploads' && options?.method === 'POST') {
+        expect(options.body).toMatchObject({
+          media_type: 'text',
+          original_filename: 'brief.pdf',
+          mime_type: 'application/pdf',
+        })
+        return {
+          upload_session: {
+            id: 'upload-pdf',
+            upload_token: 'upload-token-pdf',
+            upload_status: 'pending',
+            created_at: '2026-03-31T09:54:00.000Z',
+          },
+          asset: pendingAsset,
+          upload_url: 'https://upload.example.test/brief.pdf',
+          upload_headers: { 'Content-Type': 'application/pdf' },
+        }
+      }
+      if (path === '/api/v1/analysis/uploads/upload-pdf/complete' && options?.method === 'POST') {
+        return {
+          upload_session: {
+            id: 'upload-pdf',
+            upload_token: 'upload-token-pdf',
+            upload_status: 'uploaded',
+            created_at: '2026-03-31T09:54:00.000Z',
+          },
+          asset: storedAsset,
+        }
+      }
+      throw new Error(`Unexpected path ${path}`)
+    })
+
+    render(<AnalysisPage session={session} />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Text' })).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Text' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Upload document')).toBeTruthy()
+    })
+
+    const uploadDocumentButton = screen.getByText('Upload document').closest('label')
+    if (!uploadDocumentButton) {
+      throw new Error('Expected the upload document button to render as a label.')
+    }
+    const fileInput = uploadDocumentButton.querySelector('input[type="file"]') as HTMLInputElement | null
+    if (!fileInput) {
+      throw new Error('Expected the upload document input to be present.')
+    }
+
+    const file = new File(['%PDF-1.4 mock pdf payload'], 'brief.pdf', { type: 'application/pdf' })
+    fireEvent.change(fileInput, { target: { files: [file] } })
+
+    await waitFor(() => {
+      expect(screen.getByText('brief.pdf')).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByText('Upload media'))
+
+    await waitFor(() => {
+      expect(mockedUploadToSignedUrl).toHaveBeenCalled()
+      expect(screen.getByText(/Upload completed\./i)).toBeTruthy()
+    })
+    await waitFor(() => {
+      expect((screen.getByText('Start analysis') as HTMLButtonElement).disabled).toBe(false)
+    })
+    expect(screen.getAllByText('Landing page hero').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Landing page').length).toBeGreaterThan(0)
+    expect(mockedUploadToApi).not.toHaveBeenCalled()
   })
 
   it('loads saved runs from the drawer and exposes primary compare and generate actions', async () => {

@@ -233,7 +233,7 @@ class AnalysisJobProcessor:
             primary_scoring_started_progress = await self._store_progress(
                 job=job,
                 stage="primary_scoring_started",
-                stage_label="Primary scoring has started. Attention, memory, and load metrics are being computed.",
+                stage_label="Primary scoring has started. Core analysis metrics are being evaluated from the TRIBE-derived context.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
@@ -245,7 +245,7 @@ class AnalysisJobProcessor:
             await self._publish_progress_event(
                 job_id=job.id,
                 stage="primary_scoring_started",
-                stage_label="Primary scoring has started. Attention, memory, and load metrics are being computed.",
+                stage_label="Primary scoring has started. Core analysis metrics are being evaluated from the TRIBE-derived context.",
                 diagnostics=primary_scoring_started_progress["diagnostics"],
                 partial_result=scene_extraction_snapshot,
                 is_partial=True,
@@ -321,7 +321,7 @@ class AnalysisJobProcessor:
             postprocessing_started_progress = await self._store_progress(
                 job=job,
                 stage="postprocessing_started",
-                stage_label="Post-processing has started. The dashboard is composing intervals and recommendations from the scored signals.",
+                stage_label="Post-processing has started. The dashboard is composing the scored timeline and recommendations.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": duration_ms(total_started_at, preview_finished_at),
@@ -333,7 +333,7 @@ class AnalysisJobProcessor:
             await self._publish_progress_event(
                 job_id=job.id,
                 stage="postprocessing_started",
-                stage_label="Post-processing has started. The dashboard is composing intervals and recommendations from the scored signals.",
+                stage_label="Post-processing has started. The dashboard is composing the scored timeline and recommendations.",
                 diagnostics=postprocessing_started_progress["diagnostics"],
                 partial_result=preview_snapshot,
                 is_partial=True,

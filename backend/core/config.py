@@ -8,6 +8,8 @@ from typing import Any, Literal
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.services.document_text_extractor import DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES
+
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 EnvironmentName = Literal["development", "staging", "production", "test"]
 LogFormatName = Literal["auto", "pretty", "json"]
@@ -113,7 +115,7 @@ class Settings(BaseSettings):
         validation_alias="ANALYSIS_ALLOWED_AUDIO_MIME_TYPES",
     )
     analysis_allowed_text_mime_types: list[str] = Field(
-        default_factory=lambda: ["text/plain"],
+        default_factory=lambda: list(DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES),
         validation_alias="ANALYSIS_ALLOWED_TEXT_MIME_TYPES",
     )
     analysis_max_text_characters: int = Field(default=50_000, validation_alias="ANALYSIS_MAX_TEXT_CHARACTERS")
@@ -132,6 +134,10 @@ class Settings(BaseSettings):
     tribe_cache_folder: str = Field(default="./cache/tribev2", validation_alias="TRIBE_CACHE_FOLDER")
     asset_cache_folder: str = Field(default="./cache/assets", validation_alias="ASSET_CACHE_FOLDER")
     tribe_device: str = Field(default="auto", validation_alias="TRIBE_DEVICE")
+    tribe_text_feature_model_name: str = Field(
+        default="microsoft/Phi-3-mini-4k-instruct",
+        validation_alias=AliasChoices("TRIBE_TEXT_FEATURE_MODEL_NAME", "TRIBE_TEXT_MODEL_NAME"),
+    )
     tribe_feature_cluster: str | None = Field(default=None, validation_alias="TRIBE_FEATURE_CLUSTER")
     tribe_hf_token: str | None = Field(
         default=None,

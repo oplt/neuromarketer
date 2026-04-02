@@ -24,6 +24,8 @@ from .llm_client import (
 
 logger = get_logger(__name__)
 
+ModeKey = EvaluationMode | str
+
 
 class LLMRoutingError(Exception):
     def __init__(self, message: str, *, telemetry: dict[str, Any] | None = None) -> None:
@@ -257,7 +259,7 @@ class LLMRouter:
             mode_budgets={key: float(value) for key, value in app_settings.llm_mode_request_budgets_json.items()},
         )
 
-    def preview_route(self, *, mode: EvaluationMode) -> LLMRoutePreview:
+    def preview_route(self, *, mode: ModeKey) -> LLMRoutePreview:
         candidate_order = self._candidate_order(mode)
         for route_id in candidate_order:
             if _circuit_breakers.is_open(route_id):
@@ -281,16 +283,17 @@ class LLMRouter:
     async def generate_structured(
         self,
         *,
-        mode: EvaluationMode,
+        mode: ModeKey,
         messages: list[dict[str, str]],
         response_schema: dict[str, Any] | None = None,
         options: dict[str, Any] | None = None,
     ) -> StructuredGeneration:
+        mode_key = _mode_key(mode)
         candidate_order = self._candidate_order(mode)
         estimated_prompt_tokens = estimate_prompt_tokens(messages)
         budget_usd = self._resolve_budget(mode)
         telemetry: dict[str, Any] = {
-            "mode": mode.value,
+            "mode": mode_key,
             "candidate_order": candidate_order,
             "estimated_prompt_tokens": estimated_prompt_tokens,
             "budget_usd": budget_usd,
@@ -319,7 +322,7 @@ class LLMRouter:
                 )
                 metrics.increment(
                     "llm_provider_requests_total",
-                    labels={"route_id": route.route_id, "provider": route.provider, "status": "skipped_circuit_open", "mode": mode.value},
+                    labels={"route_id": route.route_id, "provider": route.provider, "status": "skipped_circuit_open", "mode": mode_key},
                 )
                 continue
 
@@ -337,7 +340,7 @@ class LLMRouter:
                 )
                 metrics.increment(
                     "llm_provider_requests_total",
-                    labels={"route_id": route.route_id, "provider": route.provider, "status": "skipped_budget", "mode": mode.value},
+                    labels={"route_id": route.route_id, "provider": route.provider, "status": "skipped_budget", "mode": mode_key},
                 )
                 last_error = f"Route {route.route_id} estimated ${estimated_cost:.4f}, exceeding the ${route_budget:.4f} budget."
                 continue
@@ -401,7 +404,7 @@ class LLMRouter:
                         route_id=route.route_id,
                         provider=route.provider,
                         model=route.model,
-                        mode=mode.value,
+                        mode=mode_key,
                         attempt=attempt,
                         fallback_index=fallback_index,
                         latency_ms=latency_ms,
@@ -411,17 +414,17 @@ class LLMRouter:
                     )
                     metrics.increment(
                         "llm_provider_requests_total",
-                        labels={"route_id": route.route_id, "provider": route.provider, "status": "succeeded", "mode": mode.value},
+                        labels={"route_id": route.route_id, "provider": route.provider, "status": "succeeded", "mode": mode_key},
                     )
                     metrics.observe(
                         "llm_provider_latency_seconds",
                         latency_ms / 1_000,
-                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode.value},
+                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
                     )
                     metrics.observe(
                         "llm_provider_cost_usd",
                         actual_cost,
-                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode.value},
+                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
                     )
                     return generation
                 except (LLMTransportError, LLMResponseFormatError, LLMClientError) as exc:
@@ -457,7 +460,7 @@ class LLMRouter:
                         route_id=route.route_id,
                         provider=route.provider,
                         model=route.model,
-                        mode=mode.value,
+                        mode=mode_key,
                         attempt=attempt,
                         fallback_index=fallback_index,
                         latency_ms=latency_ms,
@@ -469,17 +472,17 @@ class LLMRouter:
                     )
                     metrics.increment(
                         "llm_provider_requests_total",
-                        labels={"route_id": route.route_id, "provider": route.provider, "status": status, "mode": mode.value},
+                        labels={"route_id": route.route_id, "provider": route.provider, "status": status, "mode": mode_key},
                     )
                     if opened:
                         metrics.increment(
                             "llm_provider_circuit_open_total",
-                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode.value},
+                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
                         )
                     if is_retry:
                         metrics.increment(
                             "llm_provider_retries_total",
-                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode.value},
+                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
                         )
                         await asyncio.sleep(route.retry_backoff_seconds * attempt)
 
@@ -489,17 +492,18 @@ class LLMRouter:
             telemetry=telemetry,
         )
 
-    def _candidate_order(self, mode: EvaluationMode) -> list[str]:
-        mode_key = mode.value
+    def _candidate_order(self, mode: ModeKey) -> list[str]:
+        mode_key = _mode_key(mode)
         configured = self.mode_preferences.get(mode_key) or self.mode_preferences.get("default") or []
         deduplicated = [route_id for route_id in configured if route_id in self.routes]
         if not deduplicated:
             deduplicated = list(self.route_order)
         return deduplicated
 
-    def _resolve_budget(self, mode: EvaluationMode) -> float | None:
-        if mode.value in self.mode_budgets:
-            budget = float(self.mode_budgets[mode.value])
+    def _resolve_budget(self, mode: ModeKey) -> float | None:
+        mode_key = _mode_key(mode)
+        if mode_key in self.mode_budgets:
+            budget = float(self.mode_budgets[mode_key])
             return budget if budget > 0 else None
         default_route = self.routes[self.route_order[0]]
         budget = default_route.request_budget_usd
@@ -528,3 +532,9 @@ def _float_or_none(value: Any, *, fallback: float | None) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _mode_key(mode: ModeKey) -> str:
+    if isinstance(mode, EvaluationMode):
+        return mode.value
+    return str(mode).strip()

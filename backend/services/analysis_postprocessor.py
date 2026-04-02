@@ -48,6 +48,7 @@ class AnalysisPostprocessor:
     ) -> AnalysisDashboardPayload:
         reduced_feature_vector = runtime_output.reduced_feature_vector or {}
         segment_features = list(reduced_feature_vector.get("segment_features", []))
+        score_items = {score.score_type: score for score in scoring_bundle.scores}
         score_map = {score.score_type: self._to_float(score.normalized_score) for score in scoring_bundle.scores}
         confidence_values = [
             self._to_float(score.confidence)
@@ -68,7 +69,11 @@ class AnalysisPostprocessor:
             scoring_bundle=scoring_bundle,
             score_map=score_map,
         )
-        segment_rows = self._build_segment_rows(timeline_rows=timeline_rows, segment_features=segment_features)
+        segment_rows = self._build_segment_rows(
+            timeline_rows=timeline_rows,
+            segment_features=segment_features,
+            scoring_bundle=scoring_bundle,
+        )
         total_duration_ms = max(
             (
                 int(row["end_time_ms"])
@@ -83,6 +88,7 @@ class AnalysisPostprocessor:
             timeline_rows=timeline_rows,
             confidence_score=confidence_score,
             completeness_score=completeness_score,
+            notes=scoring_bundle.notes,
             objective=objective,
             goal_template=goal_template,
             channel=channel,
@@ -94,19 +100,12 @@ class AnalysisPostprocessor:
         metrics_json = self._build_metrics_json(
             summary_json=summary_json,
             score_map=score_map,
+            score_items=score_items,
             timeline_rows=timeline_rows,
             total_duration_ms=total_duration_ms,
         )
-        high_attention_intervals = self._build_intervals(
-            timeline_rows=timeline_rows,
-            predicate=lambda row: row["attention_score"] >= 72.0 or row["engagement_score"] >= 75.0,
-            label="High attention",
-        )
-        low_attention_intervals = self._build_intervals(
-            timeline_rows=timeline_rows,
-            predicate=lambda row: row["attention_score"] <= 45.0 or row["engagement_score"] <= 42.0,
-            label="Low attention",
-        )
+        high_attention_intervals: list[dict[str, Any]] = []
+        low_attention_intervals: list[dict[str, Any]] = []
         visualizations_json = {
             "heatmap_frames": self._build_heatmap_frames(
                 timeline_rows=timeline_rows,
@@ -119,13 +118,7 @@ class AnalysisPostprocessor:
         }
         recommendations_json = (
             self._build_recommendations(
-                summary_json=summary_json,
-                timeline_rows=timeline_rows,
-                segment_rows=segment_rows,
-                high_attention_intervals=high_attention_intervals,
-                low_attention_intervals=low_attention_intervals,
                 scoring_bundle=scoring_bundle,
-                total_duration_ms=total_duration_ms,
             )
             if include_recommendations
             else []
@@ -158,7 +151,10 @@ class AnalysisPostprocessor:
             event_row_count=int(reduced_feature_vector.get("event_row_count", 0)),
         )
         timeline_rows = self._build_scene_extraction_timeline_rows(segment_features=segment_features)
-        segment_rows = self._build_segment_rows(timeline_rows=timeline_rows, segment_features=segment_features)
+        segment_rows = self._build_segment_rows(
+            timeline_rows=timeline_rows,
+            segment_features=segment_features,
+        )
         total_duration_ms = max(
             (
                 int(row["end_time_ms"])
@@ -274,6 +270,7 @@ class AnalysisPostprocessor:
         timeline_rows: list[dict[str, Any]],
         confidence_score: float,
         completeness_score: float,
+        notes: list[str],
         objective: str | None,
         goal_template: str | None,
         channel: str | None,
@@ -283,24 +280,26 @@ class AnalysisPostprocessor:
         segment_count: int,
     ) -> dict[str, Any]:
         overall_attention_score = round(score_map.get("attention", 0.0), 2)
+        opening_attention_scores = [
+            row["attention_score"]
+            for row in timeline_rows
+            if row["timestamp_ms"] < 3_000
+        ]
+        post_opening_engagement_scores = [
+            row["engagement_score"]
+            for row in timeline_rows
+            if row["timestamp_ms"] >= 3_000
+        ]
         hook_score = round(
-            self._average(
-                [
-                    (row["engagement_score"] * 0.55) + (row["attention_score"] * 0.45)
-                    for row in timeline_rows
-                    if row["timestamp_ms"] < 3_000
-                ]
+            self._average(opening_attention_scores) if opening_attention_scores else self._average(
+                [row["attention_score"] for row in timeline_rows]
             ),
             2,
         ) if timeline_rows else 0.0
         sustained_engagement_score = round(
-            self._average(
-                [
-                    row["engagement_score"]
-                    for row in timeline_rows
-                    if row["timestamp_ms"] >= 3_000
-                ]
-            ) or self._average([row["engagement_score"] for row in timeline_rows]),
+            self._average(post_opening_engagement_scores) if post_opening_engagement_scores else self._average(
+                [row["engagement_score"] for row in timeline_rows]
+            ),
             2,
         )
         return {
@@ -312,12 +311,7 @@ class AnalysisPostprocessor:
             "cognitive_load_proxy": round(score_map.get("cognitive_load", 0.0), 2),
             "confidence": round(confidence_score, 2),
             "completeness": round(completeness_score, 2),
-            "notes": self._build_summary_notes(
-                overall_attention_score=overall_attention_score,
-                hook_score=hook_score,
-                sustained_engagement_score=sustained_engagement_score,
-                cognitive_load_proxy=round(score_map.get("cognitive_load", 0.0), 2),
-            ),
+            "notes": list(notes),
             "metadata": {
                 "objective": objective,
                 "goal_template": goal_template,
@@ -334,6 +328,7 @@ class AnalysisPostprocessor:
         *,
         summary_json: dict[str, Any],
         score_map: dict[str, float],
+        score_items: dict[str, Any],
         timeline_rows: list[dict[str, Any]],
         total_duration_ms: int,
     ) -> list[dict[str, Any]]:
@@ -343,9 +338,18 @@ class AnalysisPostprocessor:
                 "label": "Overall Attention",
                 "value": summary_json["overall_attention_score"],
                 "unit": "/100",
-                "source": "analysis_postprocessor",
-                "detail": "Overall audience attention proxy derived from TRIBE segment outputs.",
-                "confidence": summary_json["confidence"],
+                "source": "llm_analysis_scoring",
+                "detail": "LLM-evaluated attention proxy grounded in TRIBE-derived evidence.",
+                "confidence": self._score_confidence(score_items, "attention", fallback=summary_json["confidence"]),
+            },
+            {
+                "key": "emotion_score",
+                "label": "Emotion",
+                "value": round(score_map.get("emotion", 0.0), 2),
+                "unit": "/100",
+                "source": "llm_analysis_scoring",
+                "detail": "LLM-evaluated emotion proxy grounded in TRIBE-derived evidence.",
+                "confidence": self._score_confidence(score_items, "emotion", fallback=summary_json["confidence"]),
             },
             {
                 "key": "hook_score_first_3_seconds",
@@ -353,7 +357,7 @@ class AnalysisPostprocessor:
                 "value": summary_json["hook_score_first_3_seconds"],
                 "unit": "/100",
                 "source": "analysis_postprocessor",
-                "detail": "Blend of early engagement and attention signals.",
+                "detail": "Opening-window average of the attention timeline.",
                 "confidence": summary_json["confidence"],
             },
             {
@@ -370,27 +374,27 @@ class AnalysisPostprocessor:
                 "label": "Memory Proxy",
                 "value": summary_json["memory_proxy_score"],
                 "unit": "/100",
-                "source": "analysis_postprocessor",
-                "detail": "Recall-oriented proxy derived from temporal consistency.",
-                "confidence": summary_json["confidence"],
+                "source": "llm_analysis_scoring",
+                "detail": "LLM-evaluated recall proxy grounded in TRIBE-derived evidence.",
+                "confidence": self._score_confidence(score_items, "memory", fallback=summary_json["confidence"]),
             },
             {
                 "key": "cognitive_load_proxy",
                 "label": "Cognitive Load Proxy",
                 "value": summary_json["cognitive_load_proxy"],
                 "unit": "/100",
-                "source": "analysis_postprocessor",
-                "detail": "Higher values indicate more processing friction.",
-                "confidence": summary_json["confidence"],
+                "source": "llm_analysis_scoring",
+                "detail": "LLM-evaluated processing-friction proxy grounded in TRIBE-derived evidence.",
+                "confidence": self._score_confidence(score_items, "cognitive_load", fallback=summary_json["confidence"]),
             },
             {
                 "key": "conversion_proxy_score",
                 "label": "Conversion Proxy",
                 "value": round(score_map.get("conversion_proxy", 0.0), 2),
                 "unit": "/100",
-                "source": "analysis_postprocessor",
-                "detail": "Composite CTA readiness proxy.",
-                "confidence": summary_json["confidence"],
+                "source": "llm_analysis_scoring",
+                "detail": "LLM-evaluated persuasive-action proxy grounded in TRIBE-derived evidence.",
+                "confidence": self._score_confidence(score_items, "conversion_proxy", fallback=summary_json["confidence"]),
             },
             {
                 "key": "average_engagement",
@@ -447,12 +451,14 @@ class AnalysisPostprocessor:
             timestamp_ms = int(segment.get("start_ms", index * 1000))
             scoring_point = point_by_timestamp.get(timestamp_ms)
             engagement_score = round(float(segment.get("engagement_signal", 0.0)) * 100.0, 2)
+            point_attention = self._to_float(getattr(scoring_point, "attention_score", None))
+            point_memory = self._to_float(getattr(scoring_point, "memory_score", None))
             attention_score = round(
-                self._to_float(getattr(scoring_point, "attention_score", None)) or score_map.get("attention", 0.0),
+                point_attention if scoring_point is not None and getattr(scoring_point, "attention_score", None) is not None else score_map.get("attention", 0.0),
                 2,
             )
             memory_proxy = round(
-                self._to_float(getattr(scoring_point, "memory_score", None)) or score_map.get("memory", 0.0),
+                point_memory if scoring_point is not None and getattr(scoring_point, "memory_score", None) is not None else score_map.get("memory", 0.0),
                 2,
             )
             rows.append(
@@ -479,6 +485,7 @@ class AnalysisPostprocessor:
         *,
         timeline_rows: list[dict[str, Any]],
         segment_features: list[dict[str, Any]],
+        scoring_bundle: ScoringBundle | None = None,
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         previous_engagement: float | None = None
@@ -487,15 +494,19 @@ class AnalysisPostprocessor:
             duration_ms = int(segment.get("duration_ms", 1000))
             engagement_score = float(timeline_row["engagement_score"])
             attention_score = float(timeline_row["attention_score"])
+            scoring_point = next(
+                (
+                    point
+                    for point in (scoring_bundle.timeline_points if scoring_bundle is not None else [])
+                    if int(point.timestamp_ms) == int(timeline_row["timestamp_ms"])
+                ),
+                None,
+            )
             engagement_delta = round(
                 engagement_score - previous_engagement,
                 2,
             ) if previous_engagement is not None else 0.0
-            note = self._build_segment_note(
-                attention_score=attention_score,
-                engagement_delta=engagement_delta,
-                event_count=int(segment.get("event_count", 0)),
-            )
+            note = self._build_segment_note(scoring_point=scoring_point)
             rows.append(
                 {
                     "segment_index": index,
@@ -542,9 +553,9 @@ class AnalysisPostprocessor:
             consistency = float(segment.get("consistency_signal", 0.0)) * 100.0
             peak_focus = float(segment.get("peak_focus_signal", 0.0)) * 100.0
             grid = [
-                [round(engagement_score * 0.74, 2), round(attention_score * 0.88, 2), round(peak_focus, 2)],
-                [round(memory_proxy * 0.68, 2), round(attention_score, 2), round(max(0.0, 100.0 - cognitive_load), 2)],
-                [round(consistency, 2), round(max(0.0, 55.0 + temporal_change * 0.45), 2), round(score_map.get("conversion_proxy", 0.0) * 0.9, 2)],
+                [round(engagement_score, 2), round(attention_score, 2), round(peak_focus, 2)],
+                [round(memory_proxy, 2), round(attention_score, 2), round(max(0.0, 100.0 - cognitive_load), 2)],
+                [round(consistency, 2), round(temporal_change, 2), round(score_map.get("conversion_proxy", 0.0), 2)],
             ]
             flat_grid = [value for row in grid for value in row]
             max_index = flat_grid.index(max(flat_grid))
@@ -558,8 +569,7 @@ class AnalysisPostprocessor:
                     "intensity_map": grid,
                     "strongest_zone": self.GRID_LABELS[max_index],
                     "caption": (
-                        "Fallback frame-grid heatmap derived from TRIBE segment signals. "
-                        "Use with real thumbnails later without changing the JSON contract."
+                        "Fallback frame-grid using direct TRIBE-derived segment signals and LLM-evaluated summary scores."
                     ),
                 }
             )
@@ -617,87 +627,17 @@ class AnalysisPostprocessor:
     def _build_recommendations(
         self,
         *,
-        summary_json: dict[str, Any],
-        timeline_rows: list[dict[str, Any]],
-        segment_rows: list[dict[str, Any]],
-        high_attention_intervals: list[dict[str, Any]],
-        low_attention_intervals: list[dict[str, Any]],
         scoring_bundle: ScoringBundle,
-        total_duration_ms: int,
     ) -> list[dict[str, Any]]:
         recommendations: list[dict[str, Any]] = []
-
-        if summary_json["hook_score_first_3_seconds"] < 60.0:
-            recommendations.append(
-                {
-                    "title": "Stronger first 2 seconds needed",
-                    "detail": "Early attention is trailing. Bring the main payoff or strongest visual cue into the opening beat.",
-                    "priority": "high",
-                    "timestamp_ms": 0,
-                    "confidence": 82.0,
-                }
-            )
-
-        highest_load_segment = max(
-            segment_rows,
-            key=lambda row: row["engagement_delta"],
-            default=None,
-        )
-        if highest_load_segment is not None and summary_json["cognitive_load_proxy"] > 58.0:
-            recommendations.append(
-                {
-                    "title": f"Text density likely too high in {highest_load_segment['label'].lower()}",
-                    "detail": "Reduce simultaneous message layers or compress copy in the segment where effort spikes.",
-                    "priority": "medium",
-                    "timestamp_ms": highest_load_segment["start_time_ms"],
-                    "confidence": 76.0,
-                }
-            )
-
-        if high_attention_intervals:
-            strongest_interval = max(
-                high_attention_intervals,
-                key=lambda interval: float(interval["average_attention_score"]),
-            )
-            recommendations.append(
-                {
-                    "title": f"Strongest retention moment occurs near {self._format_ms(strongest_interval['start_time_ms'])}",
-                    "detail": "Use this peak as the reference point for CTA placement, product proof, or brand reinforcement.",
-                    "priority": "medium",
-                    "timestamp_ms": strongest_interval["start_time_ms"],
-                    "confidence": round(strongest_interval["average_attention_score"], 2),
-                }
-            )
-            if total_duration_ms > 0 and strongest_interval["start_time_ms"] > total_duration_ms * 0.65:
-                recommendations.append(
-                    {
-                        "title": "CTA appears too late",
-                        "detail": "The strongest attention window lands near the end. Test bringing the CTA or offer forward.",
-                        "priority": "high",
-                        "timestamp_ms": strongest_interval["start_time_ms"],
-                        "confidence": 79.0,
-                    }
-                )
-
-        if low_attention_intervals:
-            weakest_interval = low_attention_intervals[0]
-            recommendations.append(
-                {
-                    "title": f"Attention drops around {self._format_ms(weakest_interval['start_time_ms'])}",
-                    "detail": "Rework pacing or reduce friction in this interval to prevent mid-stream falloff.",
-                    "priority": "medium",
-                    "timestamp_ms": weakest_interval["start_time_ms"],
-                    "confidence": round(100.0 - weakest_interval["average_attention_score"], 2),
-                }
-            )
-
-        for suggestion in scoring_bundle.suggestions[:2]:
+        for suggestion in scoring_bundle.suggestions[:6]:
+            timestamp_ms = suggestion.proposed_change_json.get("timestamp_ms")
             recommendations.append(
                 {
                     "title": suggestion.title,
                     "detail": suggestion.rationale,
                     "priority": "medium",
-                    "timestamp_ms": None,
+                    "timestamp_ms": int(timestamp_ms) if isinstance(timestamp_ms, (int, float)) else None,
                     "confidence": round(self._to_float(suggestion.confidence) * 100.0, 2)
                     if suggestion.confidence is not None
                     else None,
@@ -714,33 +654,13 @@ class AnalysisPostprocessor:
             deduped.append(item)
         return deduped[:6]
 
-    def _build_segment_note(self, *, attention_score: float, engagement_delta: float, event_count: int) -> str:
-        if attention_score >= 75.0:
-            return "High-attention moment. Use this section for proof, offer framing, or CTA reinforcement."
-        if engagement_delta <= -12.0:
-            return "Engagement falls off here. Tighten pacing or simplify competing signals."
-        if event_count >= 12:
-            return "Dense event cluster detected. Watch for overload or visual clutter."
-        return "Stable segment suitable for comparison against adjacent scenes."
-
-    def _build_summary_notes(
-        self,
-        *,
-        overall_attention_score: float,
-        hook_score: float,
-        sustained_engagement_score: float,
-        cognitive_load_proxy: float,
-    ) -> list[str]:
-        notes: list[str] = []
-        if hook_score < 60.0:
-            notes.append("Opening hook is weaker than target for the first 3 seconds.")
-        if sustained_engagement_score >= 70.0:
-            notes.append("Mid-to-late timeline holds attention well after the opening beat.")
-        if overall_attention_score >= 75.0:
-            notes.append("Overall attention profile is strong enough to support earlier CTA testing.")
-        if cognitive_load_proxy > 58.0:
-            notes.append("Cognitive load is elevated. Simplifying message density may improve retention.")
-        return notes
+    def _build_segment_note(self, *, scoring_point) -> str:
+        if scoring_point is None:
+            return "Segment included in the scored timeline."
+        rationale = scoring_point.metadata_json.get("rationale") if isinstance(scoring_point.metadata_json, dict) else None
+        if isinstance(rationale, str) and rationale.strip():
+            return rationale.strip()
+        return "Segment included in the scored timeline."
 
     def _build_completeness_score(self, *, segment_count: int, event_row_count: int) -> float:
         base = 45.0
@@ -758,8 +678,8 @@ class AnalysisPostprocessor:
             return 0.0
         return float(value)
 
-    def _format_ms(self, value: int) -> str:
-        seconds = max(0, int(value // 1000))
-        minutes = seconds // 60
-        remainder = seconds % 60
-        return f"{minutes}:{remainder:02d}"
+    def _score_confidence(self, score_items: dict[str, Any], key: str, *, fallback: float | None) -> float | None:
+        score_item = score_items.get(key)
+        if score_item is None or score_item.confidence is None:
+            return fallback
+        return round(self._to_float(score_item.confidence) * 100.0, 2)

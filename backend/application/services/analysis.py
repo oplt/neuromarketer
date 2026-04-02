@@ -42,11 +42,13 @@ from backend.schemas.analysis import (
     AnalysisUploadSessionRead,
 )
 from backend.schemas.schemas import PredictRequest
+from backend.services.asset_loader import AssetLoader
 from backend.services.analysis_goal_taxonomy import (
     get_goal_presets_payload,
     normalize_analysis_channel,
     normalize_goal_template,
 )
+from backend.services.document_text_extractor import DocumentTextExtractor, is_supported_text_document
 from backend.services.preprocess import PreprocessService
 from backend.services.storage import ObjectStorageService, UploadedObject
 
@@ -59,6 +61,8 @@ class AnalysisApplicationService:
         self.creatives = CreativeRepository(session)
         self.uploads = UploadRepository(session)
         self.predictions = PredictionApplicationService(session)
+        self.asset_loader = AssetLoader()
+        self.text_extractor = DocumentTextExtractor()
         self.preprocess = PreprocessService()
         self.storage: ObjectStorageService | None = None
 
@@ -490,12 +494,23 @@ class AnalysisApplicationService:
         upload_etag: str | None,
         upload_source: str,
     ) -> AnalysisUploadCompleteResponse:
+        raw_text: str | None = None
+        extracted_metadata = {
+            **preprocess_result.extracted_metadata,
+        }
+        if preprocess_result.modality == "text":
+            raw_text, text_metadata = await self._extract_asset_text(
+                asset=asset,
+                resolved_mime_type=resolved_mime_type or asset.mime_type,
+            )
+            extracted_metadata.update(text_metadata)
+
         merged_metadata = {
             **(asset.metadata_json or {}),
             "upload_source": upload_source,
             "upload_etag": upload_etag,
             "preprocessing_summary": preprocess_result.preprocessing_summary,
-            "extracted_metadata": preprocess_result.extracted_metadata,
+            "extracted_metadata": extracted_metadata,
             "modality": preprocess_result.modality,
         }
         await self.uploads.mark_artifact_stored(
@@ -507,7 +522,7 @@ class AnalysisApplicationService:
             metadata_json=merged_metadata,
         )
         try:
-            creative_version = await self.creatives.create_version_from_artifact(asset)
+            creative_version = await self.creatives.create_version_from_artifact(asset, raw_text=raw_text)
         except Exception as exc:
             log_exception(
                 logger,
@@ -558,6 +573,39 @@ class AnalysisApplicationService:
             upload_session=self._build_upload_session_read(upload_session),
             asset=self._build_asset_read(asset),
         )
+
+    async def _extract_asset_text(
+        self,
+        *,
+        asset,
+        resolved_mime_type: str | None,
+    ) -> tuple[str, dict[str, Any]]:
+        loaded_asset = await run_in_threadpool(
+            self.asset_loader.load,
+            storage_uri=str(asset.storage_uri),
+            mime_type=resolved_mime_type or asset.mime_type,
+        )
+        try:
+            extracted = await run_in_threadpool(
+                self.text_extractor.extract,
+                local_path=loaded_asset.local_path,
+                mime_type=resolved_mime_type or asset.mime_type,
+                filename=asset.original_filename,
+            )
+        finally:
+            loaded_asset.cleanup()
+
+        if extracted.character_count > settings.analysis_max_text_characters:
+            raise ValidationAppError(
+                "Extracted text exceeds the configured analysis limit of "
+                f"{settings.analysis_max_text_characters:,} characters."
+            )
+
+        return extracted.text, {
+            "text_character_count": extracted.character_count,
+            "text_line_count": extracted.line_count,
+            "text_extractor": extracted.parser,
+        }
 
     async def _mark_upload_failed(
         self,
@@ -730,8 +778,6 @@ class AnalysisApplicationService:
         allowed_mime_types = allowed_by_media_type[payload.media_type]
         if payload.mime_type not in allowed_mime_types:
             raise ValidationAppError(f"Unsupported {payload.media_type} mime type: {payload.mime_type}")
-        if payload.media_type == "text" and payload.size_bytes > settings.analysis_max_text_characters * 8:
-            raise ValidationAppError("Text upload exceeds the configured analysis size budget.")
 
     def _to_asset_type(self, media_type: str) -> AssetType:
         mapping = {
@@ -952,6 +998,6 @@ class AnalysisApplicationService:
             return "video"
         if mime_type.startswith("audio/"):
             return "audio"
-        if mime_type.startswith("text/"):
+        if is_supported_text_document(mime_type):
             return "text"
         return "video"

@@ -1,0 +1,947 @@
+# Scoring and TRIBE v2 Result Flow
+
+This document explains:
+
+1. How results are taken from TRIBE v2 in this project.
+2. What formats are produced and returned.
+3. Whether high and low scores can be explained.
+4. How improvement suggestions are produced with and without extra reasoning.
+5. End-to-end score mapping for every major metric.
+
+
+## 1. High-level flow
+
+The project has two result layers:
+
+- A low-level `prediction_result` layer that stores TRIBE-derived summaries, derived features, internal scores, timeline points, and optimization suggestions.
+- A higher-level `analysis_result` layer that stores the marketer-facing dashboard payload: summary, metrics, timeline rows, segments, visualizations, and recommendations.
+
+The full worker flow is:
+
+1. Resolve modality and validate the asset.
+   - `backend/services/tribe_inference_service.py:36-58`
+
+2. Load the asset and build a `TribeRuntimeInput`.
+   - Fields: `modality`, `local_path`, `mime_type`, `raw_text`, `metadata_json`, `request_context`
+   - `backend/services/tribe_inference_service.py:84-94`
+
+3. Call TRIBE through the official path:
+   - `TribeModel.from_pretrained(...)`
+   - `model.get_events_dataframe(...)`
+   - `model.predict(events=events)`
+   - `backend/services/tribe_runtime.py:178-209`
+   - `backend/services/tribe_runtime.py:241-300`
+
+4. Convert the raw TRIBE prediction tensor into a stable internal contract.
+   - `raw_brain_response_summary`
+   - `reduced_feature_vector`
+   - `region_activation_summary`
+   - `provenance_json`
+   - `backend/services/tribe_runtime.py:302-385`
+
+5. Run `NeuroScoringService` on the derived features.
+   - This is where business-facing scores are created.
+   - These are not direct TRIBE outputs.
+   - `backend/services/scoring.py:66-79`
+   - `backend/services/scoring.py:91-239`
+
+6. Build dashboard payloads for the analysis UI.
+   - Partial scene extraction payload first.
+   - Preview dashboard without recommendations next.
+   - Final dashboard with recommendations last.
+   - `backend/application/services/analysis_job_processor.py:197-259`
+   - `backend/application/services/analysis_job_processor.py:271-402`
+   - `backend/services/analysis_postprocessor.py:36-141`
+
+7. Persist both result layers.
+   - `prediction_result` is written in `replace_prediction_result(...)`
+   - `analysis_result` is written in `replace_analysis_result(...)`
+   - `backend/db/repositories/inference.py:216-342`
+
+
+## 2. What comes from TRIBE and what does not
+
+Important boundary:
+
+- TRIBE itself gives the event dataframe and the prediction tensor over the fsaverage5 mesh.
+- This project does not store the raw cortical prediction tensor.
+- The project stores summaries and features derived from that tensor.
+- The marketer-facing scores are downstream heuristics built on those derived features.
+
+The code states this directly:
+
+- `backend/services/tribe_runtime.py:372-376`
+- `backend/services/scoring.py:78-79`
+
+So if someone asks "is attention a TRIBE score?", the correct answer in this codebase is:
+
+- No. Attention is a product score built after TRIBE inference.
+
+
+## 3. Result formats
+
+### 3.1 Low-level prediction result format
+
+The closest thing to "TRIBE output in this app" is `prediction_result`.
+
+Schema:
+- `backend/schemas/schemas.py:301-318`
+
+Main fields:
+
+- `raw_brain_response_summary`
+  - foundation model metadata
+  - input modality
+  - event summary
+  - prediction summary
+
+- `reduced_feature_vector`
+  - contract version
+  - global activation summary
+  - derived signals
+  - `segment_features`
+
+- `region_activation_summary`
+  - mesh
+  - hemisphere summary
+  - optional ROI summary
+
+- `provenance_json`
+  - provider/package/checkpoint/device
+  - official API path flags
+  - contract notes
+
+- `scores`
+  - internal product scores such as `attention`, `emotion`, `memory`, `cognitive_load`, `conversion_proxy`
+
+- `timeline_points`
+  - per-segment internal scores over time
+
+- `suggestions`
+  - optimization suggestions with rationale, expected lift, and confidence
+
+Representative shape:
+
+{
+  "raw_brain_response_summary": {
+    "foundation_model": {
+      "repo_id": "facebook/tribev2",
+      "checkpoint_name": "best.ckpt",
+      "mesh": "fsaverage5",
+      "subject_basis": "average_subject",
+      "device": "cpu|cuda"
+    },
+    "input_modality": "video|audio|text",
+    "event_summary": {
+      "row_count": 0,
+      "event_types": {},
+      "start_time_ms": 0,
+      "duration_ms_estimate": null
+    },
+    "prediction_summary": {
+      "segment_count": 0,
+      "vertex_count": 0,
+      "global_mean_abs_activation": 0.0,
+      "global_peak_abs_activation": 0.0,
+      "global_std_abs_activation": 0.0
+    }
+  },
+  "reduced_feature_vector": {
+    "feature_contract_version": "tribe_v2_business_bridge_v1",
+    "global_abs_mean_activation": 0.0,
+    "global_abs_peak_activation": 0.0,
+    "segment_count": 0,
+    "event_row_count": 0,
+    "derived_neural_engagement_signal": 0.0,
+    "derived_peak_focus_signal": 0.0,
+    "derived_temporal_dynamics_signal": 0.0,
+    "derived_temporal_consistency_signal": 0.0,
+    "derived_linguistic_load_signal": 0.0,
+    "derived_context_density_signal": 0.0,
+    "derived_hemisphere_balance_signal": 0.0,
+    "derived_audio_language_mix_signal": 0.0,
+    "segment_features": []
+  },
+  "region_activation_summary": {
+    "mesh": "fsaverage5",
+    "hemisphere_summary": {
+      "left_mean_abs_activation": 0.0,
+      "right_mean_abs_activation": 0.0,
+      "hemisphere_balance_signal": 0.0
+    },
+    "top_rois": []
+  },
+  "provenance_json": {},
+  "scores": [],
+  "timeline_points": [],
+  "suggestions": []
+}
+
+
+### 3.2 Analysis dashboard result format
+
+The marketer-facing dashboard uses `AnalysisResultRead`.
+
+Schema:
+- `backend/schemas/analysis.py:179-260`
+- `backend/schemas/analysis.py:278-282`
+
+Response comes back on analysis job status:
+- `backend/api/router/analysis.py:331-350`
+- `backend/application/services/analysis.py:830-837`
+
+Main fields:
+
+- `summary_json`
+  - `modality`
+  - `overall_attention_score`
+  - `hook_score_first_3_seconds`
+  - `sustained_engagement_score`
+  - `memory_proxy_score`
+  - `cognitive_load_proxy`
+  - `confidence`
+  - `completeness`
+  - `notes`
+  - `metadata`
+
+- `metrics_json`
+  - rows for overall attention, hook, sustained engagement, memory, cognitive load, conversion proxy, average engagement, asset duration, confidence, completeness
+
+- `timeline_json`
+  - `{ timestamp_ms, engagement_score, attention_score, memory_proxy }`
+
+- `segments_json`
+  - `{ segment_index, label, start_time_ms, end_time_ms, attention_score, engagement_delta, note }`
+
+- `visualizations_json`
+  - `heatmap_frames`
+  - `high_attention_intervals`
+  - `low_attention_intervals`
+  - `visualization_mode`
+
+- `recommendations_json`
+  - `{ title, detail, priority, timestamp_ms, confidence }`
+
+
+## 4. Can high or low scores be explained?
+
+Yes, but with an important limitation.
+
+### 4.1 What can be explained well
+
+The scores can be explained at the product-feature level because:
+
+- Each score is a deterministic weighted formula.
+- Each score item stores its feature basis.
+- Timeline rows and segment notes provide local evidence.
+- Recommendations are rule-based and cite the same score patterns.
+
+Useful explanation anchors:
+
+- Score formulas:
+  - `backend/services/scoring.py:119-151`
+
+- Score metadata and feature basis:
+  - `backend/services/scoring.py:242-265`
+
+- Timeline evidence:
+  - `backend/services/scoring.py:311-385`
+  - `backend/services/analysis_postprocessor.py:434-475`
+
+- Segment notes:
+  - `backend/services/analysis_postprocessor.py:717-724`
+
+- Summary notes:
+  - `backend/services/analysis_postprocessor.py:726-743`
+
+So the system can say things like:
+
+- Attention is low because engagement and peak-focus signals are weak in the opening.
+- Memory is lower because temporal consistency is moderate.
+- Cognitive load is high because linguistic load and context density are elevated.
+- Conversion proxy is low because memory and attention are not strong enough, or load is dragging the score down.
+
+### 4.2 What cannot be explained perfectly
+
+The system does not store raw TRIBE tensors or true model attribution maps.
+
+That means:
+
+- It cannot provide exact native TRIBE attribution for a final score.
+- It can only explain scores via the derived features built from TRIBE outputs.
+- This is interpretable heuristic explanation, not foundational-model attribution.
+
+
+## 5. How improvement suggestions are produced
+
+There are three paths.
+
+### 5.1 Deterministic improvement suggestions from scoring
+
+`NeuroScoringService` creates internal suggestions directly from score thresholds.
+
+Rules:
+- `backend/services/scoring.py:387-508`
+
+Examples:
+
+- If `conversion_proxy < 0.68`:
+  - "Clarify the decision moment"
+
+- If `attention < 0.66`:
+  - "Front-load the strongest cue"
+
+- If `memory < 0.64`:
+  - "Reinforce the brand anchor at the peak segment"
+
+- If `cognitive_load > 0.58`:
+  - "Reduce message density"
+
+- If `emotion < 0.63` for video/audio:
+  - "Add a stronger emotional contrast beat"
+
+These suggestions are stored in `prediction_result.suggestions`.
+
+
+### 5.2 Dashboard recommendations from post-processing
+
+The analysis dashboard adds more user-facing recommendations by mixing:
+
+- summary thresholds
+- attention interval detection
+- segment load/drop cues
+- top scoring suggestions
+
+Rules:
+- `backend/services/analysis_postprocessor.py:617-715`
+
+Examples:
+
+- If hook score is low:
+  - stronger first 2 seconds
+
+- If cognitive load is high in the segment with the biggest engagement spike:
+  - reduce density there
+
+- If strongest attention lands too late:
+  - CTA appears too late
+
+- If attention drops in an interval:
+  - rework pacing or reduce friction there
+
+- Then top two scoring suggestions are appended
+
+
+### 5.3 LLM evaluation for richer reasoning
+
+The repo also supports LLM evaluation after analysis is complete.
+
+Flow:
+- `backend/application/services/analysis_evaluations.py:43-124`
+- `backend/application/services/analysis_evaluations.py:148-220`
+
+The LLM receives:
+- job metadata
+- summary metrics
+- timeline highlights
+- best segments
+- worst segments
+- visualization hints
+- transcript excerpt
+- existing recommendations
+- analysis notes
+
+Context builder:
+- `backend/llm/context_builder.py:18-205`
+
+Structured output schema includes:
+- score reasons
+- risks
+- recommendations with `action` and `reason`
+
+Schema:
+- `backend/schemas/evaluators.py:49-103`
+
+This path is the best option when the user wants a more human explanation of why the result looks the way it does.
+
+
+## 6. End-to-end score mapping
+
+This section maps each score from TRIBE prediction tensor to final dashboard output and recommendation behavior.
+
+Important note:
+
+- The raw TRIBE tensor itself is not stored.
+- The chain starts from `predictions` in memory inside `TribeRuntime._postprocess_predictions(...)`.
+
+
+### 6.1 Common raw TRIBE feature extraction
+
+Raw tensor handling:
+- `backend/services/tribe_runtime.py:302-338`
+
+Common calculations:
+
+- `abs_predictions = abs(predictions)`
+- `segment_mean_activation = abs_predictions.mean(axis=1)`
+- `segment_peak_activation = abs_predictions.max(axis=1)`
+- `left_mean = abs_predictions[:, :midpoint].mean(axis=1)`
+- `right_mean = abs_predictions[:, midpoint:].mean(axis=1)`
+- `hemisphere_balance = 1 - abs(left_mean - right_mean) / (left_mean + right_mean + 1e-6)`
+
+Event summary:
+- `backend/services/tribe_runtime.py:320`
+- `backend/services/tribe_runtime.py:401-426`
+
+Derived reduced features:
+- `backend/services/tribe_runtime.py:413-442`
+
+Per-segment features:
+- `backend/services/tribe_runtime.py:500-520`
+
+Those produce:
+
+- `derived_neural_engagement_signal`
+- `derived_peak_focus_signal`
+- `derived_temporal_dynamics_signal`
+- `derived_temporal_consistency_signal`
+- `derived_linguistic_load_signal`
+- `derived_context_density_signal`
+- `derived_hemisphere_balance_signal`
+- `derived_audio_language_mix_signal`
+
+And per segment:
+
+- `engagement_signal`
+- `peak_focus_signal`
+- `temporal_change_signal`
+- `consistency_signal`
+- `hemisphere_balance_signal`
+
+
+### 6.2 Attention
+
+TRIBE tensor summary to derived feature:
+
+- `segment_mean_activation` and `segment_peak_activation` come from the TRIBE tensor.
+- From those, the runtime derives:
+  - `derived_neural_engagement_signal`
+  - `derived_peak_focus_signal`
+  - `derived_temporal_consistency_signal`
+  - `derived_hemisphere_balance_signal`
+- Source:
+  - `backend/services/tribe_runtime.py:310-318`
+  - `backend/services/tribe_runtime.py:413-421`
+
+Internal score formula:
+
+- `attention = clip01(engagement * 0.46 + peak_focus * 0.28 + temporal_consistency * 0.18 + hemisphere_balance * 0.08)`
+- `backend/services/scoring.py:119-124`
+
+Saved internal score:
+
+- Saved as `score_type="attention"` in `prediction_result.scores`
+- Feature basis:
+  - `derived_neural_engagement_signal`
+  - `derived_peak_focus_signal`
+- `backend/services/scoring.py:166-174`
+- `backend/db/repositories/inference.py:245-256`
+
+Per-segment timeline score:
+
+- Segment attention timeline uses:
+  - `engagement_signal`
+  - `peak_focus_signal`
+  - `consistency_signal`
+- Formula:
+  - `attention_value = clip01(engagement * 0.5 + peak_focus * 0.32 + consistency * 0.18)`
+- `backend/services/scoring.py:330-343`
+
+Dashboard fields:
+
+- `summary_json.overall_attention_score`
+  - from `score_map["attention"]`
+  - `backend/services/analysis_postprocessor.py:285-320`
+
+- `timeline_json[*].attention_score`
+  - from `scoring_bundle.timeline_points`
+  - `backend/services/analysis_postprocessor.py:434-475`
+
+- `segments_json[*].attention_score`
+  - copied from timeline rows
+  - `backend/services/analysis_postprocessor.py:477-511`
+
+- `metrics_json["overall_attention_score"]`
+  - `backend/services/analysis_postprocessor.py:340-349`
+
+- `high_attention_intervals`
+  - threshold: `attention >= 72` or `engagement >= 75`
+  - `backend/services/analysis_postprocessor.py:100-109`
+
+- segment note:
+  - if attention >= 75 -> high-attention moment
+  - `backend/services/analysis_postprocessor.py:717-724`
+
+Recommendation effects:
+
+- If attention < 0.66:
+  - internal suggestion: "Front-load the strongest cue"
+  - `backend/services/scoring.py:418-431`
+
+- If attention is strong late in the asset:
+  - dashboard recommendation may say CTA appears too late
+  - `backend/services/analysis_postprocessor.py:657-680`
+
+- If attention drops in an interval:
+  - dashboard recommendation flags the weak interval
+  - `backend/services/analysis_postprocessor.py:682-691`
+
+
+### 6.3 Emotion
+
+TRIBE tensor summary to derived feature:
+
+- Emotion is built from:
+  - `derived_neural_engagement_signal`
+  - `derived_temporal_dynamics_signal`
+  - `derived_audio_language_mix_signal`
+  - `derived_peak_focus_signal`
+- Runtime sources:
+  - `backend/services/tribe_runtime.py:413-426`
+
+Internal score formula:
+
+- `emotion = clip01(engagement * 0.34 + temporal_dynamics * 0.24 + audio_language_mix * 0.18 + peak_focus * 0.12 + 0.12)`
+- `backend/services/scoring.py:125-131`
+
+Saved internal score:
+
+- Saved as `score_type="emotion"` in `prediction_result.scores`
+- Feature basis:
+  - `derived_temporal_dynamics_signal`
+  - `derived_audio_language_mix_signal`
+- `backend/services/scoring.py:175-182`
+
+Per-segment timeline score:
+
+- `emotion_value = clip01(engagement * 0.38 + temporal_change * 0.32 + peak_focus * 0.14 + 0.12)`
+- `backend/services/scoring.py:343-348`
+
+Dashboard fields:
+
+- Emotion is not exposed in `analysis_result.summary_json`.
+- It exists in `prediction_result.scores` and `prediction_result.timeline_points`.
+- `backend/schemas/schemas.py:269-318`
+
+Recommendation effects:
+
+- If emotion < 0.63 and modality is video or audio:
+  - "Add a stronger emotional contrast beat"
+  - `backend/services/scoring.py:470-483`
+
+- Emotion also raises `conversion_proxy`, so low emotion can hurt conversion indirectly.
+  - `backend/services/scoring.py:143-151`
+
+
+### 6.4 Memory
+
+TRIBE tensor summary to derived feature:
+
+- Memory depends on:
+  - `derived_temporal_consistency_signal`
+  - `derived_neural_engagement_signal`
+  - `derived_peak_focus_signal`
+  - `derived_hemisphere_balance_signal`
+- Runtime sources:
+  - `backend/services/tribe_runtime.py:413-421`
+
+Internal score formula:
+
+- `memory = clip01(temporal_consistency * 0.38 + engagement * 0.32 + peak_focus * 0.18 + hemisphere_balance * 0.12)`
+- `backend/services/scoring.py:132-137`
+
+Saved internal score:
+
+- Saved as `score_type="memory"`
+- Feature basis:
+  - `derived_temporal_consistency_signal`
+  - `derived_peak_focus_signal`
+- `backend/services/scoring.py:183-190`
+
+Per-segment timeline score:
+
+- `memory_value = clip01(consistency * 0.44 + engagement * 0.26 + peak_focus * 0.2 + balance * 0.1)`
+- `backend/services/scoring.py:349-354`
+
+Dashboard fields:
+
+- `summary_json.memory_proxy_score`
+  - `backend/services/analysis_postprocessor.py:311`
+
+- `timeline_json[*].memory_proxy`
+  - `backend/services/analysis_postprocessor.py:454-457`
+
+- `metrics_json["memory_proxy_score"]`
+  - `backend/services/analysis_postprocessor.py:368-376`
+
+Recommendation effects:
+
+- If memory < 0.64:
+  - internal suggestion: "Reinforce the brand anchor at the peak segment"
+  - `backend/services/scoring.py:433-450`
+
+- Memory also improves `conversion_proxy`.
+  - `backend/services/scoring.py:145-149`
+
+
+### 6.5 Cognitive load
+
+TRIBE tensor summary to derived feature:
+
+- Cognitive load is built from:
+  - `derived_linguistic_load_signal`
+  - `derived_context_density_signal`
+  - inverse of `derived_temporal_consistency_signal`
+- Runtime sources:
+  - `backend/services/tribe_runtime.py:419-420`
+  - `backend/services/tribe_runtime.py:416-418`
+
+Internal score formula:
+
+- `cognitive_load = clip01(linguistic_load * 0.5 + context_density * 0.3 + (1 - temporal_consistency) * 0.2)`
+- `backend/services/scoring.py:138-142`
+
+Saved internal score:
+
+- Saved as `score_type="cognitive_load"`
+- Feature basis:
+  - `derived_linguistic_load_signal`
+  - `derived_context_density_signal`
+- `backend/services/scoring.py:191-198`
+
+Per-segment timeline score:
+
+- `cognitive_load_value = clip01(temporal_change * 0.22 + (1 - consistency) * 0.38 + (1 - balance) * 0.16 + 0.24)`
+- `backend/services/scoring.py:355-360`
+
+Dashboard fields:
+
+- `summary_json.cognitive_load_proxy`
+  - `backend/services/analysis_postprocessor.py:312`
+
+- `metrics_json["cognitive_load_proxy"]`
+  - `backend/services/analysis_postprocessor.py:377-385`
+
+- Heatmap uses `100 - cognitive_load` in one cell, so high load makes the "ease" signal weaker.
+  - `backend/services/analysis_postprocessor.py:540-547`
+
+- Summary notes:
+  - if cognitive load > 58 -> simplify density
+  - `backend/services/analysis_postprocessor.py:739-742`
+
+Recommendation effects:
+
+- If cognitive load > 0.58:
+  - internal suggestion: "Reduce message density"
+  - `backend/services/scoring.py:452-468`
+
+- If summary cognitive load > 58:
+  - dashboard recommendation flags likely text density issue in the most spiking segment
+  - `backend/services/analysis_postprocessor.py:641-655`
+
+- High load lowers `conversion_proxy`.
+  - `backend/services/scoring.py:149`
+
+
+### 6.6 Conversion proxy
+
+TRIBE tensor summary to derived feature:
+
+- Conversion proxy is not direct from runtime.
+- It is built from the already derived business scores and some foundational features.
+
+Internal score formula:
+
+- `conversion_proxy = clip01(attention * 0.29 + emotion * 0.17 + memory * 0.27 + peak_focus * 0.12 + audio_language_mix * 0.08 - cognitive_load * 0.13 + 0.09)`
+- `backend/services/scoring.py:143-151`
+
+Saved internal score:
+
+- Saved as `score_type="conversion_proxy"`
+- Feature basis:
+  - `attention`
+  - `emotion`
+  - `memory`
+  - `cognitive_load`
+- `backend/services/scoring.py:199-206`
+
+Per-segment timeline score:
+
+- `conversion_proxy_value = clip01(attention_value * 0.3 + emotion_value * 0.16 + memory_value * 0.28 - cognitive_load_value * 0.12 + 0.1)`
+- `backend/services/scoring.py:361-367`
+
+Dashboard fields:
+
+- Not placed in `summary_json`.
+- Shown in `metrics_json["conversion_proxy_score"]`
+  - `backend/services/analysis_postprocessor.py:386-394`
+
+- Present in prediction timeline points but not surfaced in `analysis_result.timeline_json`.
+  - `backend/services/scoring.py:369-384`
+
+Recommendation effects:
+
+- If conversion proxy < 0.68:
+  - internal suggestion: "Clarify the decision moment"
+  - `backend/services/scoring.py:398-416`
+
+- Dashboard also uses strongest attention interval for CTA guidance, which is effectively conversion-oriented.
+  - `backend/services/analysis_postprocessor.py:657-680`
+
+
+### 6.7 Hook score first 3 seconds
+
+This is a dashboard-only score. It is not a `prediction_result.score`.
+
+Inputs:
+
+- `timeline_json[*].engagement_score`
+- `timeline_json[*].attention_score`
+- only rows where `timestamp_ms < 3000`
+
+Formula:
+
+- Average of `(engagement_score * 0.55) + (attention_score * 0.45)` over the first 3 seconds
+- `backend/services/analysis_postprocessor.py:286-295`
+
+Dashboard fields:
+
+- `summary_json.hook_score_first_3_seconds`
+- `metrics_json["hook_score_first_3_seconds"]`
+- `backend/services/analysis_postprocessor.py:306-330`
+- `backend/services/analysis_postprocessor.py:350-358`
+
+Recommendation effects:
+
+- If hook score < 60:
+  - summary note: opening hook is weaker than target
+  - `backend/services/analysis_postprocessor.py:735-736`
+
+- If hook score < 60:
+  - dashboard recommendation: "Stronger first 2 seconds needed"
+  - `backend/services/analysis_postprocessor.py:630-639`
+
+
+### 6.8 Sustained engagement
+
+This is also a dashboard-only score.
+
+Inputs:
+
+- `timeline_json[*].engagement_score`
+- rows with `timestamp_ms >= 3000`
+- fallback to average engagement across all rows if there are no later rows
+
+Formula:
+
+- Mean engagement after the opening window
+- `backend/services/analysis_postprocessor.py:296-305`
+
+Dashboard fields:
+
+- `summary_json.sustained_engagement_score`
+- `metrics_json["sustained_engagement_score"]`
+- `backend/services/analysis_postprocessor.py:306-330`
+- `backend/services/analysis_postprocessor.py:359-367`
+
+Recommendation effects:
+
+- If sustained engagement >= 70:
+  - summary note: mid-to-late timeline holds attention well
+  - `backend/services/analysis_postprocessor.py:737-738`
+
+- No direct threshold-based recommendation is attached specifically to this score, but it affects the overall reading of the asset.
+
+
+### 6.9 Average engagement
+
+This is a metric row only.
+
+Inputs:
+
+- average of `timeline_json[*].engagement_score`
+- `backend/services/analysis_postprocessor.py:395-403`
+
+Dashboard fields:
+
+- `metrics_json["average_engagement"]`
+
+Recommendation effects:
+
+- No direct recommendation rule depends on this row.
+- It still influences user interpretation and may support later LLM evaluation.
+
+
+### 6.10 Confidence
+
+There are two related confidence concepts.
+
+Internal score confidence:
+
+- `confidence_value = clip01(0.58 + modality_bonus + segment_bonus + density_bonus)`
+- where:
+  - `modality_bonus = 0.05` for video/audio
+  - `segment_bonus = min(0.16, max(0, (segment_count - 1) * 0.02))`
+  - `density_bonus = min(0.08, context_density * 0.08)`
+- `backend/services/scoring.py:267-271`
+
+Final dashboard confidence:
+
+- average of all score item confidences times 100
+- fallback to completeness if score confidences are missing
+- `backend/services/analysis_postprocessor.py:52-64`
+
+Dashboard fields:
+
+- `summary_json.confidence`
+- `metrics_json["confidence"]`
+- `backend/services/analysis_postprocessor.py:313`
+- `backend/services/analysis_postprocessor.py:413-421`
+
+Recommendation effects:
+
+- Not used to trigger recommendations directly.
+- Used to express trust level in the metrics and recommendations.
+
+
+### 6.11 Completeness
+
+This is analysis coverage, not a neural score.
+
+Formula:
+
+- `base = 45`
+- `segment_bonus = min(35, segment_count * 5)`
+- `event_bonus = min(20, event_row_count * 0.4)`
+- `completeness = min(100, base + segment_bonus + event_bonus)`
+- `backend/services/analysis_postprocessor.py:745-749`
+
+Dashboard fields:
+
+- `summary_json.completeness`
+- `metrics_json["completeness"]`
+- scene extraction partial payload also uses it before full scoring is ready
+- `backend/services/analysis_postprocessor.py:143-220`
+- `backend/services/analysis_postprocessor.py:423-430`
+
+Recommendation effects:
+
+- Not used as a direct recommendation trigger.
+- It is important for interpreting how much of the asset was actually covered.
+
+
+## 7. How recommendations move between layers
+
+Low-level optimization suggestions are stored in `prediction_result.suggestions`.
+- `backend/db/repositories/inference.py:283-295`
+
+Then the dashboard recommendation list is built by:
+
+- adding summary and interval-based recommendations
+- appending the top two internal suggestions
+- deduplicating by title
+
+Source:
+- `backend/services/analysis_postprocessor.py:617-715`
+
+So `analysis_result.recommendations_json` is not a direct copy of TRIBE or of the scoring service. It is a curated mix.
+
+
+## 8. How to improve results in practice
+
+### 8.1 With TRIBE-derived reasoning
+
+Use the deterministic chain already in the repo:
+
+- Low attention:
+  - front-load payoff
+  - move key message earlier
+  - strengthen opening visual or textual cue
+
+- Low memory:
+  - repeat brand or product anchor near peak engagement
+  - reduce fragmentation across segments
+
+- High cognitive load:
+  - simplify copy
+  - reduce simultaneous ideas
+  - cut clutter in the highest-friction segment
+
+- Low conversion proxy:
+  - place CTA closer to high-attention moment
+  - reduce friction before the ask
+  - clarify the action and consequence
+
+- Flat emotion:
+  - add emotional contrast, especially for video/audio
+
+
+### 8.2 Without TRIBE-specific reasoning
+
+Use the LLM evaluation path for:
+
+- richer prose explanations
+- domain-specific risks
+- score reasons
+- more human-readable action plans
+
+The evaluation result schema explicitly supports:
+
+- `ScoreReason`
+- `RiskItem`
+- `RecommendationItem`
+- domain-specific assessments
+
+Source:
+- `backend/schemas/evaluators.py:57-103`
+
+
+### 8.3 Generated variants
+
+The repo also supports generated variants such as:
+
+- hook rewrite
+- CTA rewrite
+- shorter script
+- alternate thumbnail
+
+These are built from existing recommendations and projected score lifts.
+- `backend/application/services/analysis_generated_variants.py:259-312`
+- `backend/application/services/analysis_generated_variants.py:467-520`
+
+Important limitation:
+
+- generated variant projections are heuristic lift projections
+- they do not re-run TRIBE automatically
+
+So they are useful for planning, but not a substitute for re-analysis.
+
+
+## 9. Bottom line
+
+If the question is "how are results taken from TRIBE v2?":
+
+- TRIBE gives events and cortical predictions.
+- This app derives stable features from them.
+- The product layer then computes scores and recommendations.
+
+If the question is "can high and low scores be explained?":
+
+- Yes, at the level of derived features and rules.
+- No, not as exact native TRIBE attributions.
+
+If the question is "how can improvements be suggested?":
+
+- deterministically from the current scoring rules
+- more richly through the LLM evaluation path
+- operationally through generated variants, with the warning that projected lifts are heuristic until a new run is scored again

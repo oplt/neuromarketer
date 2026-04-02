@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from backend.services.document_text_extractor import is_supported_text_document
 from backend.services.tribe_runtime import TribeRuntime
 
 
@@ -43,7 +44,7 @@ class PreprocessService:
             return "video"
         if candidate.startswith("audio/"):
             return "audio"
-        if candidate in {"text/plain", "application/json"}:
+        if is_supported_text_document(candidate, filename):
             return "text"
         if candidate in {"text/html", "application/xhtml+xml"}:
             return "html"

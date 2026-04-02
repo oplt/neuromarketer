@@ -359,3 +359,6 @@ TODO.txt
 
 !frontend/src/lib/
 !frontend/src/lib/*.ts
+
+/models
+/cache

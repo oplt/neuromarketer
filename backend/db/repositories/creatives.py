@@ -64,6 +64,7 @@ class CreativeRepository:
         artifact: StoredArtifact,
         *,
         version_number: int | None = None,
+        raw_text: str | None = None,
     ) -> CreativeVersion:
         if artifact.creative_id is None:
             raise ValueError("Artifact is not attached to a creative.")
@@ -84,6 +85,7 @@ class CreativeRepository:
             mime_type=artifact.mime_type,
             file_size_bytes=artifact.file_size_bytes,
             sha256=artifact.sha256,
+            raw_text=raw_text,
             extracted_metadata=artifact.metadata_json.get("extracted_metadata", {}),
             preprocessing_summary=artifact.metadata_json.get("preprocessing_summary", {}),
             duration_ms=artifact.metadata_json.get("extracted_metadata", {}).get("duration_ms"),

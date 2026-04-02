@@ -239,6 +239,25 @@ type AnalysisJobStatusResponse = {
   } | null
 }
 
+const TEXT_DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
+  '.csv': 'text/csv',
+  '.doc': 'application/msword',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.htm': 'text/html',
+  '.html': 'text/html',
+  '.json': 'application/json',
+  '.markdown': 'text/markdown',
+  '.md': 'text/markdown',
+  '.odt': 'application/vnd.oasis.opendocument.text',
+  '.pdf': 'application/pdf',
+  '.rtf': 'application/rtf',
+  '.tsv': 'text/tab-separated-values',
+  '.txt': 'text/plain',
+  '.xml': 'application/xml',
+}
+
+const TEXT_DOCUMENT_EXTENSIONS = Object.keys(TEXT_DOCUMENT_MIME_BY_EXTENSION)
+
 type AnalysisProgressEvent = {
   job: AnalysisJob
   result?: AnalysisResult | null
@@ -630,7 +649,7 @@ const mediaTypeOptions: Array<{
   {
     kind: 'text',
     title: 'Text',
-    subtitle: 'Paste copy or import a `.txt` file for TRIBE-compatible text analysis.',
+    subtitle: 'Paste copy or upload PDFs, DOC/DOCX, and common text documents for TRIBE-compatible analysis.',
     icon: DescriptionRounded,
     tone: '#f97316',
   },
@@ -806,6 +825,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   const streamFallbackJobIdRef = useRef<string | null>(null)
   const autoLoadedInsightsJobIdRef = useRef<string | null>(null)
   const latestInsightsRequestIdRef = useRef(0)
+  const autoAppliedGoalAssetIdRef = useRef<string | null>(null)
 
   const clearGeneratedVariantsState = () => {
     setGeneratedVariantsResponse(null)
@@ -846,7 +866,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   const CurrentMediaIcon = currentMediaOption.icon
   const visibleProgress = resolveVisibleProgressState(analysisProgress, evaluationProgress)
   const currentStage = resolveCurrentStage(visibleProgress?.stage, uploadState.stage, analysisJob?.status)
-  const hasLocalDraft = selectedMediaType === 'text' ? Boolean(textContent.trim()) : Boolean(selectedFile)
+  const hasLocalDraft = selectedMediaType === 'text' ? Boolean(selectedFile || textContent.trim()) : Boolean(selectedFile)
   const hasGoalContext = Boolean(goalTemplate || channel || audienceSegment.trim() || objective.trim())
   const currentFlowStep = resolveAnalysisFlowStep({
     hasDraft: hasLocalDraft || uploadState.stage === 'uploaded',
@@ -899,7 +919,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         setSelectedMediaType(nextAsset.media_type)
       }
       if (nextAsset?.media_type === 'text' && nextAsset.original_filename) {
-        setTextFilename(ensureTxtFilename(nextAsset.original_filename))
+        setTextFilename(ensureTextFilename(nextAsset.original_filename))
       }
 
       setAnalysisJob(statusResponse.job)
@@ -1082,7 +1102,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         preferredAssetId != null
           ? response.items.find((asset) => asset.id === preferredAssetId && asset.upload_status === 'uploaded')
           : null
-      const hasLocalDraft = selectedMediaType === 'text' ? Boolean(textContent.trim()) : Boolean(selectedFile)
+      const hasLocalDraft = selectedMediaType === 'text' ? Boolean(selectedFile || textContent.trim()) : Boolean(selectedFile)
 
       if (
         preferredAsset &&
@@ -1314,6 +1334,65 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
       setChannel('')
     }
   }, [availableChannels, availableGoalTemplates, channel, goalTemplate])
+
+  useEffect(() => {
+    if (uploadState.stage !== 'uploaded' || !uploadState.asset) {
+      autoAppliedGoalAssetIdRef.current = null
+      return
+    }
+
+    const assetId = uploadState.asset.id
+    if (autoAppliedGoalAssetIdRef.current === assetId) {
+      return
+    }
+
+    const hasValidGoalTemplate = availableGoalTemplates.some((option) => option.value === goalTemplate)
+    const hasValidChannel = availableChannels.some((option) => option.value === channel)
+    if (hasValidGoalTemplate && hasValidChannel) {
+      autoAppliedGoalAssetIdRef.current = assetId
+      return
+    }
+
+    const suggestedContext = resolveSuggestedGoalContext({
+      suggestions: goalPresets.suggestions,
+      mediaType: selectedMediaType,
+      selectedAsset: uploadState.asset,
+      selectedFile,
+      textFilename,
+    })
+    if (!suggestedContext) {
+      return
+    }
+
+    const suggestedTemplateSupported = availableGoalTemplates.some(
+      (option) => option.value === suggestedContext.goal_template,
+    )
+    const suggestedChannelSupported = availableChannels.some(
+      (option) => option.value === suggestedContext.channel,
+    )
+    if (!suggestedTemplateSupported || !suggestedChannelSupported) {
+      return
+    }
+
+    if (!hasValidGoalTemplate) {
+      setGoalTemplate(suggestedContext.goal_template)
+    }
+    if (!hasValidChannel) {
+      setChannel(suggestedContext.channel)
+    }
+    autoAppliedGoalAssetIdRef.current = assetId
+  }, [
+    availableChannels,
+    availableGoalTemplates,
+    channel,
+    goalPresets.suggestions,
+    goalTemplate,
+    selectedFile,
+    selectedMediaType,
+    textFilename,
+    uploadState.asset,
+    uploadState.stage,
+  ])
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -1658,38 +1737,31 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
     )
   }
 
-  const handleTextFileSelection = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleTextFileSelection = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) {
       return
     }
     event.target.value = ''
 
-    try {
-      const nextTextContent = await file.text()
-      setTextContent(nextTextContent)
-      setTextFilename(ensureTxtFilename(file.name))
-      setSelectionMode('asset')
-      setActiveLibraryAssetId(null)
-      setActiveHistoryJobId(null)
-      setComparisonTarget(null)
-      clearGeneratedVariantsState()
-      clearSelectedAnalysisAssetId(selectedAssetStorageKey)
-      clearSelectedAnalysisJobId(selectedJobStorageKey)
-      resetWorkflowState(
-        setUploadState,
-        setAnalysisJob,
-        setAnalysisResult,
-        setAnalysisPreviewResult,
-        setAnalysisProgress,
-        setBannerMessage,
-      )
-    } catch {
-      setBannerMessage({
-        type: 'error',
-        message: 'Unable to read the selected text file.',
-      })
-    }
+    setSelectedFile(file)
+    setTextContent('')
+    setTextFilename(ensureTextFilename(file.name))
+    setSelectionMode('asset')
+    setActiveLibraryAssetId(null)
+    setActiveHistoryJobId(null)
+    setComparisonTarget(null)
+    clearGeneratedVariantsState()
+    clearSelectedAnalysisAssetId(selectedAssetStorageKey)
+    clearSelectedAnalysisJobId(selectedJobStorageKey)
+    resetWorkflowState(
+      setUploadState,
+      setAnalysisJob,
+      setAnalysisResult,
+      setAnalysisPreviewResult,
+      setAnalysisProgress,
+      setBannerMessage,
+    )
   }
 
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
@@ -1726,7 +1798,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
 
     setSelectedFile(null)
     setTextContent('')
-    setTextFilename(ensureTxtFilename(asset.original_filename || 'analysis-notes.txt'))
+    setTextFilename(ensureTextFilename(asset.original_filename || 'analysis-notes.txt'))
     setAnalysisJob(null)
     setAnalysisResult(null)
     setAnalysisPreviewResult(null)
@@ -1821,7 +1893,8 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         file_name: uploadSource.fileName,
         mime_type: uploadSource.mimeType,
         size_bytes: uploadSource.sizeBytes,
-        source_kind: selectedMediaType === 'text' ? 'draft_text' : 'local_file',
+        source_kind:
+          selectedMediaType === 'text' ? (selectedFile ? 'uploaded_document' : 'draft_text') : 'local_file',
       },
     })
 
@@ -2016,7 +2089,7 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
     setTextContent('')
     setSelectionMode('job')
     if (item.asset?.media_type === 'text' && item.asset.original_filename) {
-      setTextFilename(ensureTxtFilename(item.asset.original_filename))
+      setTextFilename(ensureTextFilename(item.asset.original_filename))
     }
     setIsHistoryDrawerOpen(false)
     setPendingHistorySelection(item)
@@ -2340,7 +2413,9 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                     minRows={8}
                     multiline
                     onChange={(event) => {
+                      setSelectedFile(null)
                       setTextContent(event.target.value)
+                      setTextFilename('analysis-notes.txt')
                       setSelectionMode(event.target.value.trim() ? 'asset' : 'auto')
                       setActiveHistoryJobId(null)
                       setComparisonTarget(null)
@@ -2368,10 +2443,24 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                     <Typography color="text.secondary" variant="body2">
                       {textContent.length} / {config?.max_text_characters ?? '...'} characters
                     </Typography>
-                    <Button component="label" startIcon={<FileUploadRounded />} variant="outlined">
-                      Import `.txt`
-                      <input accept=".txt,text/plain" hidden onChange={handleTextFileSelection} type="file" />
-                    </Button>
+                    <Stack
+                      alignItems={{ xs: 'stretch', sm: 'center' }}
+                      direction={{ xs: 'column', sm: 'row' }}
+                      spacing={1}
+                    >
+                      <Typography color="text.secondary" variant="body2">
+                        Supported: PDF, DOC, DOCX, ODT, RTF, TXT, MD, CSV, JSON, HTML, XML
+                      </Typography>
+                      <Button component="label" startIcon={<FileUploadRounded />} variant="outlined">
+                        Upload document
+                        <input
+                          accept={buildTextUploadAccept(config ? config.allowed_mime_types.text : [])}
+                          hidden
+                          onChange={handleTextFileSelection}
+                          type="file"
+                        />
+                      </Button>
+                    </Stack>
                   </Stack>
                 </Stack>
               ) : (
@@ -3074,12 +3163,16 @@ function SelectedSourceSummary({
     return (
       <Box className="analysis-upload-card__file">
         <Box>
-          <Typography variant="subtitle2">{textFilename}</Typography>
+          <Typography variant="subtitle2">{selectedFile?.name || textFilename}</Typography>
           <Typography color="text.secondary" variant="body2">
-            {textContent.trim() ? `${textContent.length} characters prepared for upload` : 'No text prepared yet.'}
+            {selectedFile
+              ? `${formatFileSize(selectedFile.size)} ready for upload`
+              : textContent.trim()
+                ? `${textContent.length} characters prepared for upload`
+                : 'Paste text or choose a document to continue.'}
           </Typography>
         </Box>
-        <Chip label="Text" size="small" variant="outlined" />
+        <Chip label={selectedFile?.type || 'Text'} size="small" variant="outlined" />
       </Box>
     )
   }
@@ -5352,9 +5445,21 @@ function validateCurrentInput({
   const errors: string[] = []
 
   if (mediaType === 'text') {
+    if (selectedFile) {
+      if (selectedFile.size > config.max_file_size_bytes) {
+        errors.push(`File size exceeds ${formatFileSize(config.max_file_size_bytes)}.`)
+      }
+
+      const selectedMimeType = resolveUploadMimeType(selectedFile)
+      if (!selectedMimeType || !config.allowed_mime_types.text.includes(selectedMimeType)) {
+        errors.push(`Unsupported text mime type: ${selectedMimeType || 'unknown'}.`)
+      }
+      return errors
+    }
+
     const trimmedText = textContent.trim()
     if (!trimmedText) {
-      errors.push('Text analysis requires content in the textarea or a `.txt` import.')
+      errors.push('Text analysis requires pasted content or an uploaded document.')
     }
     if (trimmedText.length > config.max_text_characters) {
       errors.push(`Text analysis is limited to ${config.max_text_characters.toLocaleString()} characters.`)
@@ -5390,6 +5495,19 @@ function buildUploadSource({
   textFilename: string
 }): UploadSource | null {
   if (mediaType === 'text') {
+    if (selectedFile) {
+      const mimeType = resolveUploadMimeType(selectedFile)
+      if (!mimeType) {
+        return null
+      }
+      return {
+        file: selectedFile,
+        fileName: selectedFile.name,
+        mimeType,
+        sizeBytes: selectedFile.size,
+      }
+    }
+
     const trimmedText = textContent.trim()
     if (!trimmedText) {
       return null
@@ -5397,7 +5515,7 @@ function buildUploadSource({
     const file = new Blob([trimmedText], { type: 'text/plain' })
     return {
       file,
-      fileName: ensureTxtFilename(textFilename),
+      fileName: ensureTextFilename(textFilename),
       mimeType: 'text/plain',
       sizeBytes: file.size,
     }
@@ -5410,7 +5528,7 @@ function buildUploadSource({
   return {
     file: selectedFile,
     fileName: selectedFile.name,
-    mimeType: selectedFile.type,
+    mimeType: resolveUploadMimeType(selectedFile),
     sizeBytes: selectedFile.size,
   }
 }
@@ -5897,9 +6015,31 @@ function buildSeriesPath(
   return commands.join(' ')
 }
 
-function ensureTxtFilename(value: string) {
+function ensureTextFilename(value: string) {
   const sanitized = value.trim() || 'analysis-notes.txt'
-  return sanitized.endsWith('.txt') ? sanitized : `${sanitized}.txt`
+  const lastSegment = sanitized.split(/[\\/]/).pop() || sanitized
+  return /\.[A-Za-z0-9]{1,10}$/.test(lastSegment) ? sanitized : `${sanitized}.txt`
+}
+
+function buildTextUploadAccept(mimeTypes: string[]) {
+  return [...new Set([...mimeTypes, ...TEXT_DOCUMENT_EXTENSIONS])].join(',')
+}
+
+function resolveUploadMimeType(file: File) {
+  if (file.type) {
+    return file.type
+  }
+
+  const extension = resolveFileExtension(file.name)
+  return extension ? TEXT_DOCUMENT_MIME_BY_EXTENSION[extension] || '' : ''
+}
+
+function resolveFileExtension(filename: string) {
+  const lastDotIndex = filename.lastIndexOf('.')
+  if (lastDotIndex === -1) {
+    return ''
+  }
+  return filename.slice(lastDotIndex).toLowerCase()
 }
 
 function shortenId(value: string) {
