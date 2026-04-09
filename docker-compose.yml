@@ -74,13 +74,35 @@ services:
       - .:/app
       - tribe_cache:/app/cache
 
-  worker:
+  worker-inference:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: ["celery", "-A", "backend.celery_app.celery_app", "worker", "--loglevel=INFO"]
+    command: ["bash", "backend/run_workers.sh"]
     env_file:
       - backend/.env.example
+    environment:
+      CELERY_WORKER_ROLE: inference-cpu
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - .:/app
+      - tribe_cache:/app/cache
+
+  worker-scoring:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["bash", "backend/run_workers.sh"]
+    env_file:
+      - backend/.env.example
+    environment:
+      CELERY_WORKER_ROLE: scoring-cpu
     depends_on:
       postgres:
         condition: service_healthy

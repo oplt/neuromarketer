@@ -132,6 +132,14 @@ async def get_user_by_id(db: AsyncSession, user_id: UUID) -> User | None:
     return result.scalar_one_or_none()
 
 
+async def get_users_by_ids(db: AsyncSession, user_ids: Sequence[UUID]) -> dict[UUID, User]:
+    unique_user_ids = tuple(dict.fromkeys(user_ids))
+    if not unique_user_ids:
+        return {}
+    result = await db.execute(select(User).where(User.id.in_(unique_user_ids)))
+    return {user.id: user for user in result.scalars().all()}
+
+
 async def get_user_and_organization(
     db: AsyncSession,
     *,
@@ -159,6 +167,42 @@ async def get_user_and_organization(
     if row is None:
         return None, None
     return row[0], row[1]
+
+
+async def get_user_org_and_default_project(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    organization_id: UUID,
+) -> tuple[User | None, Organization | None, Project | None]:
+    """Fetch the authenticated user, org, and default project in one round trip.
+
+    The default project is resolved as the earliest-created project for the
+    organization, matching the existing fallback behavior.
+    """
+    default_project_id = (
+        select(Project.id)
+        .where(Project.organization_id == organization_id)
+        .order_by(Project.created_at.asc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    result = await db.execute(
+        select(User, Organization, Project)
+        .join(OrganizationMembership, OrganizationMembership.user_id == User.id)
+        .join(Organization, Organization.id == OrganizationMembership.organization_id)
+        .outerjoin(Project, Project.id == default_project_id)
+        .where(
+            User.id == user_id,
+            Organization.id == organization_id,
+            OrganizationMembership.organization_id == organization_id,
+        )
+        .limit(1)
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None, None, None
+    return row[0], row[1], row[2]
 
 
 async def get_primary_organization_for_user(

@@ -35,6 +35,8 @@ class AnalysisScoringResponse:
 
 class AnalysisScoringService:
     MODE = "analysis_scoring"
+    MIN_OUTPUT_TOKENS = 1200
+    MAX_OUTPUT_TOKENS = 2200
 
     def __init__(self, router: LLMRouter) -> None:
         self.router = router
@@ -47,6 +49,24 @@ class AnalysisScoringService:
     def preview_route(self) -> LLMRoutePreview:
         return self.router.preview_route(mode=self.MODE)
 
+    def _resolve_max_tokens(self) -> int:
+        analysis_specific = int(getattr(settings, "llm_analysis_scoring_max_tokens", 0) or 0)
+        global_default = int(getattr(settings, "llm_max_tokens", 0) or 0)
+
+        resolved = analysis_specific if analysis_specific > 0 else global_default
+        if resolved <= 0:
+            resolved = self.MIN_OUTPUT_TOKENS
+
+        return min(max(resolved, self.MIN_OUTPUT_TOKENS), self.MAX_OUTPUT_TOKENS)
+
+    def _request_options(self) -> dict[str, Any]:
+        max_tokens = self._resolve_max_tokens()
+        preview = self.preview_route()
+
+        if preview.provider == "ollama":
+            return {"num_predict": max_tokens}
+        return {"max_tokens": max_tokens}
+
     async def score(self, context: dict[str, Any]) -> AnalysisScoringResponse:
         if not isinstance(context, dict) or not context:
             raise AnalysisScoringServiceError("Scoring context must be a non-empty dictionary.")
@@ -57,6 +77,7 @@ class AnalysisScoringService:
                 mode=self.MODE,
                 messages=prompt_payload["messages"],
                 response_schema=prompt_payload["response_schema"],
+                options=self._request_options(),
             )
         except LLMRoutingError as exc:
             log_exception(
@@ -67,9 +88,13 @@ class AnalysisScoringService:
                 provider=exc.telemetry.get("selected_provider"),
                 model=exc.telemetry.get("selected_model"),
                 route_id=exc.telemetry.get("selected_route_id"),
+                raw_text_preview=exc.telemetry.get("last_raw_text_preview"),
                 status="failed",
             )
-            raise AnalysisScoringServiceError(f"LLM scoring failed: {exc}", telemetry=exc.telemetry) from exc
+            raise AnalysisScoringServiceError(
+                f"LLM scoring failed: {exc}",
+                telemetry=exc.telemetry,
+            ) from exc
 
         try:
             validated = AnalysisScoringResult.model_validate(generation.parsed_json)
@@ -84,6 +109,7 @@ class AnalysisScoringService:
                 error_type=exc.__class__.__name__,
                 error_message=str(exc),
                 raw_text_char_count=len(str(generation.metadata.get("raw_text") or "")),
+                raw_text_preview=str(generation.metadata.get("raw_text") or "")[:1500],
                 status="invalid",
             )
             raise AnalysisScoringServiceError(
@@ -95,6 +121,7 @@ class AnalysisScoringService:
                     "provider_attempts": generation.metadata.get("provider_attempts") or [],
                     "estimated_cost_usd": generation.metadata.get("estimated_cost_usd"),
                     "actual_cost_usd": generation.metadata.get("actual_cost_usd"),
+                    "raw_text_preview": str(generation.metadata.get("raw_text") or "")[:1500],
                 },
             ) from exc
 

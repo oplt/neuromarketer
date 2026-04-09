@@ -1,3 +1,4 @@
+import { Suspense, lazy } from 'react'
 import AudiotrackRounded from '@mui/icons-material/AudiotrackRounded'
 import AutoGraphRounded from '@mui/icons-material/AutoGraphRounded'
 import AutoAwesomeRounded from '@mui/icons-material/AutoAwesomeRounded'
@@ -40,13 +41,16 @@ import {
   type ReactElement,
   type SetStateAction,
 } from 'react'
-import AnalysisEvaluationSection, {
-  type AnalysisEvaluationProgressSnapshot,
-} from '../components/analysis/AnalysisEvaluationSection'
-import CollaborationPanel from '../components/collaboration/CollaborationPanel'
 import { apiFetch, apiRequest, subscribeToEventStream, uploadToApi, uploadToSignedUrl } from '../lib/api'
 import { buildCompareWorkspaceStorageKey, storeCompareWorkspaceSnapshot } from '../lib/compareWorkspace'
+import { runWhenIdle } from '../lib/defer'
 import type { AuthSession } from '../lib/session'
+import MetricsRadarCard from '../components/analysis/MetricsRadarCard'
+
+const AnalysisEvaluationSection = lazy(() => import('../components/analysis/AnalysisEvaluationSection'))
+const CollaborationPanel = lazy(() => import('../components/collaboration/CollaborationPanel'))
+type AnalysisEvaluationProgressSnapshot =
+  import('../components/analysis/AnalysisEvaluationSection').AnalysisEvaluationProgressSnapshot
 
 type AnalysisPageProps = {
   session: AuthSession
@@ -165,7 +169,16 @@ type AnalysisSegmentRow = {
   start_time_ms: number
   end_time_ms: number
   attention_score: number
+  memory_proxy: number
+  emotion_score: number
+  cognitive_load: number
+  conversion_proxy: number
+  engagement_score: number
   engagement_delta: number
+  peak_focus: number
+  temporal_change: number
+  consistency: number
+  hemisphere_balance: number
   note: string
 }
 
@@ -716,7 +729,16 @@ const placeholderSegments: AnalysisSegmentRow[] = [
     start_time_ms: 0,
     end_time_ms: 1500,
     attention_score: 0,
+    memory_proxy: 0,
+    emotion_score: 0,
+    cognitive_load: 0,
+    conversion_proxy: 0,
+    engagement_score: 0,
     engagement_delta: 0,
+    peak_focus: 0,
+    temporal_change: 0,
+    consistency: 0,
+    hemisphere_balance: 0,
     note: 'Upload and queue an analysis job to populate segment notes.',
   },
 ]
@@ -907,11 +929,21 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         setActiveLibraryAssetId(nextAsset.id)
         storeSelectedAnalysisAssetId(selectedAssetStorageKey, nextAsset.id)
         setAssetLibrary((current) => mergeLatestAnalysisAsset(current, nextAsset))
-        setUploadState({
-          stage: 'uploaded',
-          progressPercent: 100,
-          validationErrors: [],
-          asset: nextAsset,
+        setUploadState((current) => {
+          if (
+            current.stage === 'uploaded' &&
+            current.progressPercent === 100 &&
+            current.validationErrors.length === 0 &&
+            current.asset?.id === nextAsset.id
+          ) {
+            return current
+          }
+          return {
+            stage: 'uploaded',
+            progressPercent: 100,
+            validationErrors: [],
+            asset: nextAsset,
+          }
         })
       }
 
@@ -922,41 +954,50 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         setTextFilename(ensureTextFilename(nextAsset.original_filename))
       }
 
-      setAnalysisJob(statusResponse.job)
+      setAnalysisJob((current) => (areAnalysisJobsEqual(current, statusResponse.job) ? current : statusResponse.job))
       if (statusResponse.result) {
-        setAnalysisPreviewResult(null)
+        setAnalysisPreviewResult((current) => (current === null ? current : null))
       } else {
         if (analysisPreviewResult?.job_id && analysisPreviewResult.job_id !== statusResponse.job.id) {
           setAnalysisPreviewResult(null)
         }
       }
       if (nextProgress) {
-        setAnalysisProgress(nextProgress)
+        setAnalysisProgress((current) => (areAnalysisProgressStatesEqual(current, nextProgress) ? current : nextProgress))
       } else if (analysisProgress?.jobId && analysisProgress.jobId !== statusResponse.job.id) {
         setAnalysisProgress(null)
       } else if (statusResponse.job.status === 'failed') {
         setAnalysisProgress(null)
       }
       if (statusResponse.job.status === 'failed') {
-        setAnalysisPreviewResult(null)
+        setAnalysisPreviewResult((current) => (current === null ? current : null))
       }
-      setAnalysisResult(statusResponse.result || null)
-      setObjective(statusResponse.job.objective || '')
-      setGoalTemplate(
-        statusResponse.job.goal_template ||
+      setAnalysisResult((current) => (areAnalysisResultsEqual(current, statusResponse.result || null) ? current : statusResponse.result || null))
+      setObjective((current) => {
+        const nextObjective = statusResponse.job.objective || ''
+        return current === nextObjective ? current : nextObjective
+      })
+      setGoalTemplate((current) => {
+        const nextGoalTemplate =
+          statusResponse.job.goal_template ||
           statusResponse.result?.summary_json.metadata?.goal_template ||
-          '',
-      )
-      setChannel(
-        statusResponse.job.channel ||
+          ''
+        return current === nextGoalTemplate ? current : nextGoalTemplate
+      })
+      setChannel((current) => {
+        const nextChannel =
+          statusResponse.job.channel ||
           statusResponse.result?.summary_json.metadata?.channel ||
-          '',
-      )
-      setAudienceSegment(
-        statusResponse.job.audience_segment ||
+          ''
+        return current === nextChannel ? current : nextChannel
+      })
+      setAudienceSegment((current) => {
+        const nextAudienceSegment =
+          statusResponse.job.audience_segment ||
           statusResponse.result?.summary_json.metadata?.audience_segment ||
-          '',
-      )
+          ''
+        return current === nextAudienceSegment ? current : nextAudienceSegment
+      })
       setActiveHistoryJobId(statusResponse.job.id)
       storeSelectedAnalysisJobId(selectedJobStorageKey, statusResponse.job.id)
       setAnalysisHistory((current) =>
@@ -991,19 +1032,56 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   )
 
   const applyAnalysisProgress = useEffectEvent((progressEvent: AnalysisProgressEvent) => {
-    applyAnalysisSnapshot({
-      job: progressEvent.job,
-      asset: progressEvent.asset ?? null,
-      result: null,
-    })
+    setAnalysisJob((current) => (areAnalysisJobsEqual(current, progressEvent.job) ? current : progressEvent.job))
 
-    if (progressEvent.result) {
-      setAnalysisPreviewResult(progressEvent.result)
+    const nextAsset = progressEvent.asset ?? null
+    if (nextAsset) {
+      setActiveLibraryAssetId(nextAsset.id)
+      storeSelectedAnalysisAssetId(selectedAssetStorageKey, nextAsset.id)
+      setAssetLibrary((current) => mergeLatestAnalysisAsset(current, nextAsset))
+      setUploadState((current) => {
+        if (
+          current.stage === 'uploaded' &&
+          current.progressPercent === 100 &&
+          current.validationErrors.length === 0 &&
+          current.asset?.id === nextAsset.id
+        ) {
+          return current
+        }
+        return {
+          stage: 'uploaded',
+          progressPercent: 100,
+          validationErrors: [],
+          asset: nextAsset,
+        }
+      })
+    }
+    setActiveHistoryJobId((current) => (current === progressEvent.job.id ? current : progressEvent.job.id))
+    storeSelectedAnalysisJobId(selectedJobStorageKey, progressEvent.job.id)
+    setAnalysisHistory((current) =>
+      upsertAnalysisHistoryItem(
+        current,
+        {
+          job: progressEvent.job,
+          asset: nextAsset ?? (uploadState.asset?.id === progressEvent.job.asset_id ? uploadState.asset : null),
+          has_result: false,
+          result_created_at: null,
+        },
+        ANALYSIS_HISTORY_LIMIT,
+      ),
+    )
+    setSelectionMode((current) => (current === 'job' ? current : 'job'))
+
+    const previewResult = progressEvent.result ?? null
+    if (previewResult) {
+      setAnalysisPreviewResult((current) =>
+        areAnalysisResultsEqual(current, previewResult) ? current : previewResult,
+      )
     }
 
     const nextProgress = normalizeAnalysisProgressState(progressEvent.job.id, progressEvent)
     if (nextProgress) {
-      setAnalysisProgress(nextProgress)
+      setAnalysisProgress((current) => (areAnalysisProgressStatesEqual(current, nextProgress) ? current : nextProgress))
     }
   })
 
@@ -1449,8 +1527,21 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
   }, [assetLibraryRefreshNonce, selectedMediaType, sessionToken])
 
   useEffect(() => {
+    if (hasLoadedAnalysisHistory && analysisHistoryRefreshNonce === 0) {
+      return
+    }
+    const cancelDeferredLoad = runWhenIdle(() => {
+      void loadAnalysisHistory()
+    })
+    return cancelDeferredLoad
+  }, [analysisHistoryRefreshNonce, hasLoadedAnalysisHistory, loadAnalysisHistory, selectedMediaType, sessionToken])
+
+  useEffect(() => {
+    if (!isHistoryDrawerOpen || isLoadingAnalysisHistory || hasLoadedAnalysisHistory) {
+      return
+    }
     void loadAnalysisHistory()
-  }, [analysisHistoryRefreshNonce, selectedMediaType, sessionToken])
+  }, [hasLoadedAnalysisHistory, isHistoryDrawerOpen, isLoadingAnalysisHistory, loadAnalysisHistory])
 
   useEffect(() => {
     setAnalysisTransportMode('stream')
@@ -2883,76 +2974,110 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         />
       </Box>
 
-      <CollaborationPanel
-        allowTimestampComments
-        entityId={analysisJob?.id ?? null}
-        entityType="analysis_job"
-        session={session}
-        subtitle="Keep review status, assignee handoff, and timestamp comments attached to this analysis run."
-        title="Review ops"
-      />
+      <Suspense fallback={<DeferredPanelFallback title="Review ops" />}>
+        <CollaborationPanel
+          allowTimestampComments
+          entityId={analysisJob?.id ?? null}
+          entityType="analysis_job"
+          session={session}
+          subtitle="Keep review status, assignee handoff, and timestamp comments attached to this analysis run."
+          title="Review ops"
+        />
+      </Suspense>
 
-      <Box className="dashboard-grid dashboard-grid--metrics">
+      <Box className="dashboard-grid dashboard-grid--metrics analysis-summary-grid">
         {summaryCards.map((card) => (
           <Paper className="dashboard-card dashboard-card--metric" elevation={0} key={card.key}>
-            <Stack direction="row" justifyContent="space-between" spacing={2}>
-              <Box>
-                <Typography color="text.secondary" variant="overline">
-                  {card.label}
-                </Typography>
-                {stageAvailability.primaryScoringReady ? (
-                  <Typography variant="h3">{Math.round(card.value)}</Typography>
-                ) : (
-                  <Skeleton height={52} sx={{ transform: 'none' }} width={92} />
-                )}
-              </Box>
-              <Chip icon={<AutoGraphRounded />} label="/100" size="small" variant="outlined" />
+            <Stack spacing={1.5}>
+              <Typography color="text.secondary" variant="overline">
+                {card.label}
+              </Typography>
+              <ScoreGauge isReady={stageAvailability.primaryScoringReady} label="" size={80} value={card.value} />
+              <Typography color="text.secondary" variant="body2">
+                {stageAvailability.primaryScoringReady ? card.helper : summarySectionMessage}
+              </Typography>
             </Stack>
-            <Typography color="text.secondary" variant="body2">
-              {stageAvailability.primaryScoringReady ? card.helper : summarySectionMessage}
-            </Typography>
           </Paper>
         ))}
       </Box>
 
       <Box className="dashboard-grid dashboard-grid--content">
+        <MetricsRadarCard
+          description="A radial view of the same dashboard metrics shown in the table, scaled per metric for faster pattern scanning."
+          series={[
+            {
+              label: 'Current result',
+              metrics: metricsRows,
+            },
+          ]}
+          testId="analysis-metrics-radar"
+          title="Metrics radar"
+        />
+
         <Paper className="dashboard-card" elevation={0}>
-          <Stack spacing={2}>
-            <Typography variant="h6">Metrics table</Typography>
-            <Table size="small">
-              <TableHead>
-                <TableRow>
-                  <TableCell>Metric</TableCell>
-                  <TableCell align="right">Value</TableCell>
-                  <TableCell>Confidence</TableCell>
-                  <TableCell>Source</TableCell>
-                  <TableCell>Detail</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {stageAvailability.primaryScoringReady
-                  ? metricsRows.map((metric) => (
-                      <TableRow key={metric.key}>
-                        <TableCell>{metric.label}</TableCell>
-                        <TableCell align="right">
+          <Stack spacing={1.5}>
+            <Typography variant="h6">Metrics overview</Typography>
+            <Stack spacing={1}>
+              {stageAvailability.primaryScoringReady
+                ? metricsRows.map((metric) => (
+                    <Box
+                      key={metric.key}
+                      sx={{
+                        border: '1px solid rgba(148, 163, 184, 0.18)',
+                        borderRadius: 3,
+                        px: 1.5,
+                        py: 1.25,
+                      }}
+                    >
+                      <Stack alignItems="flex-start" direction="row" justifyContent="space-between" spacing={1.5}>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ lineHeight: 1.25 }} variant="subtitle2">
+                            {metric.label}
+                          </Typography>
+                          <Typography color="text.secondary" sx={{ lineHeight: 1.4, mt: 0.35 }} variant="caption">
+                            {metric.detail || 'Derived dashboard metric'}
+                          </Typography>
+                        </Box>
+                        <Typography sx={{ flexShrink: 0, whiteSpace: 'nowrap' }} variant="subtitle2">
                           {metric.value.toFixed(metric.unit === 'seconds' ? 2 : 1)} {metric.unit}
-                        </TableCell>
-                        <TableCell>{formatOptionalScore(metric.confidence)}</TableCell>
-                        <TableCell>{metric.source}</TableCell>
-                        <TableCell>{metric.detail || 'Derived dashboard metric'}</TableCell>
-                      </TableRow>
-                    ))
-                  : Array.from({ length: 4 }).map((_, index) => (
-                      <TableRow key={`metric-skeleton-${index}`}>
-                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="72%" /></TableCell>
-                        <TableCell align="right"><Skeleton height={22} sx={{ transform: 'none', ml: 'auto' }} width={72} /></TableCell>
-                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width={64} /></TableCell>
-                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="56%" /></TableCell>
-                        <TableCell><Skeleton height={22} sx={{ transform: 'none' }} width="92%" /></TableCell>
-                      </TableRow>
-                    ))}
-              </TableBody>
-            </Table>
+                        </Typography>
+                      </Stack>
+
+                      <Stack
+                        direction="row"
+                        flexWrap="wrap"
+                        spacing={0.75}
+                        sx={{ columnGap: 0.75, mt: 1 }}
+                        useFlexGap
+                      >
+                        <Chip
+                          label={`Confidence ${formatOptionalScore(metric.confidence)}`}
+                          size="small"
+                          variant="outlined"
+                        />
+                        <Chip label={metric.source} size="small" variant="outlined" />
+                      </Stack>
+                    </Box>
+                  ))
+                : Array.from({ length: 5 }).map((_, index) => (
+                    <Box
+                      key={`metric-skeleton-${index}`}
+                      sx={{
+                        border: '1px solid rgba(148, 163, 184, 0.18)',
+                        borderRadius: 3,
+                        px: 1.5,
+                        py: 1.25,
+                      }}
+                    >
+                      <Skeleton height={20} sx={{ transform: 'none' }} width="48%" />
+                      <Skeleton height={18} sx={{ mt: 0.5, transform: 'none' }} width="90%" />
+                      <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                        <Skeleton height={28} sx={{ transform: 'none' }} width={110} />
+                        <Skeleton height={28} sx={{ transform: 'none' }} width={86} />
+                      </Stack>
+                    </Box>
+                  ))}
+            </Stack>
             {!stageAvailability.primaryScoringReady ? (
               <Typography color="text.secondary" variant="body2">
                 {summarySectionMessage}
@@ -2968,7 +3093,11 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
               Attention, engagement, and memory proxies aligned to processed timestamps.
             </Typography>
             {stageAvailability.primaryScoringReady ? (
-              <TimelineChart points={timelinePoints} />
+              <TimelineChart
+                points={timelinePoints}
+                highAttentionIntervals={highAttentionIntervals}
+                lowAttentionIntervals={lowAttentionIntervals}
+              />
             ) : (
               <TimelineChartSkeleton label={summarySectionMessage} />
             )}
@@ -2980,6 +3109,10 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         <Paper className="dashboard-card" elevation={0}>
           <Stack spacing={2}>
             <Typography variant="h6">Scene / segment table</Typography>
+            <SegmentHeatstrip
+              segments={segmentsRows}
+              isReady={stageAvailability.sceneStructureReady && stageAvailability.primaryScoringReady}
+            />
             <Table size="small">
               <TableHead>
                 <TableRow>
@@ -3031,6 +3164,19 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
                 {sceneSectionMessage}
               </Typography>
             ) : null}
+          </Stack>
+        </Paper>
+
+        <Paper className="dashboard-card" elevation={0}>
+          <Stack spacing={2}>
+            <Typography variant="h6">Multi-signal scene matrix</Typography>
+            <Typography color="text.secondary" variant="body2">
+              Per-scene breakdown across all 10 neural &amp; behavioural signals. Cognitive Load is shown inverted (green = low load).
+            </Typography>
+            <SignalMatrixCard
+              segments={segmentsRows}
+              isReady={stageAvailability.sceneStructureReady && stageAvailability.primaryScoringReady}
+            />
           </Stack>
         </Paper>
 
@@ -3094,12 +3240,14 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         </Paper>
       </Box>
 
-      <AnalysisEvaluationSection
-        analysisCompleted={analysisCompleted}
-        jobId={evaluationJobId}
-        onProgressSnapshot={handleEvaluationProgressSnapshot}
-        sessionToken={sessionToken || null}
-      />
+      <Suspense fallback={<DeferredPanelFallback title="LLM evaluations" />}>
+        <AnalysisEvaluationSection
+          analysisCompleted={analysisCompleted}
+          jobId={evaluationJobId}
+          onProgressSnapshot={handleEvaluationProgressSnapshot}
+          sessionToken={sessionToken || null}
+        />
+      </Suspense>
 
       <Drawer
         PaperProps={{
@@ -3187,6 +3335,20 @@ function SelectedSourceSummary({
       </Box>
       <Chip label={selectedFile?.type || mediaType.toUpperCase()} size="small" variant="outlined" />
     </Box>
+  )
+}
+
+function DeferredPanelFallback({ title }: { title: string }) {
+  return (
+    <Paper className="dashboard-card" elevation={0}>
+      <Stack spacing={2}>
+        <Typography variant="h6">{title}</Typography>
+        <LinearProgress sx={{ borderRadius: 999, height: 8 }} />
+        <Typography color="text.secondary" variant="body2">
+          Loading this section on demand to keep the primary analysis view responsive.
+        </Typography>
+      </Stack>
+    </Paper>
   )
 }
 
@@ -4420,16 +4582,49 @@ function AnalysisFlowOverview({
   )
 }
 
-function TimelineChart({ points }: { points: AnalysisTimelinePoint[] }) {
+function TimelineChart({
+  points,
+  highAttentionIntervals,
+  lowAttentionIntervals,
+}: {
+  points: AnalysisTimelinePoint[]
+  highAttentionIntervals?: AnalysisInterval[]
+  lowAttentionIntervals?: AnalysisInterval[]
+}) {
   const width = 520
   const height = 200
   const engagementPath = buildSeriesPath(points, width, height, 'engagement_score')
   const attentionPath = buildSeriesPath(points, width, height, 'attention_score')
   const memoryPath = buildSeriesPath(points, width, height, 'memory_proxy')
 
+  function intervalToX(ms: number): number {
+    if (points.length <= 1) return 0
+    const step = width / (points.length - 1)
+    let bestIdx = 0
+    let bestDiff = Infinity
+    for (let i = 0; i < points.length; i++) {
+      const diff = Math.abs(points[i].timestamp_ms - ms)
+      if (diff < bestDiff) {
+        bestDiff = diff
+        bestIdx = i
+      }
+    }
+    return bestIdx * step
+  }
+
   return (
     <Box className="analysis-timeline-chart">
       <svg aria-label="analysis timeline chart" viewBox={`0 0 ${width} ${height}`}>
+        {(highAttentionIntervals ?? []).map((interval, i) => {
+          const x = intervalToX(interval.start_time_ms)
+          const w = Math.max(2, intervalToX(interval.end_time_ms) - x)
+          return <rect key={`hi-${i}`} x={x} y={0} width={w} height={height} fill="#16a34a" fillOpacity={0.10} />
+        })}
+        {(lowAttentionIntervals ?? []).map((interval, i) => {
+          const x = intervalToX(interval.start_time_ms)
+          const w = Math.max(2, intervalToX(interval.end_time_ms) - x)
+          return <rect key={`lo-${i}`} x={x} y={0} width={w} height={height} fill="#dc2626" fillOpacity={0.10} />
+        })}
         <path className="analysis-timeline-chart__grid" d={`M 0 ${height - 1} H ${width}`} />
         <path className="analysis-timeline-chart__line analysis-timeline-chart__line--engagement" d={engagementPath} />
         <path className="analysis-timeline-chart__line analysis-timeline-chart__line--attention" d={attentionPath} />
@@ -4439,6 +4634,12 @@ function TimelineChart({ points }: { points: AnalysisTimelinePoint[] }) {
         <LegendSwatch color="#f97316" label="Engagement" />
         <LegendSwatch color="#3b5bdb" label="Attention" />
         <LegendSwatch color="#14b8a6" label="Memory Proxy" />
+        {(highAttentionIntervals ?? []).length > 0 && (
+          <LegendSwatch color="#16a34a" label="High attention zone" />
+        )}
+        {(lowAttentionIntervals ?? []).length > 0 && (
+          <LegendSwatch color="#dc2626" label="Low attention zone" />
+        )}
       </Stack>
       <Stack direction="row" justifyContent="space-between" spacing={1}>
         {points.slice(0, 4).map((point) => (
@@ -4514,7 +4715,7 @@ function VideoFrameStrip({
       }
     }
 
-    if (!canExtractVideoFrames(asset.mime_type)) {
+    if (!canExtractVideoFrames(asset.mime_type || 'video/mp4')) {
       setFrameThumbnails({})
       setThumbnailAspectRatio('16 / 9')
       setThumbnailState('failed')
@@ -4545,14 +4746,19 @@ function VideoFrameStrip({
           signal: controller.signal,
         })
         const blob = await response.blob()
+        const resolvedMimeType = blob.type || asset.mime_type || 'video/mp4'
         if (isCancelled) {
           return
+        }
+
+        if (!canExtractVideoFrames(resolvedMimeType)) {
+          throw new Error(`Unsupported video type for frame extraction: ${resolvedMimeType}`)
         }
 
         const { previewsByTimestamp, aspectRatio } = await generateFrameThumbnailMap({
           blob,
           frames,
-          mimeType: asset.mime_type || 'video/mp4',
+          mimeType: resolvedMimeType,
           signal: controller.signal,
         })
 
@@ -4999,6 +5205,267 @@ function LegendSwatch({ color, label }: { color: string; label: string }) {
         {label}
       </Typography>
     </Stack>
+  )
+}
+
+function scoreToColor(score: number): string {
+  const clamped = Math.max(0, Math.min(100, score))
+  const hue = (clamped / 100) * 120
+  return `hsl(${Math.round(hue)}, 70%, 45%)`
+}
+
+function ScoreGauge({
+  value,
+  label,
+  isReady,
+  size = 76,
+}: {
+  value: number
+  label: string
+  isReady: boolean
+  size?: number
+}) {
+  const strokeWidth = 6
+  const radius = (size - strokeWidth) / 2
+  const circumference = 2 * Math.PI * radius
+  const filled = (Math.max(0, Math.min(100, value)) / 100) * circumference
+  const color = scoreToColor(value)
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+      <Box sx={{ position: 'relative', width: size, height: size }}>
+        <svg
+          aria-hidden="true"
+          width={size}
+          height={size}
+          viewBox={`0 0 ${size} ${size}`}
+          style={{ transform: 'rotate(-90deg)' }}
+        >
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            r={radius}
+            fill="none"
+            stroke="rgba(24,34,48,0.08)"
+            strokeWidth={strokeWidth}
+          />
+          {isReady && (
+            <circle
+              cx={size / 2}
+              cy={size / 2}
+              r={radius}
+              fill="none"
+              stroke={color}
+              strokeWidth={strokeWidth}
+              strokeDasharray={`${filled} ${circumference}`}
+              strokeLinecap="round"
+            />
+          )}
+        </svg>
+        <Box
+          sx={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          {isReady ? (
+            <Typography sx={{ fontWeight: 700, fontSize: 14, lineHeight: 1, color }}>
+              {Math.round(value)}
+            </Typography>
+          ) : (
+            <Skeleton width={28} height={16} sx={{ transform: 'none' }} />
+          )}
+        </Box>
+      </Box>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ textAlign: 'center', lineHeight: 1.2, maxWidth: size }}
+      >
+        {label}
+      </Typography>
+    </Box>
+  )
+}
+
+function SegmentHeatstrip({
+  segments,
+  isReady,
+  stripHeight = 32,
+}: {
+  segments: AnalysisSegmentRow[]
+  isReady: boolean
+  stripHeight?: number
+}) {
+  if (!isReady) {
+    return <Skeleton height={stripHeight} sx={{ transform: 'none', borderRadius: '6px' }} />
+  }
+  if (segments.length === 0) {
+    return null
+  }
+
+  const totalDuration = segments.reduce((max, s) => Math.max(max, s.end_time_ms), 0) || 1
+
+  return (
+    <Stack spacing={0.75}>
+      <Box
+        role="img"
+        aria-label="Segment attention heatstrip"
+        sx={{
+          display: 'flex',
+          height: stripHeight,
+          borderRadius: '6px',
+          overflow: 'hidden',
+          gap: '2px',
+        }}
+      >
+        {segments.map((seg, i) => {
+          const widthPct = ((seg.end_time_ms - seg.start_time_ms) / totalDuration) * 100
+          return (
+            <Box
+              key={i}
+              title={`${seg.label}: ${Math.round(seg.attention_score)}/100`}
+              sx={{
+                flex: `0 0 ${widthPct}%`,
+                bgcolor: scoreToColor(seg.attention_score),
+                cursor: 'default',
+                transition: 'filter 0.15s',
+                '&:hover': { filter: 'brightness(1.2)' },
+              }}
+            />
+          )
+        })}
+      </Box>
+      <Stack direction="row" spacing={2}>
+        <LegendSwatch color="hsl(0,70%,45%)" label="Low" />
+        <LegendSwatch color="hsl(60,70%,45%)" label="Mid" />
+        <LegendSwatch color="hsl(120,70%,45%)" label="High" />
+      </Stack>
+    </Stack>
+  )
+}
+
+const SIGNAL_COLUMNS: { key: keyof AnalysisSegmentRow; label: string; invert?: boolean }[] = [
+  { key: 'attention_score', label: 'Attention' },
+  { key: 'engagement_score', label: 'Engagement' },
+  { key: 'memory_proxy', label: 'Memory' },
+  { key: 'emotion_score', label: 'Emotion' },
+  { key: 'cognitive_load', label: 'Cog. Load', invert: true },
+  { key: 'conversion_proxy', label: 'Conversion' },
+  { key: 'peak_focus', label: 'Peak Focus' },
+  { key: 'temporal_change', label: 'Temporal Δ' },
+  { key: 'consistency', label: 'Consistency' },
+  { key: 'hemisphere_balance', label: 'Hemi. Bal.' },
+]
+
+function SignalMatrixCard({
+  segments,
+  isReady,
+}: {
+  segments: AnalysisSegmentRow[]
+  isReady: boolean
+}) {
+  if (!isReady) {
+    return <Skeleton height={200} sx={{ transform: 'none', borderRadius: '6px' }} />
+  }
+  if (segments.length === 0) return null
+
+  const CELL_W = 72
+  const CELL_H = 32
+  const ROW_LABEL_W = 72
+
+  return (
+    <Box sx={{ overflowX: 'auto', overflowY: 'visible' }}>
+      {/* header row */}
+      <Box sx={{ display: 'flex', mb: 0.25 }}>
+        <Box sx={{ width: ROW_LABEL_W, flexShrink: 0 }} />
+        {SIGNAL_COLUMNS.map(col => (
+          <Box
+            key={col.key as string}
+            sx={{
+              width: CELL_W,
+              flexShrink: 0,
+              px: 0.5,
+              textAlign: 'center',
+            }}
+          >
+            <Typography
+              noWrap
+              color="text.secondary"
+              variant="caption"
+              sx={{ display: 'block', fontSize: '0.65rem', lineHeight: 1.2 }}
+            >
+              {col.label}
+            </Typography>
+          </Box>
+        ))}
+      </Box>
+
+      {/* data rows */}
+      {segments.map(seg => (
+        <Box key={seg.segment_index} sx={{ display: 'flex', mb: '2px', alignItems: 'center' }}>
+          {/* row label */}
+          <Box sx={{ width: ROW_LABEL_W, flexShrink: 0, pr: 0.5 }}>
+            <Typography
+              noWrap
+              color="text.secondary"
+              variant="caption"
+              sx={{ fontSize: '0.65rem' }}
+            >
+              {seg.label}
+            </Typography>
+          </Box>
+
+          {/* cells */}
+          {SIGNAL_COLUMNS.map(col => {
+            const raw = ((seg[col.key] as number | undefined) ?? 0)
+            const hasData = (seg[col.key] as number | undefined) !== undefined
+            const displayScore = col.invert ? 100 - raw : raw
+            const color = hasData ? scoreToColor(displayScore) : 'rgba(128,128,128,0.15)'
+            return (
+              <Box
+                key={col.key as string}
+                title={hasData ? `${seg.label} · ${col.label}: ${Math.round(raw)}/100` : `${seg.label} · ${col.label}: no data (re-run analysis)`}
+                sx={{
+                  width: CELL_W,
+                  height: CELL_H,
+                  flexShrink: 0,
+                  bgcolor: color,
+                  borderRadius: '3px',
+                  mx: '1px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'default',
+                  transition: 'filter 0.15s',
+                  '&:hover': { filter: 'brightness(1.2)' },
+                }}
+              >
+                <Typography
+                  variant="caption"
+                  sx={{ color: hasData ? '#fff' : 'text.disabled', fontSize: '0.6rem', fontWeight: 600, lineHeight: 1 }}
+                >
+                  {hasData ? Math.round(raw) : '—'}
+                </Typography>
+              </Box>
+            )
+          })}
+        </Box>
+      ))}
+
+      {/* legend */}
+      <Stack direction="row" spacing={2} sx={{ mt: 1 }}>
+        <LegendSwatch color="hsl(0,70%,45%)" label="Low" />
+        <LegendSwatch color="hsl(60,70%,45%)" label="Mid" />
+        <LegendSwatch color="hsl(120,70%,45%)" label="High" />
+        <Typography color="text.secondary" variant="caption" sx={{ ml: 1, alignSelf: 'center' }}>
+          * Cognitive Load is inverted (high = bad)
+        </Typography>
+      </Stack>
+    </Box>
   )
 }
 
@@ -5609,7 +6076,20 @@ function canExtractVideoFrames(mimeType: string | null | undefined) {
   }
 
   const resolvedMimeType = mimeType || 'video/mp4'
-  return probe.canPlayType(resolvedMimeType) !== ''
+  if (probe.canPlayType(resolvedMimeType) !== '') {
+    return true
+  }
+
+  if (!resolvedMimeType.includes('/')) {
+    return false
+  }
+
+  const [mediaType] = resolvedMimeType.split('/', 1)
+  if (mediaType !== 'video') {
+    return false
+  }
+
+  return probe.canPlayType('video/mp4') !== ''
 }
 
 async function generateFrameThumbnailMap({
@@ -5632,9 +6112,11 @@ async function generateFrameThumbnailMap({
   video.muted = true
   video.playsInline = true
   video.src = objectUrl
+  video.load()
 
   try {
     await waitForVideoEvent(video, 'loadedmetadata', signal)
+    await waitForVideoEvent(video, 'loadeddata', signal)
 
     const previewWidth = 320
     const aspectRatioValue =
@@ -5696,14 +6178,14 @@ function resolveThumbnailSeekTime({
 
 function waitForVideoEvent(
   video: HTMLVideoElement,
-  eventName: 'loadedmetadata' | 'seeked',
+  eventName: 'loadedmetadata' | 'loadeddata' | 'seeked',
   signal: AbortSignal,
 ) {
   return new Promise<void>((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
       cleanup()
       reject(new Error(`Timed out while waiting for video event: ${eventName}.`))
-    }, 4000)
+    }, 10000)
 
     const cleanup = () => {
       window.clearTimeout(timeoutId)
@@ -6148,6 +6630,18 @@ function normalizeAnalysisProgressState(
   }
 }
 
+function areAnalysisJobsEqual(current: AnalysisJob | null, next: AnalysisJob | null) {
+  return JSON.stringify(current) === JSON.stringify(next)
+}
+
+function areAnalysisResultsEqual(current: AnalysisResult | null, next: AnalysisResult | null) {
+  return JSON.stringify(current) === JSON.stringify(next)
+}
+
+function areAnalysisProgressStatesEqual(current: AnalysisProgressState | null, next: AnalysisProgressState | null) {
+  return JSON.stringify(current) === JSON.stringify(next)
+}
+
 function readableProgressStage(value: string | null | undefined) {
   if (!value) {
     return 'Pending'
@@ -6163,6 +6657,7 @@ function readableProgressStage(value: string | null | undefined) {
     asset_resolved: 'Asset resolved',
     inference_started: 'Inference started',
     scene_extraction_ready: 'Scene extraction ready',
+    scoring_queued: 'Primary scoring queued',
     primary_scoring_started: 'Primary scoring started',
     primary_scoring_ready: 'Primary scoring ready',
     postprocessing_started: 'Post-processing started',

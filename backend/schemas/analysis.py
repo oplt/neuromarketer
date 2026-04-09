@@ -211,8 +211,19 @@ class AnalysisSegmentRowRead(BaseModel):
     label: str
     start_time_ms: int
     end_time_ms: int
+    # LLM-evaluated scores
     attention_score: float
+    memory_proxy: float = 0.0
+    emotion_score: float = 0.0
+    cognitive_load: float = 0.0
+    conversion_proxy: float = 0.0
+    # TRIBE-direct signals
+    engagement_score: float = 0.0
     engagement_delta: float
+    peak_focus: float = 0.0
+    temporal_change: float = 0.0
+    consistency: float = 0.0
+    hemisphere_balance: float = 0.0
     note: str
 
 

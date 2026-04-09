@@ -249,7 +249,7 @@ def log_event(
     level: str = "info",
     **fields: Any,
 ) -> None:
-    getattr(logger, level)(event, **normalize_log_fields(fields))
+    getattr(logger, level)(event, extra=normalize_log_fields(fields))
 
 
 def log_exception(

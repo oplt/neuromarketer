@@ -392,24 +392,28 @@ async def stream_analysis_job_events(
         subscription = await open_analysis_job_subscription(job_id)
         last_snapshot_json: str | None = None
         heartbeat_elapsed = 0.0
+        last_snapshot_refresh_at = 0.0
 
         try:
             initial_snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
-            initial_payload = initial_snapshot.model_dump(mode="json")
-            last_snapshot_json = json.dumps(initial_payload, sort_keys=True)
-            yield _encode_sse_event(event="status", data=initial_payload)
+            current_payload = initial_snapshot.model_dump(mode="json")
+            last_snapshot_json = json.dumps(current_payload, sort_keys=True)
+            last_snapshot_refresh_at = asyncio.get_running_loop().time()
+            yield _encode_sse_event(event="status", data=current_payload)
 
             if initial_snapshot.job.status in {"completed", "failed"}:
-                yield _encode_sse_event(event="done", data=initial_payload)
+                yield _encode_sse_event(event="done", data=current_payload)
                 return
 
             while True:
                 if await request.is_disconnected():
                     break
 
+                should_refresh_snapshot = False
                 if subscription is None:
                     await asyncio.sleep(1.0)
                     heartbeat_elapsed += 1.0
+                    should_refresh_snapshot = heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
                     if heartbeat_elapsed >= 15.0:
                         yield _encode_sse_event(
                             event="heartbeat",
@@ -424,6 +428,7 @@ async def stream_analysis_job_events(
                     )
                     if message is None:
                         heartbeat_elapsed += 10.0
+                        should_refresh_snapshot = heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
                         if heartbeat_elapsed >= 15.0:
                             yield _encode_sse_event(
                                 event="heartbeat",
@@ -440,41 +445,58 @@ async def stream_analysis_job_events(
                             or progress_payload.get("diagnostics")
                         ):
                             progress_payload = decoded_message.get("payload") or {}
-                            snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+                            current_job = dict(current_payload.get("job") or {})
+                            current_job["status"] = progress_payload.get("status") or current_job.get("status") or "processing"
+                            current_payload["job"] = current_job
+                            current_payload["progress"] = {
+                                "stage": progress_payload.get("stage"),
+                                "stage_label": progress_payload.get("stage_label"),
+                                "diagnostics": progress_payload.get("diagnostics") or {},
+                                "is_partial": bool(
+                                    progress_payload.get("is_partial") or progress_payload.get("partial_result")
+                                ),
+                            }
                             yield _encode_sse_event(
                                 event="progress",
                                 data={
-                                    "job": snapshot.job.model_dump(mode="json"),
-                                    "asset": snapshot.asset.model_dump(mode="json") if snapshot.asset is not None else None,
+                                    "job": current_payload.get("job"),
+                                    "asset": current_payload.get("asset"),
                                     "result": progress_payload.get("partial_result"),
                                     "stage": progress_payload.get("stage")
-                                    or (snapshot.progress.stage if snapshot.progress is not None else None),
+                                    or ((current_payload.get("progress") or {}).get("stage")),
                                     "stage_label": progress_payload.get("stage_label")
-                                    or (snapshot.progress.stage_label if snapshot.progress is not None else None),
+                                    or ((current_payload.get("progress") or {}).get("stage_label")),
                                     "diagnostics": progress_payload.get("diagnostics")
-                                    or (
-                                        snapshot.progress.diagnostics.model_dump(mode="json")
-                                        if snapshot.progress is not None
-                                        else {}
-                                    ),
+                                    or ((current_payload.get("progress") or {}).get("diagnostics") or {}),
                                     "is_partial": bool(
                                         progress_payload.get("is_partial")
                                         or progress_payload.get("partial_result")
-                                        or (snapshot.progress.is_partial if snapshot.progress is not None else False)
+                                        or ((current_payload.get("progress") or {}).get("is_partial"))
                                     ),
                                 },
                             )
+                        elif decoded_message is not None and decoded_message.get("event_type") in {
+                            "job_completed",
+                            "job_failed",
+                        }:
+                            should_refresh_snapshot = True
 
-                snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
-                payload = snapshot.model_dump(mode="json")
-                snapshot_json = json.dumps(payload, sort_keys=True)
-                if snapshot_json != last_snapshot_json:
-                    yield _encode_sse_event(event="status", data=payload)
-                    last_snapshot_json = snapshot_json
+                loop_time = asyncio.get_running_loop().time()
+                if should_refresh_snapshot or (
+                    loop_time - last_snapshot_refresh_at >= settings.analysis_progress_snapshot_refresh_seconds
+                ):
+                    snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+                    payload = snapshot.model_dump(mode="json")
+                    snapshot_json = json.dumps(payload, sort_keys=True)
+                    current_payload = payload
+                    last_snapshot_refresh_at = loop_time
+                    if snapshot_json != last_snapshot_json:
+                        yield _encode_sse_event(event="status", data=payload)
+                        last_snapshot_json = snapshot_json
 
-                if snapshot.job.status in {"completed", "failed"}:
-                    yield _encode_sse_event(event="done", data=payload)
-                    break
+                    if snapshot.job.status in {"completed", "failed"}:
+                        yield _encode_sse_event(event="done", data=payload)
+                        break
         finally:
             await close_analysis_job_subscription(subscription)
 

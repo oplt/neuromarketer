@@ -125,14 +125,25 @@ class Settings(BaseSettings):
         default="redis://localhost:6379/1",
         validation_alias="CELERY_RESULT_BACKEND",
     )
+    celery_inference_queue: str = Field(default="analysis-inference", validation_alias="CELERY_INFERENCE_QUEUE")
+    celery_scoring_queue: str = Field(default="analysis-scoring", validation_alias="CELERY_SCORING_QUEUE")
+    celery_worker_role: str = Field(default="default", validation_alias="CELERY_WORKER_ROLE")
     celery_soft_time_limit_seconds: int = Field(default=900, validation_alias="CELERY_SOFT_TIME_LIMIT_SECONDS")
     celery_time_limit_seconds: int = Field(default=1200, validation_alias="CELERY_TIME_LIMIT_SECONDS")
     celery_job_stale_after_seconds: int = Field(default=1800, validation_alias="CELERY_JOB_STALE_AFTER_SECONDS")
+    analysis_progress_snapshot_refresh_seconds: float = Field(
+        default=5.0,
+        validation_alias="ANALYSIS_PROGRESS_SNAPSHOT_REFRESH_SECONDS",
+    )
 
     tribe_model_repo_id: str = Field(default="facebook/tribev2", validation_alias="TRIBE_MODEL_REPO_ID")
     tribe_checkpoint_name: str = Field(default="best.ckpt", validation_alias="TRIBE_CHECKPOINT_NAME")
     tribe_cache_folder: str = Field(default="./cache/tribev2", validation_alias="TRIBE_CACHE_FOLDER")
     asset_cache_folder: str = Field(default="./cache/assets", validation_alias="ASSET_CACHE_FOLDER")
+    tribe_runtime_output_cache_folder: str = Field(
+        default="./cache/tribev2/runtime-output",
+        validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_FOLDER",
+    )
     tribe_device: str = Field(default="auto", validation_alias="TRIBE_DEVICE")
     tribe_text_feature_model_name: str = Field(
         default="microsoft/Phi-3-mini-4k-instruct",
@@ -156,6 +167,22 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="TRIBE_VALIDATE_BINARIES_ON_WORKER_STARTUP",
     )
+    tribe_runtime_output_cache_enabled: bool = Field(
+        default=True,
+        validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_ENABLED",
+    )
+    tribe_runtime_output_cache_max_bytes: int = Field(
+        default=5 * 1024 * 1024 * 1024,
+        validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_MAX_BYTES",
+    )
+    tribe_runtime_output_cache_max_age_hours: int = Field(
+        default=24 * 7,
+        validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_MAX_AGE_HOURS",
+    )
+    tribe_runtime_output_cache_cleanup_interval_minutes: int = Field(
+        default=15,
+        validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_CLEANUP_INTERVAL_MINUTES",
+    )
     tribe_enable_roi_summary: bool = Field(default=False, validation_alias="TRIBE_ENABLE_ROI_SUMMARY")
 
     llm_provider: Literal["ollama", "openai_compatible", "vllm", "lm_studio"] = Field(
@@ -166,7 +193,11 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gemma3:27b", validation_alias="LLM_MODEL")
     llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
     llm_timeout_seconds: int = Field(default=120, validation_alias="LLM_TIMEOUT_SECONDS")
-    llm_max_tokens: int = Field(default=2_000, validation_alias="LLM_MAX_TOKENS")
+    llm_max_tokens: int = Field(default=1400, validation_alias="LLM_MAX_TOKENS")
+    llm_analysis_scoring_max_tokens: int = Field(
+        default=1400,
+        validation_alias="LLM_ANALYSIS_SCORING_MAX_TOKENS",
+    )
     llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
     llm_top_p: float = Field(default=0.9, validation_alias="LLM_TOP_P")
     llm_ollama_think: bool = Field(default=False, validation_alias="LLM_OLLAMA_THINK")

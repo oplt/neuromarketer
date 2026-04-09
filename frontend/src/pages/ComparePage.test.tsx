@@ -390,7 +390,12 @@ describe('ComparePage', () => {
       expect(screen.getByText('Saved comparisons')).toBeTruthy()
     })
 
+    await waitFor(() => {
+      expect(
+        mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/comparisons?limit=12'),
+      ).toHaveLength(1)
+    })
+
     expect(mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/jobs?limit=24')).toHaveLength(1)
-    expect(mockedApiRequest.mock.calls.filter(([path]) => path === '/api/v1/analysis/comparisons?limit=12')).toHaveLength(1)
   })
 })

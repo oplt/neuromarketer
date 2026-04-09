@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from celery import Celery
+from kombu import Queue
 from celery.signals import (
     after_setup_logger,
     after_setup_task_logger,
@@ -16,6 +17,7 @@ from celery.signals import (
 from backend.core.config import settings
 from backend.core.log_context import bind_celery_task_context, build_celery_task_headers, clear_log_context
 from backend.core.logging import configure_logging
+from backend.core.logging import log_event
 from backend.services.tribe_runtime import get_shared_tribe_runtime
 
 configure_logging()
@@ -39,6 +41,16 @@ celery_app.conf.update(
     task_soft_time_limit=settings.celery_soft_time_limit_seconds,
     task_time_limit=settings.celery_time_limit_seconds,
     worker_hijack_root_logger=False,
+    task_default_queue=settings.celery_inference_queue,
+    task_queues=(
+        Queue(settings.celery_inference_queue),
+        Queue(settings.celery_scoring_queue),
+    ),
+    task_routes={
+        "tasks.process_prediction_job": {"queue": settings.celery_inference_queue},
+        "tasks.process_prediction_scoring": {"queue": settings.celery_scoring_queue},
+        "tasks.process_llm_evaluation": {"queue": settings.celery_scoring_queue},
+    },
 )
 
 @setup_logging.connect
@@ -93,8 +105,30 @@ def clear_task_logging_context(**_: object) -> None:
 
 @worker_process_init.connect
 def preload_tribe_runtime(**_: object) -> None:
+    runtime = get_shared_tribe_runtime()
+    requested_device = runtime.get_requested_device()
+    log_event(
+        logging.getLogger(__name__),
+        "celery_worker_initialized",
+        worker_role=settings.celery_worker_role,
+        inference_queue=settings.celery_inference_queue,
+        scoring_queue=settings.celery_scoring_queue,
+        tribe_requested_device=requested_device,
+        tribe_cache_folder=str(runtime.cache_folder),
+        tribe_runtime_output_cache_enabled=settings.tribe_runtime_output_cache_enabled,
+        tribe_runtime_output_cache_folder=settings.tribe_runtime_output_cache_folder,
+        tribe_preload_on_worker_startup=settings.tribe_preload_on_worker_startup,
+        status="ready",
+    )
     if not settings.tribe_preload_on_worker_startup:
         return
 
-    runtime = get_shared_tribe_runtime()
     runtime.load()
+    log_event(
+        logging.getLogger(__name__),
+        "celery_worker_runtime_preloaded",
+        worker_role=settings.celery_worker_role,
+        tribe_requested_device=requested_device,
+        tribe_resolved_device=runtime.get_resolved_device(),
+        status="loaded",
+    )

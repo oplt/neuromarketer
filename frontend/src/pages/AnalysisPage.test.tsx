@@ -731,6 +731,177 @@ describe('AnalysisPage', () => {
     })
   })
 
+  it('renders frame thumbnails when the fetched blob is playable even if the asset mime type is not', async () => {
+    const item = buildHistoryItem({
+      jobId: 'job-preview',
+      assetId: 'asset-preview',
+      filename: 'preview.mov',
+      objective: 'Assess the launch hook',
+      goalTemplate: 'paid_social_hook',
+      channel: 'meta_feed',
+      audienceSegment: 'Returning customers',
+    })
+    item.asset.mime_type = 'video/quicktime'
+    const result = buildResult('job-preview', 41, 'Preview recommendation')
+
+    const originalCreateElement = document.createElement.bind(document)
+    const originalCreateObjectURL = window.URL.createObjectURL
+    const originalRevokeObjectURL = window.URL.revokeObjectURL
+    if (typeof window.URL.createObjectURL !== 'function') {
+      Object.defineProperty(window.URL, 'createObjectURL', {
+        configurable: true,
+        value: () => 'blob:placeholder',
+      })
+    }
+    if (typeof window.URL.revokeObjectURL !== 'function') {
+      Object.defineProperty(window.URL, 'revokeObjectURL', {
+        configurable: true,
+        value: () => {},
+      })
+    }
+    const createObjectURLSpy = vi.spyOn(window.URL, 'createObjectURL').mockReturnValue('blob:preview')
+    const revokeObjectURLSpy = vi.spyOn(window.URL, 'revokeObjectURL').mockImplementation(() => {})
+    const createElementSpy = vi.spyOn(document, 'createElement').mockImplementation(((tagName: string, options?: ElementCreationOptions) => {
+      const element = originalCreateElement(tagName, options)
+
+      if (tagName === 'video') {
+        const video = element as HTMLVideoElement
+        Object.defineProperty(video, 'canPlayType', {
+          configurable: true,
+          value: (mimeType: string) => (mimeType === 'video/mp4' ? 'probably' : ''),
+        })
+        Object.defineProperty(video, 'videoWidth', { configurable: true, value: 1280 })
+        Object.defineProperty(video, 'videoHeight', { configurable: true, value: 720 })
+        Object.defineProperty(video, 'duration', { configurable: true, value: 12 })
+        Object.defineProperty(video, 'load', {
+          configurable: true,
+          value: () => {
+            window.setTimeout(() => {
+              video.dispatchEvent(new Event('loadedmetadata'))
+            }, 0)
+            window.setTimeout(() => {
+              video.dispatchEvent(new Event('loadeddata'))
+            }, 1)
+          },
+        })
+        Object.defineProperty(video, 'currentTime', {
+          configurable: true,
+          get: () => 0,
+          set: () => {
+            window.setTimeout(() => {
+              video.dispatchEvent(new Event('seeked'))
+            }, 0)
+          },
+        })
+      }
+
+      if (tagName === 'canvas') {
+        const canvas = element as HTMLCanvasElement
+        Object.defineProperty(canvas, 'getContext', {
+          configurable: true,
+          value: () => ({
+            drawImage: vi.fn(),
+          }),
+        })
+        Object.defineProperty(canvas, 'toDataURL', {
+          configurable: true,
+          value: () => 'data:image/jpeg;base64,preview',
+        })
+      }
+
+      return element
+    }) as typeof document.createElement)
+
+    mockedApiFetch.mockImplementation(async () => {
+      const body = new Uint8Array([0, 1, 2, 3])
+      return {
+        blob: async () => new Blob([body], { type: 'video/mp4' }),
+      } as Response
+    })
+
+    mockedApiRequest.mockImplementation(async (path) => {
+      const collaborationResponse = maybeHandleCollaborationRequest(path)
+      if (collaborationResponse !== undefined) {
+        return collaborationResponse
+      }
+      if (path === '/api/v1/analysis/config') {
+        return mockConfig()
+      }
+      if (path === '/api/v1/analysis/goal-presets') {
+        return mockGoalPresets()
+      }
+      if (path === '/api/v1/analysis/events') {
+        return { status: 'accepted' }
+      }
+      if (path === '/api/v1/analysis/assets?media_type=video&limit=12') {
+        return { items: [] }
+      }
+      if (path === '/api/v1/analysis/jobs?media_type=video&limit=12') {
+        return { items: [item] }
+      }
+      if (path === '/api/v1/analysis/jobs/job-preview') {
+        return buildJobStatus(item, result)
+      }
+      if (path === '/api/v1/analysis/jobs/job-preview/benchmarks') {
+        return mockBenchmarkResponse('job-preview')
+      }
+      if (path === '/api/v1/analysis/jobs/job-preview/verdict') {
+        return mockVerdictResponse('job-preview')
+      }
+      if (path === '/api/v1/analysis/jobs/job-preview/calibration') {
+        return mockCalibrationResponse('job-preview')
+      }
+      if (path === '/api/v1/analysis/jobs/job-preview/variants') {
+        return { job_id: 'job-preview', items: [] }
+      }
+      throw new Error(`Unexpected path ${path}`)
+    })
+
+    try {
+      render(<AnalysisPage session={session} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('open-analysis-history')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByTestId('open-analysis-history'))
+
+      await waitFor(() => {
+        expect(screen.getByTestId('analysis-history-item-job-preview')).toBeTruthy()
+      })
+
+      fireEvent.click(screen.getByTestId('analysis-history-item-job-preview'))
+
+      await waitFor(() => {
+        expect(within(screen.getByTestId('frame-breakdown-card-0')).getByAltText('Frame 1 preview')).toBeTruthy()
+      })
+
+      expect(screen.queryByText('Preview unavailable')).toBeNull()
+      expect(createObjectURLSpy).toHaveBeenCalled()
+      expect(revokeObjectURLSpy).toHaveBeenCalled()
+    } finally {
+      createElementSpy.mockRestore()
+      createObjectURLSpy.mockRestore()
+      revokeObjectURLSpy.mockRestore()
+      if (originalCreateObjectURL) {
+        Object.defineProperty(window.URL, 'createObjectURL', {
+          configurable: true,
+          value: originalCreateObjectURL,
+        })
+      } else {
+        Reflect.deleteProperty(window.URL as typeof window.URL & { createObjectURL?: unknown }, 'createObjectURL')
+      }
+      if (originalRevokeObjectURL) {
+        Object.defineProperty(window.URL, 'revokeObjectURL', {
+          configurable: true,
+          value: originalRevokeObjectURL,
+        })
+      } else {
+        Reflect.deleteProperty(window.URL as typeof window.URL & { revokeObjectURL?: unknown }, 'revokeObjectURL')
+      }
+    }
+  })
+
   it('loads completed insights once when selecting a recent analysis', async () => {
     const alphaItem = buildHistoryItem({
       jobId: 'job-alpha',

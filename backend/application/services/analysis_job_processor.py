@@ -20,6 +20,15 @@ from backend.services.scoring import NeuroScoringService
 from backend.services.tribe_inference_service import TribeInferenceService
 
 logger = get_logger(__name__)
+PERSISTED_PROGRESS_STAGES = frozenset(
+    {
+        "worker_started",
+        "scene_extraction_ready",
+        "primary_scoring_ready",
+        "recommendations_ready",
+        "completed",
+    }
+)
 
 
 class AnalysisJobProcessor:
@@ -40,6 +49,7 @@ class AnalysisJobProcessor:
         diagnostics: dict[str, int | None] | None = None,
         is_partial: bool | None = None,
         replace_diagnostics: bool = False,
+        persist: bool = False,
     ) -> dict[str, Any]:
         runtime_params = dict(job.runtime_params or {})
         current_progress = dict(runtime_params.get("analysis_progress") or {})
@@ -59,7 +69,8 @@ class AnalysisJobProcessor:
             next_progress["is_partial"] = is_partial
         runtime_params["analysis_progress"] = next_progress
         job.runtime_params = runtime_params
-        await self.session.flush()
+        if persist:
+            await self.session.flush()
         return next_progress
 
     async def _publish_progress_event(
@@ -85,10 +96,64 @@ class AnalysisJobProcessor:
             },
         )
 
+    async def _record_progress(
+        self,
+        *,
+        job,
+        stage: str,
+        stage_label: str,
+        diagnostics: dict[str, int | None] | None = None,
+        partial_result: dict[str, Any] | None = None,
+        is_partial: bool = False,
+        replace_diagnostics: bool = False,
+    ) -> dict[str, Any]:
+        persist = stage in PERSISTED_PROGRESS_STAGES
+        progress = await self._store_progress(
+            job=job,
+            stage=stage,
+            stage_label=stage_label,
+            diagnostics=diagnostics,
+            is_partial=is_partial,
+            replace_diagnostics=replace_diagnostics,
+            persist=persist,
+        )
+        if persist:
+            await self.session.commit()
+        await self._publish_progress_event(
+            job_id=job.id,
+            stage=stage,
+            stage_label=stage_label,
+            diagnostics=progress["diagnostics"],
+            partial_result=partial_result,
+            is_partial=is_partial,
+        )
+        return progress
+
+    def _current_progress_diagnostics(self, job) -> dict[str, int | None]:
+        runtime_params = dict(job.runtime_params or {})
+        progress = runtime_params.get("analysis_progress")
+        progress_payload = progress if isinstance(progress, dict) else {}
+        diagnostics = progress_payload.get("diagnostics")
+        return diagnostics if isinstance(diagnostics, dict) else {}
+
+    def _elapsed_since_job_started_ms(self, job) -> int | None:
+        if job.started_at is None:
+            return None
+        return max(0, int((datetime.now(timezone.utc) - job.started_at).total_seconds() * 1000))
+
+    def _runtime_output_from_prediction(self, prediction) -> Any:
+        return self.tribe_inference.runtime_output_from_prediction(prediction)
+
     async def process(self, job_id: UUID) -> None:
+        acquisition_started_at = time.perf_counter()
         job = await self.inference.acquire_job(
             job_id,
             stale_after_seconds=settings.celery_job_stale_after_seconds,
+        )
+        metrics.observe(
+            "prediction_job_acquire_seconds",
+            time.perf_counter() - acquisition_started_at,
+            labels={"status": "acquired" if job is not None else "skipped"},
         )
         if job is None:
             log_event(logger, "prediction_job_skipped", job_id=str(job_id), status="skipped")
@@ -122,7 +187,7 @@ class AnalysisJobProcessor:
                 queue_wait_ms=queue_wait_ms,
                 status="running",
             )
-            worker_started_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="worker_started",
                 stage_label="Worker acquired the job and is loading creative inputs.",
@@ -133,16 +198,8 @@ class AnalysisJobProcessor:
                 is_partial=False,
                 replace_diagnostics=True,
             )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="worker_started",
-                stage_label="Worker acquired the job and is loading creative inputs.",
-                diagnostics=worker_started_progress["diagnostics"],
-                is_partial=False,
-            )
 
-            asset_resolved_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="asset_resolved",
                 stage_label="Creative metadata is resolved. Preparing the inference payload now.",
@@ -150,17 +207,10 @@ class AnalysisJobProcessor:
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
                 },
-            )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="asset_resolved",
-                stage_label="Creative metadata is resolved. Preparing the inference payload now.",
-                diagnostics=asset_resolved_progress["diagnostics"],
                 is_partial=False,
             )
 
-            inference_started_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="inference_started",
                 stage_label="Inference has started. The worker is extracting events from the uploaded asset.",
@@ -168,13 +218,6 @@ class AnalysisJobProcessor:
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
                 },
-            )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="inference_started",
-                stage_label="Inference has started. The worker is extracting events from the uploaded asset.",
-                diagnostics=inference_started_progress["diagnostics"],
                 is_partial=False,
             )
 
@@ -193,6 +236,11 @@ class AnalysisJobProcessor:
                 duration_ms=duration_ms(inference_started_at, inference_finished_at),
                 status="succeeded",
             )
+            metrics.observe(
+                "prediction_job_stage_seconds",
+                inference_finished_at - inference_started_at,
+                labels={"stage": "tribe_inference", "modality": execution.modality},
+            )
 
             scene_payload = self.postprocessor.build_scene_extraction_payload(
                 runtime_output=execution.runtime_output,
@@ -209,7 +257,7 @@ class AnalysisJobProcessor:
                 job_id=job.id,
                 dashboard_payload=scene_payload,
             )
-            scene_extraction_ready_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="scene_extraction_ready",
                 stage_label="Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.",
@@ -218,66 +266,123 @@ class AnalysisJobProcessor:
                     "processing_duration_ms": duration_ms(total_started_at, scene_extraction_finished_at),
                     "time_to_first_result_ms": first_result_time_ms,
                 },
-                is_partial=True,
-            )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="scene_extraction_ready",
-                stage_label="Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.",
-                diagnostics=scene_extraction_ready_progress["diagnostics"],
                 partial_result=scene_extraction_snapshot,
                 is_partial=True,
             )
 
-            primary_scoring_started_progress = await self._store_progress(
+            await self.inference.store_prediction_handoff(
                 job=job,
-                stage="primary_scoring_started",
-                stage_label="Primary scoring has started. Core analysis metrics are being evaluated from the TRIBE-derived context.",
+                runtime_output=execution.runtime_output,
+                model_name=self.tribe_inference.runtime.model_name,
+            )
+            await self.inference.mark_job_scoring_queued(job)
+            await self._record_progress(
+                job=job,
+                stage="scoring_queued",
+                stage_label="TRIBE inference is complete. Primary scoring has been queued on scoring workers.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": duration_ms(total_started_at, time.perf_counter()),
                     "time_to_first_result_ms": first_result_time_ms,
                 },
+                partial_result=scene_extraction_snapshot,
                 is_partial=True,
             )
             await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
+            from backend.tasks import dispatch_prediction_scoring_job
+
+            dispatch_mode = await dispatch_prediction_scoring_job(job.id)
+            log_event(
+                logger,
+                "prediction_scoring_queued",
+                job_id=str(job.id),
+                modality=execution.modality,
+                dispatch_mode=dispatch_mode,
+                status="queued",
+            )
+            return
+
+    async def process_scoring(self, job_id: UUID) -> None:
+        acquisition_started_at = time.perf_counter()
+        job = await self.inference.acquire_scoring_job(
+            job_id,
+            stale_after_seconds=settings.celery_job_stale_after_seconds,
+        )
+        metrics.observe(
+            "prediction_job_acquire_seconds",
+            time.perf_counter() - acquisition_started_at,
+            labels={"status": "acquired" if job is not None else "skipped", "phase": "scoring"},
+        )
+        if job is None:
+            log_event(logger, "prediction_scoring_job_skipped", job_id=str(job_id), status="skipped")
+            return
+
+        with bound_log_context(
+            job_id=str(job.id),
+            project_id=str(job.project_id),
+            creative_id=str(job.creative_id),
+            creative_version_id=str(job.creative_version_id),
+        ):
+            creative_version = await self.creatives.get_creative_version(job.creative_version_id)
+            if creative_version is None:
+                raise NotFoundAppError("Creative version not found.")
+
+            prediction = job.prediction
+            if prediction is None:
+                raise NotFoundAppError("Prediction handoff not found.")
+
+            modality = self.tribe_inference.resolve_modality(creative_version)
+            campaign_context = (job.request_payload or {}).get("campaign_context") or {}
+            objective = campaign_context.get("objective")
+            queue_wait_ms = self._current_progress_diagnostics(job).get("queue_wait_ms")
+            first_result_time_ms = self._current_progress_diagnostics(job).get("time_to_first_result_ms")
+            runtime_output = self._runtime_output_from_prediction(prediction)
+            source_label = self.tribe_inference.resolve_source_label(creative_version=creative_version)
+
+            await self._record_progress(
+                job=job,
                 stage="primary_scoring_started",
                 stage_label="Primary scoring has started. Core analysis metrics are being evaluated from the TRIBE-derived context.",
-                diagnostics=primary_scoring_started_progress["diagnostics"],
-                partial_result=scene_extraction_snapshot,
+                diagnostics={
+                    "queue_wait_ms": queue_wait_ms,
+                    "processing_duration_ms": self._elapsed_since_job_started_ms(job),
+                    "time_to_first_result_ms": first_result_time_ms,
+                },
                 is_partial=True,
             )
 
             scoring_started_at = time.perf_counter()
             scoring_bundle = await self.scoring.score(
-                reduced_feature_vector=execution.runtime_output.reduced_feature_vector,
-                region_activation_summary=execution.runtime_output.region_activation_summary,
+                reduced_feature_vector=runtime_output.reduced_feature_vector,
+                region_activation_summary=runtime_output.region_activation_summary,
                 context=job.request_payload or {},
-                modality=execution.modality,
+                modality=modality,
             )
             scoring_finished_at = time.perf_counter()
             log_event(
                 logger,
                 "prediction_scoring_finished",
                 job_id=str(job.id),
-                modality=execution.modality,
+                modality=modality,
                 duration_ms=duration_ms(scoring_started_at, scoring_finished_at),
                 status="succeeded",
+            )
+            metrics.observe(
+                "prediction_job_stage_seconds",
+                scoring_finished_at - scoring_started_at,
+                labels={"stage": "llm_scoring", "modality": modality},
             )
 
             preview_started_at = time.perf_counter()
             preview_payload = self.postprocessor.build_dashboard_payload(
-                runtime_output=execution.runtime_output,
+                runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
-                modality=execution.modality,
+                modality=modality,
                 objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
                 goal_template=normalize_goal_template(campaign_context.get("goal_template")),
                 channel=normalize_analysis_channel(campaign_context.get("channel")),
                 audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
-                source_label=execution.source_label,
+                source_label=source_label,
                 include_recommendations=False,
             )
             preview_finished_at = time.perf_counter()
@@ -285,9 +390,9 @@ class AnalysisJobProcessor:
                 logger,
                 "prediction_preview_ready",
                 job_id=str(job.id),
-                modality=execution.modality,
+                modality=modality,
                 time_to_first_result_ms=first_result_time_ms,
-                time_to_first_scored_result_ms=(queue_wait_ms or 0) + duration_ms(total_started_at, preview_finished_at),
+                time_to_first_scored_result_ms=(queue_wait_ms or 0) + (self._elapsed_since_job_started_ms(job) or 0),
                 duration_ms=duration_ms(preview_started_at, preview_finished_at),
                 timeline_points=len(preview_payload.timeline_json),
                 segment_rows=len(preview_payload.segments_json),
@@ -297,83 +402,58 @@ class AnalysisJobProcessor:
                 job_id=job.id,
                 dashboard_payload=preview_payload,
             )
-            primary_scoring_ready_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="primary_scoring_ready",
                 stage_label="Primary scoring is complete. Provisional metrics and charts are ready while recommendations are still pending.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
-                    "processing_duration_ms": duration_ms(total_started_at, preview_finished_at),
+                    "processing_duration_ms": self._elapsed_since_job_started_ms(job),
                     "time_to_first_result_ms": first_result_time_ms,
                 },
-                is_partial=True,
-            )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="primary_scoring_ready",
-                stage_label="Primary scoring is complete. Provisional metrics and charts are ready while recommendations are still pending.",
-                diagnostics=primary_scoring_ready_progress["diagnostics"],
                 partial_result=preview_snapshot,
                 is_partial=True,
             )
 
-            postprocessing_started_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="postprocessing_started",
                 stage_label="Post-processing has started. The dashboard is composing the scored timeline and recommendations.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
-                    "processing_duration_ms": duration_ms(total_started_at, preview_finished_at),
+                    "processing_duration_ms": self._elapsed_since_job_started_ms(job),
                     "time_to_first_result_ms": first_result_time_ms,
                 },
-                is_partial=True,
-            )
-            await self.session.commit()
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="postprocessing_started",
-                stage_label="Post-processing has started. The dashboard is composing the scored timeline and recommendations.",
-                diagnostics=postprocessing_started_progress["diagnostics"],
                 partial_result=preview_snapshot,
                 is_partial=True,
             )
 
             postprocess_started_at = time.perf_counter()
             dashboard_payload = self.postprocessor.build_dashboard_payload(
-                runtime_output=execution.runtime_output,
+                runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
-                modality=execution.modality,
+                modality=modality,
                 objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
                 goal_template=normalize_goal_template(campaign_context.get("goal_template")),
                 channel=normalize_analysis_channel(campaign_context.get("channel")),
                 audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
-                source_label=execution.source_label,
+                source_label=source_label,
             )
             postprocess_finished_at = time.perf_counter()
-            recommendations_ready_progress = await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="recommendations_ready",
                 stage_label="Recommendations are ready. Persisting the final dashboard payload now.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
-                    "processing_duration_ms": duration_ms(total_started_at, postprocess_finished_at),
+                    "processing_duration_ms": self._elapsed_since_job_started_ms(job),
                     "time_to_first_result_ms": first_result_time_ms,
                     "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
                 },
-                is_partial=True,
-            )
-            await self.session.commit()
-            final_preview_snapshot = self.postprocessor.build_result_payload(
-                job_id=job.id,
-                dashboard_payload=dashboard_payload,
-            )
-            await self._publish_progress_event(
-                job_id=job.id,
-                stage="recommendations_ready",
-                stage_label="Recommendations are ready. Persisting the final dashboard payload now.",
-                diagnostics=recommendations_ready_progress["diagnostics"],
-                partial_result=final_preview_snapshot,
+                partial_result=self.postprocessor.build_result_payload(
+                    job_id=job.id,
+                    dashboard_payload=dashboard_payload,
+                ),
                 is_partial=True,
             )
 
@@ -382,12 +462,12 @@ class AnalysisJobProcessor:
                 logger,
                 "prediction_persist_started",
                 job_id=str(job.id),
-                modality=execution.modality,
+                modality=modality,
                 status="running",
             )
             prediction_result = await self.inference.replace_prediction_result(
                 job=job,
-                runtime_output=execution.runtime_output,
+                runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
                 model_name=self.tribe_inference.runtime.model_name,
             )
@@ -408,35 +488,40 @@ class AnalysisJobProcessor:
                 logger,
                 "prediction_persist_finished",
                 prediction_result_id=str(prediction_result.id),
-                modality=execution.modality,
+                modality=modality,
                 duration_ms=duration_ms(persistence_started_at, persistence_finished_at),
                 status="succeeded",
             )
+            metrics.observe(
+                "prediction_job_stage_seconds",
+                persistence_finished_at - persistence_started_at,
+                labels={"stage": "persistence", "modality": modality},
+            )
+            total_processing_duration_ms = self._elapsed_since_job_started_ms(job) or 0
             log_event(
                 logger,
                 "prediction_job_succeeded",
                 prediction_result_id=str(prediction_result.id),
-                modality=execution.modality,
-                duration_ms=duration_ms(total_started_at, total_finished_at),
+                modality=modality,
+                duration_ms=total_processing_duration_ms,
                 postprocess_duration_ms=duration_ms(postprocess_started_at, postprocess_finished_at),
-                result_delivery_ms=(queue_wait_ms or 0) + duration_ms(total_started_at, total_finished_at),
+                result_delivery_ms=(queue_wait_ms or 0) + total_processing_duration_ms,
                 status="succeeded",
             )
             metrics.increment("prediction_jobs_total", labels={"status": "succeeded"})
-            await self._store_progress(
+            await self._record_progress(
                 job=job,
                 stage="completed",
                 stage_label="Results are ready and delivery timings are finalized.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
-                    "processing_duration_ms": duration_ms(total_started_at, total_finished_at),
+                    "processing_duration_ms": total_processing_duration_ms,
                     "time_to_first_result_ms": first_result_time_ms,
-                    "result_delivery_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, total_finished_at),
+                    "result_delivery_ms": (queue_wait_ms or 0) + total_processing_duration_ms,
                     "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
                 },
                 is_partial=False,
             )
-            await self.session.commit()
             await publish_analysis_job_event(
                 job_id=job.id,
                 event_type="job_completed",
@@ -446,9 +531,9 @@ class AnalysisJobProcessor:
                     "stage_label": "Results are ready and delivery timings are finalized.",
                     "diagnostics": {
                         "queue_wait_ms": queue_wait_ms,
-                        "processing_duration_ms": duration_ms(total_started_at, total_finished_at),
+                        "processing_duration_ms": total_processing_duration_ms,
                         "time_to_first_result_ms": first_result_time_ms,
-                        "result_delivery_ms": (queue_wait_ms or 0) + duration_ms(total_started_at, total_finished_at),
+                        "result_delivery_ms": (queue_wait_ms or 0) + total_processing_duration_ms,
                         "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
                     },
                 },

@@ -35,8 +35,7 @@ async def require_authenticated_context(
 
     claims = verify_session_token(credentials.credentials)
 
-    # Single JOIN query instead of two separate lookups for user + organization.
-    user, organization = await crud.get_user_and_organization(
+    user, organization, default_project = await crud.get_user_org_and_default_project(
         db,
         user_id=claims.user_id,
         organization_id=claims.organization_id,
@@ -55,11 +54,12 @@ async def require_authenticated_context(
         organization_id=claims.organization_id,
     )
 
-    default_project = await crud.get_or_create_default_project_for_organization(
-        db,
-        organization_id=organization.id,
-        created_by_user_id=user.id,
-    )
+    if default_project is None:
+        default_project = await crud.get_or_create_default_project_for_organization(
+            db,
+            organization_id=organization.id,
+            created_by_user_id=user.id,
+        )
     bind_log_context(
         user_id=str(user.id),
         org_id=str(organization.id),

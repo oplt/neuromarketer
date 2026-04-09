@@ -73,6 +73,7 @@ class AnalysisPostprocessor:
             timeline_rows=timeline_rows,
             segment_features=segment_features,
             scoring_bundle=scoring_bundle,
+            score_map=score_map,
         )
         total_duration_ms = max(
             (
@@ -446,10 +447,16 @@ class AnalysisPostprocessor:
             int(point.timestamp_ms): point
             for point in scoring_bundle.timeline_points
         }
+        # Secondary index by segment_index stored in metadata_json for robust lookup
+        point_by_index: dict[int, Any] = {}
+        for point in scoring_bundle.timeline_points:
+            seg_idx = point.metadata_json.get("segment_index")
+            if seg_idx is not None:
+                point_by_index[int(seg_idx)] = point
         rows: list[dict[str, Any]] = []
         for index, segment in enumerate(segment_features):
             timestamp_ms = int(segment.get("start_ms", index * 1000))
-            scoring_point = point_by_timestamp.get(timestamp_ms)
+            scoring_point = point_by_timestamp.get(timestamp_ms) or point_by_index.get(index)
             engagement_score = round(float(segment.get("engagement_signal", 0.0)) * 100.0, 2)
             point_attention = self._to_float(getattr(scoring_point, "attention_score", None))
             point_memory = self._to_float(getattr(scoring_point, "memory_score", None))
@@ -486,27 +493,44 @@ class AnalysisPostprocessor:
         timeline_rows: list[dict[str, Any]],
         segment_features: list[dict[str, Any]],
         scoring_bundle: ScoringBundle | None = None,
+        score_map: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
+        # Build lookup maps once for O(1) per-segment access
+        _bundle_points = scoring_bundle.timeline_points if scoring_bundle is not None else []
+        _point_by_ts: dict[int, Any] = {int(p.timestamp_ms): p for p in _bundle_points}
+        _point_by_idx: dict[int, Any] = {}
+        for p in _bundle_points:
+            si = p.metadata_json.get("segment_index")
+            if si is not None:
+                _point_by_idx[int(si)] = p
+
         rows: list[dict[str, Any]] = []
         previous_engagement: float | None = None
+        _score_map = score_map or {}
         for index, timeline_row in enumerate(timeline_rows):
             segment = segment_features[index] if index < len(segment_features) else {}
             duration_ms = int(segment.get("duration_ms", 1000))
             engagement_score = float(timeline_row["engagement_score"])
             attention_score = float(timeline_row["attention_score"])
-            scoring_point = next(
-                (
-                    point
-                    for point in (scoring_bundle.timeline_points if scoring_bundle is not None else [])
-                    if int(point.timestamp_ms) == int(timeline_row["timestamp_ms"])
-                ),
-                None,
-            )
+            memory_proxy = float(timeline_row.get("memory_proxy", 0.0))
+            scoring_point = _point_by_ts.get(int(timeline_row["timestamp_ms"])) or _point_by_idx.get(index)
             engagement_delta = round(
                 engagement_score - previous_engagement,
                 2,
             ) if previous_engagement is not None else 0.0
             note = self._build_segment_note(scoring_point=scoring_point)
+
+            # TRIBE-direct per-segment signals (model output, 0–1 → 0–100)
+            peak_focus = round(float(segment.get("peak_focus_signal", 0.0)) * 100.0, 2)
+            temporal_change = round(float(segment.get("temporal_change_signal", 0.0)) * 100.0, 2)
+            consistency = round(float(segment.get("consistency_signal", 0.0)) * 100.0, 2)
+            hemisphere_balance = round(float(segment.get("hemisphere_balance_signal", 0.0)) * 100.0, 2)
+
+            # LLM-evaluated per-segment signals (with global fallback)
+            def _pt(attr: str, fallback_key: str) -> float:
+                val = getattr(scoring_point, attr, None) if scoring_point is not None else None
+                return round(self._to_float(val) if val is not None else _score_map.get(fallback_key, 0.0), 2)
+
             rows.append(
                 {
                     "segment_index": index,
@@ -514,7 +538,16 @@ class AnalysisPostprocessor:
                     "start_time_ms": int(timeline_row["timestamp_ms"]),
                     "end_time_ms": int(timeline_row["timestamp_ms"]) + duration_ms,
                     "attention_score": round(attention_score, 2),
+                    "engagement_score": round(engagement_score, 2),
                     "engagement_delta": engagement_delta,
+                    "memory_proxy": round(memory_proxy, 2),
+                    "emotion_score": _pt("emotion_score", "emotion"),
+                    "cognitive_load": _pt("cognitive_load_score", "cognitive_load"),
+                    "conversion_proxy": _pt("conversion_proxy_score", "conversion_proxy"),
+                    "peak_focus": peak_focus,
+                    "temporal_change": temporal_change,
+                    "consistency": consistency,
+                    "hemisphere_balance": hemisphere_balance,
                     "note": note,
                 }
             )

@@ -11,6 +11,10 @@ from backend.llm.analysis_scoring_service import AnalysisScoringResponse, Analys
 from backend.schemas.llm_scoring import MetricAssessment, TimelineMetricPoint
 
 logger = get_logger(__name__)
+MAX_SCORING_SEGMENTS = 12
+MAX_SCORING_EVENT_TYPES = 4
+MAX_SCORING_TOP_ROIS = 6
+MAX_AUDIENCE_CONTEXT_FIELDS = 8
 
 
 def _decimal(value: float, *, precision: int = 2) -> Decimal:
@@ -33,6 +37,38 @@ def _normalize_notes(values: Iterable[str], *, limit: int = 6) -> list[str]:
         if len(normalized) >= limit:
             break
     return normalized
+
+
+def _round_signal(value: Any, *, precision: int = 4) -> float:
+    try:
+        return round(float(value), precision)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compact_audience_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+
+    compacted: dict[str, Any] = {}
+    for key in sorted(value.keys()):
+        normalized_key = str(key).strip()
+        if not normalized_key:
+            continue
+        raw_value = value.get(key)
+        if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
+            compacted[normalized_key] = raw_value
+        elif isinstance(raw_value, list):
+            scalar_items = [
+                item
+                for item in raw_value
+                if isinstance(item, (str, int, float, bool))
+            ]
+            if scalar_items:
+                compacted[normalized_key] = scalar_items[:4]
+        if len(compacted) >= MAX_AUDIENCE_CONTEXT_FIELDS:
+            break
+    return compacted
 
 
 @dataclass(slots=True)
@@ -114,7 +150,7 @@ class NeuroScoringService:
         modality: str,
     ) -> ScoringBundle:
         started_at = time.perf_counter()
-        segment_features = list(reduced_feature_vector.get("segment_features", []))
+        segment_features = list(reduced_feature_vector.get("segment_features", []))[:MAX_SCORING_SEGMENTS]
 
         log_event(
             logger,
@@ -435,7 +471,7 @@ class NeuroScoringService:
         campaign_context = campaign_context if isinstance(campaign_context, dict) else {}
         audience_context = context.get("audience_context") if isinstance(context, dict) else {}
         audience_context = audience_context if isinstance(audience_context, dict) else {}
-        segment_features = list(reduced_feature_vector.get("segment_features", []))
+        segment_features = list(reduced_feature_vector.get("segment_features", []))[:MAX_SCORING_SEGMENTS]
 
         scalar_features = {
             key: reduced_feature_vector.get(key)
@@ -465,7 +501,7 @@ class NeuroScoringService:
                 "channel": campaign_context.get("channel"),
                 "audience_segment": campaign_context.get("audience_segment"),
             },
-            "audience_context": audience_context,
+            "audience_context": _compact_audience_context(audience_context),
             "tribe_feature_summary": scalar_features,
             "segment_features": [
                 {
@@ -473,19 +509,18 @@ class NeuroScoringService:
                     "start_ms": int(segment.get("start_ms", index * 1000)),
                     "duration_ms": int(segment.get("duration_ms", 1000)),
                     "event_count": int(segment.get("event_count", 0)),
-                    "event_types": list(segment.get("event_types", [])),
-                    "engagement_signal": float(segment.get("engagement_signal", 0.0)),
-                    "peak_focus_signal": float(segment.get("peak_focus_signal", 0.0)),
-                    "consistency_signal": float(segment.get("consistency_signal", 0.0)),
-                    "temporal_change_signal": float(segment.get("temporal_change_signal", 0.0)),
-                    "hemisphere_balance_signal": float(segment.get("hemisphere_balance_signal", 0.0)),
+                    "event_types": [str(item) for item in list(segment.get("event_types", []))[:MAX_SCORING_EVENT_TYPES]],
+                    "engagement_signal": _round_signal(segment.get("engagement_signal", 0.0)),
+                    "peak_focus_signal": _round_signal(segment.get("peak_focus_signal", 0.0)),
+                    "consistency_signal": _round_signal(segment.get("consistency_signal", 0.0)),
+                    "temporal_change_signal": _round_signal(segment.get("temporal_change_signal", 0.0)),
+                    "hemisphere_balance_signal": _round_signal(segment.get("hemisphere_balance_signal", 0.0)),
                 }
                 for index, segment in enumerate(segment_features)
             ],
             "region_activation_summary": {
-                "mesh": region_activation_summary.get("mesh"),
                 "hemisphere_summary": region_activation_summary.get("hemisphere_summary"),
-                "top_rois": list(region_activation_summary.get("top_rois") or [])[:8],
+                "top_rois": list(region_activation_summary.get("top_rois") or [])[:MAX_SCORING_TOP_ROIS],
             },
         }
 

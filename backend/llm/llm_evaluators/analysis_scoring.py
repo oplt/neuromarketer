@@ -34,7 +34,11 @@ class AnalysisScoringPromptBuilder:
                     "7. Return one timeline point per provided segment and preserve segment order. If no segments are provided, return a single point at timestamp 0.\n"
                     "8. Use only these suggestion types: copy, layout, color, cta, framing, pacing, thumbnail, branding.\n"
                     "9. `expected_score_lift_json` may only use the keys attention, emotion, memory, cognitive_load, and conversion_proxy.\n"
-                    "10. Return strict JSON only, matching the provided schema exactly."
+                    "10. Return strict JSON only, matching the provided schema exactly.\n"
+                    "11. Do not wrap the JSON in markdown or code fences.\n"
+                    "12. Do not include any commentary before or after the JSON object.\n"
+                    "13. Keep `overall_summary`, `reason`, `evidence`, and suggestion text concise.\n"
+                    "14. Do not emit keys that are not present in the schema."
                 ),
             },
             {

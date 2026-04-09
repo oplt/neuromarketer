@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from uuid import UUID
 
 from sqlalchemy import desc, select
@@ -110,6 +111,27 @@ class UploadRepository:
     async def get_stored_artifact(self, artifact_id: UUID) -> StoredArtifact | None:
         result = await self.session.execute(select(StoredArtifact).where(StoredArtifact.id == artifact_id))
         return result.scalar_one_or_none()
+
+    async def get_analysis_artifacts_by_ids(
+        self,
+        *,
+        artifact_ids: Iterable[UUID],
+        project_id: UUID,
+        created_by_user_id: UUID,
+    ) -> dict[UUID, StoredArtifact]:
+        artifact_ids = tuple(dict.fromkeys(artifact_ids))
+        if not artifact_ids:
+            return {}
+
+        result = await self.session.execute(
+            select(StoredArtifact).where(
+                StoredArtifact.id.in_(artifact_ids),
+                StoredArtifact.project_id == project_id,
+                StoredArtifact.created_by_user_id == created_by_user_id,
+                StoredArtifact.artifact_kind == "analysis_source",
+            )
+        )
+        return {artifact.id: artifact for artifact in result.scalars().all()}
 
     async def list_analysis_artifacts(
         self,

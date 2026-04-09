@@ -17,6 +17,7 @@ class _FakeJob:
         self.started_at = datetime.now(timezone.utc)
         self.completed_at = datetime.now(timezone.utc)
         self.created_by_user_id = None
+        self.runtime_params = {}
 
 
 class TestResetJobForRerun(unittest.IsolatedAsyncioTestCase):

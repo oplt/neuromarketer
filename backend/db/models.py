@@ -413,6 +413,7 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "projects"
     __table_args__ = (
         Index("ix_projects_org_name", "organization_id", "name"),
+        Index("ix_projects_org_created_at", "organization_id", "created_at"),
     )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
@@ -594,6 +595,7 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_inference_jobs_project_status", "project_id", "status"),
         Index("ix_inference_jobs_creative_status", "creative_id", "status"),
         Index("ix_inference_jobs_created_at", "created_at"),
+        Index("ix_inference_jobs_project_user_created_at", "project_id", "created_by_user_id", "created_at"),
     )
 
     project_id: Mapped[uuid.UUID] = mapped_column(

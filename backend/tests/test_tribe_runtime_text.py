@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from backend.core.config import settings
 from backend.services.tribe_runtime import TribeRuntime, TribeRuntimeInput
@@ -71,6 +72,31 @@ def test_runtime_falls_back_to_bundled_local_phi3_model(monkeypatch, tmp_path: P
     runtime = TribeRuntime()
 
     assert runtime.text_feature_model_name == str(local_model.resolve())
+
+
+def test_runtime_resolves_relative_cache_folder_under_project_root(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "tribe_cache_folder", "./cache/tribev2")
+    monkeypatch.setattr(TribeRuntime, "_project_root", lambda self: tmp_path)
+
+    runtime = TribeRuntime()
+
+    assert runtime.cache_folder == (tmp_path / "cache" / "tribev2").resolve()
+
+
+def test_runtime_does_not_log_cache_fallback_for_project_relative_path(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "tribe_cache_folder", "./cache/tribev2")
+    monkeypatch.setattr(TribeRuntime, "_project_root", lambda self: tmp_path)
+
+    with patch("backend.services.tribe_runtime.log_event") as log_event_mock:
+        runtime = TribeRuntime()
+
+    assert runtime.cache_folder == (tmp_path / "cache" / "tribev2").resolve()
+    fallback_events = [
+        call
+        for call in log_event_mock.call_args_list
+        if len(call.args) >= 2 and call.args[1] == "tribe_cache_folder_fallback"
+    ]
+    assert fallback_events == []
 
 
 def test_local_model_path_patch_accepts_existing_directories(monkeypatch, tmp_path: Path) -> None:

@@ -761,14 +761,36 @@ class AuthApplicationService:
                 did_update = True
         if did_update:
             await self.session.commit()
+        related_user_ids = [
+            user_id
+            for invite in invites
+            for user_id in (invite.invited_by_user_id, invite.accepted_by_user_id)
+            if user_id is not None
+        ]
+        users_by_id = await crud.get_users_by_ids(self.session, related_user_ids)
         items: list[AccountInviteRead] = []
         for invite in invites:
-            items.append(await self._build_invite_read(invite))
+            items.append(await self._build_invite_read(invite, users_by_id=users_by_id))
         return items
 
-    async def _build_invite_read(self, invite: WorkspaceInvite) -> AccountInviteRead:
-        invited_by = await crud.get_user_by_id(self.session, invite.invited_by_user_id)
-        accepted_by = await crud.get_user_by_id(self.session, invite.accepted_by_user_id) if invite.accepted_by_user_id else None
+    async def _build_invite_read(
+        self,
+        invite: WorkspaceInvite,
+        *,
+        users_by_id: dict[UUID, User] | None = None,
+    ) -> AccountInviteRead:
+        invited_by = None
+        accepted_by = None
+        if users_by_id is not None:
+            invited_by = users_by_id.get(invite.invited_by_user_id)
+            accepted_by = users_by_id.get(invite.accepted_by_user_id) if invite.accepted_by_user_id else None
+        else:
+            invited_by = await crud.get_user_by_id(self.session, invite.invited_by_user_id)
+            accepted_by = (
+                await crud.get_user_by_id(self.session, invite.accepted_by_user_id)
+                if invite.accepted_by_user_id
+                else None
+            )
         return AccountInviteRead(
             id=invite.id,
             email=invite.email,

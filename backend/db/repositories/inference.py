@@ -89,30 +89,21 @@ class InferenceRepository:
         media_type: str | None,
         limit: int,
     ) -> list[InferenceJob]:
-        candidate_limit = max(limit * 4, limit)
-        result = await self.session.execute(
+        query = (
             select(InferenceJob)
             .options(selectinload(InferenceJob.analysis_result_record))
             .where(
                 InferenceJob.project_id == project_id,
                 InferenceJob.created_by_user_id == created_by_user_id,
+                InferenceJob.runtime_params["analysis_surface"].astext == "analysis_dashboard",
             )
             .order_by(desc(InferenceJob.created_at))
-            .limit(candidate_limit)
+            .limit(limit)
         )
-        jobs = list(result.scalars().all())
-
-        filtered: list[InferenceJob] = []
-        for job in jobs:
-            runtime_params = job.runtime_params or {}
-            if runtime_params.get("analysis_surface") != "analysis_dashboard":
-                continue
-            if media_type is not None and str(runtime_params.get("media_type") or "") != media_type:
-                continue
-            filtered.append(job)
-            if len(filtered) >= limit:
-                break
-        return filtered
+        if media_type is not None:
+            query = query.where(InferenceJob.runtime_params["media_type"].astext == media_type)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     async def get_job_for_analysis_evaluation(self, job_id: UUID) -> InferenceJob | None:
         result = await self.session.execute(
@@ -172,21 +163,99 @@ class InferenceRepository:
         job.started_at = now
         job.completed_at = None
         job.error_message = None
+        runtime_params = dict(job.runtime_params or {})
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "inference_running",
+            "updated_at": now.isoformat(),
+        }
+        job.runtime_params = runtime_params
         await self.session.flush()
         return job
 
-    async def mark_job_failed(self, job: InferenceJob, error_message: str) -> None:
+    async def acquire_scoring_job(self, job_id: UUID, *, stale_after_seconds: int) -> InferenceJob | None:
+        result = await self.session.execute(
+            select(InferenceJob)
+            .options(
+                selectinload(InferenceJob.prediction),
+                selectinload(InferenceJob.analysis_result_record),
+            )
+            .where(InferenceJob.id == job_id)
+            .with_for_update()
+        )
+        job = result.scalar_one_or_none()
+        if job is None or job.status in {JobStatus.CANCELED, JobStatus.SUCCEEDED, JobStatus.FAILED}:
+            return None
+
+        if job.prediction is None or job.analysis_result_record is not None:
+            return None
+
+        runtime_params = dict(job.runtime_params or {})
+        phase_state = runtime_params.get("analysis_execution_phase")
+        phase_payload = phase_state if isinstance(phase_state, dict) else {}
+        phase_name = str(phase_payload.get("phase") or "").strip().lower()
+        phase_updated_at_raw = phase_payload.get("updated_at")
+        phase_updated_at: datetime | None = None
+        if isinstance(phase_updated_at_raw, str):
+            try:
+                phase_updated_at = datetime.fromisoformat(phase_updated_at_raw)
+                if phase_updated_at.tzinfo is None:
+                    phase_updated_at = phase_updated_at.replace(tzinfo=timezone.utc)
+            except ValueError:
+                phase_updated_at = None
+
+        now = datetime.now(timezone.utc)
+        is_stale_running_phase = (
+            phase_name == "scoring_running"
+            and phase_updated_at is not None
+            and phase_updated_at < now - timedelta(seconds=stale_after_seconds)
+        )
+        if phase_name not in {"scoring_queued", "scoring_running"}:
+            return None
+        if phase_name == "scoring_running" and not is_stale_running_phase:
+            return None
+
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "scoring_running",
+            "updated_at": now.isoformat(),
+        }
+        job.runtime_params = runtime_params
+        await self.session.flush()
+        return job
+
+    async def mark_job_scoring_queued(self, job: InferenceJob) -> None:
+        runtime_params = dict(job.runtime_params or {})
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "scoring_queued",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        job.runtime_params = runtime_params
+        await self.session.flush()
+
+    async def mark_job_failed(
+        self,
+        job: InferenceJob,
+        error_message: str,
+        *,
+        partial_result_available: bool = False,
+    ) -> None:
         job.status = JobStatus.FAILED
         job.error_message = error_message
         job.completed_at = datetime.now(timezone.utc)
         runtime_params = dict(job.runtime_params or {})
         current_progress = dict(runtime_params.get("analysis_progress") or {})
         current_diagnostics = dict(current_progress.get("diagnostics") or {})
+        stage_label = current_progress.get("stage_label") or "The analysis stopped before results were produced."
+        if partial_result_available:
+            stage_label = "TRIBE scene extraction completed, but LLM scoring failed. Showing the saved TRIBE-only result."
         runtime_params["analysis_progress"] = {
             "stage": "failed",
-            "stage_label": current_progress.get("stage_label") or "The analysis stopped before results were produced.",
+            "stage_label": stage_label,
             "diagnostics": current_diagnostics,
-            "is_partial": False,
+            "is_partial": partial_result_available,
+        }
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "failed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         job.runtime_params = runtime_params
         await self.session.flush()
@@ -195,6 +264,12 @@ class InferenceRepository:
         job.status = JobStatus.SUCCEEDED
         job.error_message = None
         job.completed_at = datetime.now(timezone.utc)
+        runtime_params = dict(job.runtime_params or {})
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "completed",
+            "updated_at": job.completed_at.isoformat(),
+        }
+        job.runtime_params = runtime_params
         await self.session.flush()
 
     async def reset_job_for_rerun(self, job: InferenceJob) -> None:
@@ -210,8 +285,56 @@ class InferenceRepository:
             "diagnostics": {},
             "is_partial": False,
         }
+        runtime_params["analysis_execution_phase"] = {
+            "phase": "queued",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
         job.runtime_params = runtime_params
         await self.session.flush()
+
+    async def store_prediction_handoff(
+        self,
+        *,
+        job: InferenceJob,
+        runtime_output: TribeRuntimeOutput,
+        model_name: str,
+    ) -> PredictionResult:
+        existing_prediction = await self.get_prediction_result_for_job(job.id)
+        if existing_prediction is None:
+            prediction = PredictionResult(
+                job_id=job.id,
+                project_id=job.project_id,
+                creative_id=job.creative_id,
+                creative_version_id=job.creative_version_id,
+                raw_brain_response_uri=runtime_output.raw_brain_response_uri,
+                raw_brain_response_summary=runtime_output.raw_brain_response_summary,
+                reduced_feature_vector=runtime_output.reduced_feature_vector,
+                region_activation_summary=runtime_output.region_activation_summary,
+                provenance_json=runtime_output.provenance_json,
+            )
+            self.session.add(prediction)
+            await self.session.flush()
+        else:
+            prediction = existing_prediction
+            prediction.raw_brain_response_uri = runtime_output.raw_brain_response_uri
+            prediction.raw_brain_response_summary = runtime_output.raw_brain_response_summary
+            prediction.reduced_feature_vector = runtime_output.reduced_feature_vector
+            prediction.region_activation_summary = runtime_output.region_activation_summary
+            prediction.provenance_json = runtime_output.provenance_json
+            await self.session.flush()
+
+        self.session.add(
+            JobMetric(
+                job_id=job.id,
+                metric_name="foundation_model_forward_passes",
+                metric_value=Decimal("1"),
+                metric_unit="count",
+                metadata_json={"model": model_name, "phase": "inference_handoff"},
+            )
+        )
+        await self.session.flush()
+        await self.session.refresh(prediction)
+        return prediction
 
     async def replace_prediction_result(
         self,

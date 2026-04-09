@@ -84,6 +84,9 @@ class PredictionApplicationService:
     async def process_prediction_job(self, job_id: UUID) -> None:
         await AnalysisJobProcessor(self.session).process(job_id)
 
+    async def process_prediction_scoring_job(self, job_id: UUID) -> None:
+        await AnalysisJobProcessor(self.session).process_scoring(job_id)
+
     async def rerun_job(self, *, job_id: UUID, user_id: UUID):
         """Reset a failed or canceled job to QUEUED so it can be re-dispatched.
 

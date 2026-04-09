@@ -123,8 +123,14 @@ class TribeRuntime:
 
         return None
 
+    def _resolve_project_relative_path(self, configured_path: Path) -> Path:
+        if configured_path.is_absolute():
+            return configured_path.resolve(strict=False)
+        return (self._project_root() / configured_path).resolve(strict=False)
+
     def _resolve_cache_folder(self, configured_path: Path) -> Path:
         candidates = self._candidate_cache_folders(configured_path)
+        normalized_configured = self._resolve_project_relative_path(configured_path)
         errors: list[str] = []
 
         for candidate in candidates:
@@ -135,7 +141,7 @@ class TribeRuntime:
                 continue
 
             if os.access(candidate, os.W_OK):
-                if candidate != configured_path:
+                if candidate != normalized_configured:
                     log_event(
                         logger,
                         "tribe_cache_folder_fallback",
@@ -154,9 +160,10 @@ class TribeRuntime:
         )
 
     def _candidate_cache_folders(self, configured_path: Path) -> list[Path]:
-        project_cache = Path(__file__).resolve().parents[2] / "cache" / "tribev2"
-        temp_cache = Path(tempfile.gettempdir()) / "neuromarketer" / "tribev2"
-        candidates = [configured_path, project_cache, temp_cache]
+        normalized_configured = self._resolve_project_relative_path(configured_path)
+        project_cache = (self._project_root() / "cache" / "tribev2").resolve(strict=False)
+        temp_cache = (Path(tempfile.gettempdir()) / "neuromarketer" / "tribev2").resolve(strict=False)
+        candidates = [normalized_configured, project_cache, temp_cache]
         resolved: list[Path] = []
 
         for candidate in candidates:
@@ -715,6 +722,12 @@ class TribeRuntime:
 
     def _get_resolved_device(self) -> str:
         return self.__class__._resolved_device or self._get_requested_device()
+
+    def get_requested_device(self) -> str:
+        return self._get_requested_device()
+
+    def get_resolved_device(self) -> str:
+        return self._get_resolved_device()
 
     def _resolve_loaded_device(self, model: Any) -> str:
         inner_model = getattr(model, "_model", None)

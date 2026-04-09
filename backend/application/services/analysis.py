@@ -144,7 +144,10 @@ class AnalysisApplicationService:
             media_type=media_type,
             limit=fetch_limit,
         )
-        items: list[AnalysisJobListItemRead] = []
+        selected_jobs: list[tuple[InferenceJob, UUID | None]] = []
+        asset_ids: list[UUID] = []
+        audience_query = audience_contains.strip().lower() if audience_contains is not None else None
+
         for job in jobs:
             campaign_context = (job.request_payload or {}).get("campaign_context") or {}
             normalized_goal_template = normalize_goal_template(campaign_context.get("goal_template"))
@@ -154,17 +157,32 @@ class AnalysisApplicationService:
                 continue
             if channel is not None and normalized_channel != channel:
                 continue
-            if audience_contains is not None:
-                audience_query = audience_contains.strip().lower()
-                if not audience_query or audience_query not in str(normalized_audience_segment or "").lower():
-                    continue
-            asset = None
+            if audience_query is not None and (
+                not audience_query or audience_query not in str(normalized_audience_segment or "").lower()
+            ):
+                continue
+
+            asset_id: UUID | None = None
             raw_asset_id = (job.runtime_params or {}).get("asset_id")
             if raw_asset_id:
                 try:
-                    asset = await self.uploads.get_stored_artifact(UUID(str(raw_asset_id)))
+                    asset_id = UUID(str(raw_asset_id))
+                    asset_ids.append(asset_id)
                 except (TypeError, ValueError):
-                    asset = None
+                    asset_id = None
+
+            selected_jobs.append((job, asset_id))
+            if len(selected_jobs) >= limit:
+                break
+
+        assets_by_id = await self.uploads.get_analysis_artifacts_by_ids(
+            artifact_ids=asset_ids,
+            project_id=project_id,
+            created_by_user_id=user_id,
+        )
+        items: list[AnalysisJobListItemRead] = []
+        for job, asset_id in selected_jobs:
+            asset = assets_by_id.get(asset_id) if asset_id is not None else None
             items.append(
                 AnalysisJobListItemRead(
                     job=self._build_job_read(job),
@@ -173,8 +191,6 @@ class AnalysisApplicationService:
                     result_created_at=job.analysis_result_record.created_at if job.analysis_result_record is not None else None,
                 )
             )
-            if len(items) >= limit:
-                break
         return AnalysisJobListResponse(items=items)
 
     async def create_upload_session(
@@ -926,8 +942,6 @@ class AnalysisApplicationService:
         )
 
     def _build_result(self, job: InferenceJob) -> AnalysisResultRead | None:
-        if job.status != JobStatus.SUCCEEDED:
-            return None
         record = job.__dict__.get("analysis_result_record")
         if record is None:
             return None

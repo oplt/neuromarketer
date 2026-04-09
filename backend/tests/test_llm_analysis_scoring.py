@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+from backend.core.config import settings
 from backend.llm.analysis_scoring_service import AnalysisScoringResponse
 from backend.schemas.llm_scoring import AnalysisScoringResult
 from backend.services.analysis_postprocessor import AnalysisPostprocessor
@@ -17,6 +18,48 @@ class _FakeAnalysisScoringService:
     async def score(self, context: dict) -> AnalysisScoringResponse:
         self.last_context = context
         return self.response
+
+
+class _RouterStub:
+    def __init__(self, provider: str = "ollama") -> None:
+        self.provider = provider
+        self.last_options: dict | None = None
+
+    def preview_route(self, *, mode: str):
+        return type(
+            "Preview",
+            (),
+            {
+                "route_id": "primary",
+                "provider": self.provider,
+                "model": "test-model",
+                "candidate_order": ["primary"],
+            },
+        )()
+
+    async def generate_structured(self, *, mode, messages, response_schema, options=None):
+        self.last_options = options
+        return type(
+            "Generation",
+            (),
+            {
+                "parsed_json": _fake_scoring_response().result.model_dump(mode="json"),
+                "metadata": {
+                    "provider_id": "primary",
+                    "provider": self.provider,
+                    "model": "test-model",
+                    "tokens_in": 10,
+                    "tokens_out": 10,
+                    "attempts": 1,
+                    "fallback_count": 0,
+                    "latency_ms": 1,
+                    "estimated_cost_usd": 0.0,
+                    "actual_cost_usd": 0.0,
+                    "budget_usd": 0.0,
+                    "provider_attempts": [],
+                },
+            },
+        )()
 
 
 def _fake_scoring_response() -> AnalysisScoringResponse:
@@ -196,6 +239,90 @@ def test_neuro_scoring_service_maps_llm_scores_into_bundle() -> None:
     assert bundle.suggestions[0].suggestion_type.value == "cta"
     assert bundle.suggestions[0].proposed_change_json["timestamp_ms"] == 4000
     assert bundle.notes[0] == "The opening holds attention and the CTA is understandable."
+
+
+def test_neuro_scoring_service_compacts_scoring_context() -> None:
+    response = _fake_scoring_response()
+    fake_service = _FakeAnalysisScoringService(response)
+    scoring_service = NeuroScoringService(analysis_scoring_service=fake_service)
+    runtime_output = _runtime_output()
+    oversized_context = {
+        "campaign_context": {
+            "objective": "Drive signups",
+            "goal_template": "cta",
+            "channel": "social",
+            "audience_segment": "Founders",
+        },
+        "audience_context": {
+            "persona": "SMB founder",
+            "region": "EU",
+            "age_band": "25-34",
+            "interests": ["AI", "growth", "analytics", "SaaS", "video"],
+            "nested": {"unsupported": True},
+            "budget": 1200,
+            "uses_mobile": True,
+            "language": "en",
+            "extra_field": "trimmed",
+        },
+    }
+    runtime_output.reduced_feature_vector["segment_features"] = [
+        {
+            "segment_index": index,
+            "start_ms": index * 1000,
+            "duration_ms": 1000,
+            "event_count": 3 + index,
+            "event_types": ["Word", "Shot", "Object", "Face", "Logo"],
+            "engagement_signal": 0.123456,
+            "peak_focus_signal": 0.654321,
+            "consistency_signal": 0.333333,
+            "temporal_change_signal": 0.777777,
+            "hemisphere_balance_signal": 0.555555,
+        }
+        for index in range(15)
+    ]
+    runtime_output.region_activation_summary["top_rois"] = [
+        {"roi": f"ROI_{index}", "activation": index / 10} for index in range(10)
+    ]
+
+    asyncio.run(
+        scoring_service.score(
+            reduced_feature_vector=runtime_output.reduced_feature_vector,
+            region_activation_summary=runtime_output.region_activation_summary,
+            context=oversized_context,
+            modality="video",
+        )
+    )
+
+    assert fake_service.last_context is not None
+    assert len(fake_service.last_context["segment_features"]) == 12
+    assert len(fake_service.last_context["segment_features"][0]["event_types"]) == 4
+    assert fake_service.last_context["segment_features"][0]["engagement_signal"] == 0.1235
+    assert "mesh" not in fake_service.last_context["region_activation_summary"]
+    assert len(fake_service.last_context["region_activation_summary"]["top_rois"]) == 6
+    assert "nested" not in fake_service.last_context["audience_context"]
+    assert len(fake_service.last_context["audience_context"]) <= 8
+
+
+def test_analysis_scoring_service_caps_ollama_output_tokens(monkeypatch) -> None:
+    from backend.llm.analysis_scoring_service import AnalysisScoringService
+
+    router = _RouterStub(provider="ollama")
+    monkeypatch.setattr(settings, "llm_analysis_scoring_max_tokens", 222)
+
+    asyncio.run(AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]}))
+
+    assert router.last_options == {"num_predict": 222}
+
+
+def test_analysis_scoring_service_caps_openai_compatible_output_tokens(monkeypatch) -> None:
+    from backend.llm.analysis_scoring_service import AnalysisScoringService
+
+    router = _RouterStub(provider="openai_compatible")
+    monkeypatch.setattr(settings, "llm_analysis_scoring_max_tokens", 111)
+
+    asyncio.run(AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]}))
+
+    assert router.last_options == {"max_tokens": 111}
 
 
 def test_analysis_postprocessor_uses_llm_outputs_without_threshold_intervals() -> None:

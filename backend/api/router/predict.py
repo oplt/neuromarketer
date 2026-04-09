@@ -40,7 +40,7 @@ async def predict(
         hydrated_job = await service.get_job(job.id)
         return PredictResponse(
             job=hydrated_job,
-            prediction_result=hydrated_job.prediction,
+            prediction_result=hydrated_job.prediction if hydrated_job.status.value == "succeeded" else None,
         )
 
 
@@ -51,7 +51,7 @@ async def get_prediction_job(
 ) -> PredictResponse:
     with bound_log_context(job_id=str(job_id)):
         job = await PredictionApplicationService(db).get_job(job_id)
-        return PredictResponse(job=job, prediction_result=job.prediction)
+        return PredictResponse(job=job, prediction_result=job.prediction if job.status.value == "succeeded" else None)
 
 
 @router.post("/compare", response_model=CompareResponse)

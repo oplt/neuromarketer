@@ -8,7 +8,9 @@ import {
   Box,
   Button,
   Chip,
+  LinearProgress,
   Paper,
+  Skeleton,
   Stack,
   Table,
   TableBody,
@@ -18,15 +20,18 @@ import {
   TextField,
   Typography,
 } from '@mui/material'
-import { useEffect, useEffectEvent, useMemo, useState } from 'react'
-import CollaborationPanel from '../components/collaboration/CollaborationPanel'
+import { Suspense, lazy, useEffect, useEffectEvent, useMemo, useState } from 'react'
+import MetricsRadarCard from '../components/analysis/MetricsRadarCard'
 import { apiRequest } from '../lib/api'
 import {
   buildCompareWorkspaceStorageKey,
   readCompareWorkspaceSnapshot,
   storeCompareWorkspaceSnapshot,
 } from '../lib/compareWorkspace'
+import { runWhenIdle } from '../lib/defer'
 import type { AuthSession } from '../lib/session'
+
+const CollaborationPanel = lazy(() => import('../components/collaboration/CollaborationPanel'))
 
 type ComparePageProps = {
   session: AuthSession
@@ -415,7 +420,10 @@ function ComparePage({ session }: ComparePageProps) {
 
   useEffect(() => {
     void loadAnalyses()
-    void loadComparisonHistory()
+    const cancelDeferredLoad = runWhenIdle(() => {
+      void loadComparisonHistory()
+    })
+    return cancelDeferredLoad
   }, [loadAnalyses, loadComparisonHistory])
 
   useEffect(() => {
@@ -706,13 +714,15 @@ function ComparePage({ session }: ComparePageProps) {
 
       {activeComparison ? <ComparisonResults comparison={activeComparison} /> : null}
 
-      <CollaborationPanel
-        entityId={activeComparison?.id ?? null}
-        entityType="analysis_comparison"
-        session={session}
-        subtitle="Attach comments, ownership, and approval state to the saved comparison decision."
-        title="Comparison review ops"
-      />
+      <Suspense fallback={<DeferredPanelFallback title="Comparison review ops" />}>
+        <CollaborationPanel
+          entityId={activeComparison?.id ?? null}
+          entityType="analysis_comparison"
+          session={session}
+          subtitle="Attach comments, ownership, and approval state to the saved comparison decision."
+          title="Comparison review ops"
+        />
+      </Suspense>
     </Stack>
   )
 }
@@ -764,6 +774,20 @@ function SelectedCandidatesPanel({
         </Box>
       ))}
     </Box>
+  )
+}
+
+function DeferredPanelFallback({ title }: { title: string }) {
+  return (
+    <Paper className="dashboard-card" elevation={0}>
+      <Stack spacing={2}>
+        <Typography variant="h6">{title}</Typography>
+        <LinearProgress sx={{ borderRadius: 999, height: 8 }} />
+        <Typography color="text.secondary" variant="body2">
+          This workspace defers non-critical review tools until the main comparison view is ready.
+        </Typography>
+      </Stack>
+    </Paper>
   )
 }
 
@@ -879,6 +903,19 @@ function ComparisonResults({ comparison }: { comparison: AnalysisComparison }) {
         </Stack>
       </Paper>
 
+      <ScoreGaugesComparison items={comparison.items} />
+
+      <MetricsRadarCard
+        description="Compare each result's persisted metric rows in one radial view to spot where a challenger outperforms or trails the baseline."
+        emptyMessage="Radar comparison appears when at least three comparable metrics are available across the selected results."
+        series={comparison.items.map((item) => ({
+          label: resolveComparisonItemLabel(item),
+          metrics: item.result.metrics_json,
+        }))}
+        testId="compare-metrics-radar"
+        title="Metrics radar comparison"
+      />
+
       {challengers.map((item) => (
         <Paper className="dashboard-card" elevation={0} key={item.analysis_job_id}>
           <Stack spacing={2}>
@@ -895,6 +932,13 @@ function ComparisonResults({ comparison }: { comparison: AnalysisComparison }) {
                 <Chip label={`Hook ${formatSignedNumber(item.delta_json.hook)}`} size="small" variant="outlined" />
               </Stack>
             </Stack>
+
+            {(baseline?.result.segments_json.length ?? 0) > 0 || item.result.segments_json.length > 0 ? (
+              <CompareHeatstripCard
+                baseline={baseline}
+                challenger={item}
+              />
+            ) : null}
 
             <Box className="dashboard-grid dashboard-grid--content">
               <Paper className="dashboard-card compare-detail-card" elevation={0}>
@@ -1058,6 +1102,253 @@ function formatSignedNumber(value: number | undefined) {
     return '--'
   }
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
+}
+
+// ---------------------------------------------------------------------------
+// Visualization utilities
+// ---------------------------------------------------------------------------
+
+function scoreToColor(score: number): string {
+  const clamped = Math.max(0, Math.min(100, score))
+  const hue = (clamped / 100) * 120
+  return `hsl(${Math.round(hue)}, 70%, 45%)`
+}
+
+function LegendSwatch({ color, label }: { color: string; label: string }) {
+  return (
+    <Stack alignItems="center" direction="row" spacing={0.75}>
+      <Box sx={{ bgcolor: color, borderRadius: '50%', flexShrink: 0, height: 10, width: 10 }} />
+      <Typography color="text.secondary" variant="caption">
+        {label}
+      </Typography>
+    </Stack>
+  )
+}
+
+function ScoreGauge({
+  isReady,
+  label,
+  size = 68,
+  value,
+}: {
+  isReady: boolean
+  label: string
+  size?: number
+  value: number
+}) {
+  const strokeWidth = 6
+  const radius = (size - strokeWidth) / 2
+  const circumference = 2 * Math.PI * radius
+  const filled = (Math.max(0, Math.min(100, value)) / 100) * circumference
+  const color = scoreToColor(value)
+
+  return (
+    <Box sx={{ alignItems: 'center', display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+      <Box sx={{ height: size, position: 'relative', width: size }}>
+        <svg
+          aria-hidden="true"
+          height={size}
+          style={{ transform: 'rotate(-90deg)' }}
+          viewBox={`0 0 ${size} ${size}`}
+          width={size}
+        >
+          <circle
+            cx={size / 2}
+            cy={size / 2}
+            fill="none"
+            r={radius}
+            stroke="rgba(24,34,48,0.08)"
+            strokeWidth={strokeWidth}
+          />
+          {isReady && (
+            <circle
+              cx={size / 2}
+              cy={size / 2}
+              fill="none"
+              r={radius}
+              stroke={color}
+              strokeDasharray={`${filled} ${circumference}`}
+              strokeLinecap="round"
+              strokeWidth={strokeWidth}
+            />
+          )}
+        </svg>
+        <Box
+          sx={{
+            alignItems: 'center',
+            display: 'flex',
+            inset: 0,
+            justifyContent: 'center',
+            position: 'absolute',
+          }}
+        >
+          {isReady ? (
+            <Typography sx={{ color, fontSize: 13, fontWeight: 700, lineHeight: 1 }}>
+              {Math.round(value)}
+            </Typography>
+          ) : (
+            <Skeleton height={16} sx={{ transform: 'none' }} width={26} />
+          )}
+        </Box>
+      </Box>
+      <Typography
+        color="text.secondary"
+        sx={{ lineHeight: 1.2, maxWidth: size, textAlign: 'center' }}
+        variant="caption"
+      >
+        {label}
+      </Typography>
+    </Box>
+  )
+}
+
+function ScoreGaugesComparison({ items }: { items: AnalysisComparisonItem[] }) {
+  const metrics: Array<{ key: string; label: string }> = [
+    { key: 'overall_attention', label: 'Attention' },
+    { key: 'hook', label: 'Hook' },
+    { key: 'sustained_engagement', label: 'Sustained' },
+    { key: 'memory_proxy', label: 'Memory' },
+    { key: 'low_cognitive_load', label: 'Low Load' },
+  ]
+
+  return (
+    <Paper className="dashboard-card" elevation={0}>
+      <Stack spacing={2}>
+        <Typography variant="h6">Score profiles</Typography>
+        <Typography color="text.secondary" variant="body2">
+          Visual gauge comparison across all items. Green ≥ 70, amber ≥ 40, red below threshold.
+        </Typography>
+        <Box
+          sx={{
+            display: 'grid',
+            gap: 3,
+            gridTemplateColumns: `repeat(${Math.min(items.length, 4)}, 1fr)`,
+          }}
+        >
+          {items.map((item) => (
+            <Box key={item.analysis_job_id}>
+              <Stack spacing={0.75} sx={{ mb: 2 }}>
+                <Typography variant="subtitle2">{resolveComparisonItemLabel(item)}</Typography>
+                {item.is_winner && (
+                  <Chip
+                    color="success"
+                    label="Winner"
+                    size="small"
+                    sx={{ alignSelf: 'flex-start' }}
+                    variant="outlined"
+                  />
+                )}
+                {item.is_baseline && !item.is_winner && (
+                  <Chip
+                    color="primary"
+                    label="Baseline"
+                    size="small"
+                    sx={{ alignSelf: 'flex-start' }}
+                    variant="outlined"
+                  />
+                )}
+              </Stack>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
+                {metrics.map(({ key, label }) => (
+                  <ScoreGauge
+                    key={key}
+                    isReady
+                    label={label}
+                    value={item.scores_json[key] ?? 0}
+                  />
+                ))}
+              </Box>
+            </Box>
+          ))}
+        </Box>
+      </Stack>
+    </Paper>
+  )
+}
+
+function CompareSegmentHeatstrip({
+  label: stripLabel,
+  segments,
+  stripHeight = 28,
+}: {
+  label?: string
+  segments: AnalysisSegmentRow[]
+  stripHeight?: number
+}) {
+  if (segments.length === 0) return null
+  const totalDuration = segments.reduce((max, s) => Math.max(max, s.end_time_ms), 0) || 1
+
+  return (
+    <Stack spacing={0.5}>
+      {stripLabel && (
+        <Typography color="text.secondary" variant="caption">
+          {stripLabel}
+        </Typography>
+      )}
+      <Box
+        aria-label={`${stripLabel ?? 'Segment'} attention heatstrip`}
+        role="img"
+        sx={{
+          borderRadius: '6px',
+          display: 'flex',
+          gap: '2px',
+          height: stripHeight,
+          overflow: 'hidden',
+        }}
+      >
+        {segments.map((seg, i) => {
+          const widthPct = ((seg.end_time_ms - seg.start_time_ms) / totalDuration) * 100
+          return (
+            <Box
+              key={i}
+              title={`${seg.label}: ${Math.round(seg.attention_score)}/100`}
+              sx={{
+                '&:hover': { filter: 'brightness(1.2)' },
+                bgcolor: scoreToColor(seg.attention_score),
+                cursor: 'default',
+                flex: `0 0 ${widthPct}%`,
+                transition: 'filter 0.15s',
+              }}
+            />
+          )
+        })}
+      </Box>
+    </Stack>
+  )
+}
+
+function CompareHeatstripCard({
+  baseline,
+  challenger,
+}: {
+  baseline: AnalysisComparisonItem | null
+  challenger: AnalysisComparisonItem
+}) {
+  return (
+    <Paper className="dashboard-card" elevation={0}>
+      <Stack spacing={1.5}>
+        <Typography variant="subtitle1">Attention heatstrip</Typography>
+        <Typography color="text.secondary" variant="body2">
+          Segment-by-segment attention for baseline and challenger. Color: red = low, green = high.
+        </Typography>
+        {baseline && (
+          <CompareSegmentHeatstrip
+            label={`Baseline: ${resolveComparisonItemLabel(baseline)}`}
+            segments={baseline.result.segments_json}
+          />
+        )}
+        <CompareSegmentHeatstrip
+          label={`Challenger: ${resolveComparisonItemLabel(challenger)}`}
+          segments={challenger.result.segments_json}
+        />
+        <Stack direction="row" spacing={2}>
+          <LegendSwatch color="hsl(0,70%,45%)" label="Low" />
+          <LegendSwatch color="hsl(60,70%,45%)" label="Mid" />
+          <LegendSwatch color="hsl(120,70%,45%)" label="High" />
+        </Stack>
+      </Stack>
+    </Paper>
+  )
 }
 
 export default ComparePage
