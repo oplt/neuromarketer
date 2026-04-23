@@ -5,7 +5,14 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import AssetType, Creative, CreativeStatus, CreativeVersion, Project, StoredArtifact
+from backend.db.models import (
+    AssetType,
+    Creative,
+    CreativeStatus,
+    CreativeVersion,
+    Project,
+    StoredArtifact,
+)
 
 
 class CreativeRepository:
@@ -21,16 +28,22 @@ class CreativeRepository:
         return result.scalar_one_or_none()
 
     async def get_creative_version(self, creative_version_id: UUID) -> CreativeVersion | None:
-        result = await self.session.execute(select(CreativeVersion).where(CreativeVersion.id == creative_version_id))
+        result = await self.session.execute(
+            select(CreativeVersion).where(CreativeVersion.id == creative_version_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_stored_artifact(self, artifact_id: UUID) -> StoredArtifact | None:
-        result = await self.session.execute(select(StoredArtifact).where(StoredArtifact.id == artifact_id))
+        result = await self.session.execute(
+            select(StoredArtifact).where(StoredArtifact.id == artifact_id)
+        )
         return result.scalar_one_or_none()
 
     async def next_version_number(self, creative_id: UUID) -> int:
         result = await self.session.execute(
-            select(func.max(CreativeVersion.version_number)).where(CreativeVersion.creative_id == creative_id)
+            select(func.max(CreativeVersion.version_number)).where(
+                CreativeVersion.creative_id == creative_id
+            )
         )
         current_max = result.scalar_one()
         return int(current_max or 0) + 1
@@ -69,7 +82,9 @@ class CreativeRepository:
         if artifact.creative_id is None:
             raise ValueError("Artifact is not attached to a creative.")
 
-        resolved_version_number = version_number or await self.next_version_number(artifact.creative_id)
+        resolved_version_number = version_number or await self.next_version_number(
+            artifact.creative_id
+        )
 
         await self.session.execute(
             update(CreativeVersion)

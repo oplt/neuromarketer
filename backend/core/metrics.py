@@ -13,12 +13,16 @@ def _normalize_labels(labels: dict[str, str] | None) -> tuple[tuple[str, str], .
 class MetricsRegistry:
     def __init__(self) -> None:
         self._lock = Lock()
-        self._counters: defaultdict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(float)
-        self._summaries: defaultdict[tuple[str, tuple[tuple[str, str], ...]], dict[str, float]] = defaultdict(
-            lambda: {"count": 0.0, "sum": 0.0}
+        self._counters: defaultdict[tuple[str, tuple[tuple[str, str], ...]], float] = defaultdict(
+            float
+        )
+        self._summaries: defaultdict[tuple[str, tuple[tuple[str, str], ...]], dict[str, float]] = (
+            defaultdict(lambda: {"count": 0.0, "sum": 0.0})
         )
 
-    def increment(self, name: str, *, value: float = 1.0, labels: dict[str, str] | None = None) -> None:
+    def increment(
+        self, name: str, *, value: float = 1.0, labels: dict[str, str] | None = None
+    ) -> None:
         key = (name, _normalize_labels(labels))
         with self._lock:
             self._counters[key] += value

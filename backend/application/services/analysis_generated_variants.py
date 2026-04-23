@@ -118,7 +118,9 @@ class AnalysisGeneratedVariantsApplicationService:
         variant_types = self._normalize_variant_types(payload.variant_types)
         existing_variants = await self._load_generated_variants(job=job)
         existing_by_type = {
-            cast(AnalysisGeneratedVariantType, str((variant.metadata_json or {}).get("variant_type"))): variant
+            cast(
+                AnalysisGeneratedVariantType, str((variant.metadata_json or {}).get("variant_type"))
+            ): variant
             for variant in existing_variants
             if str((variant.metadata_json or {}).get("variant_type") or "") in VARIANT_TYPE_ORDER
         }
@@ -130,7 +132,9 @@ class AnalysisGeneratedVariantsApplicationService:
                 variant_type=variant_type,
                 source_suggestion=suggestion,
             )
-            target_variant = existing_by_type.get(variant_type) if payload.replace_existing else None
+            target_variant = (
+                existing_by_type.get(variant_type) if payload.replace_existing else None
+            )
             if target_variant is None:
                 target_variant = GeneratedVariant(
                     parent_creative_version_id=job.creative_version_id,
@@ -142,7 +146,9 @@ class AnalysisGeneratedVariantsApplicationService:
                 self.session.add(target_variant)
                 existing_by_type[variant_type] = target_variant
             else:
-                target_variant.optimization_suggestion_id = suggestion.id if suggestion is not None else None
+                target_variant.optimization_suggestion_id = (
+                    suggestion.id if suggestion is not None else None
+                )
                 target_variant.source_uri = f"generated://analysis/{job.id}/{variant_type}"
                 target_variant.metadata_json = variant_payload
                 target_variant.was_promoted_to_creative_version = False
@@ -173,7 +179,10 @@ class AnalysisGeneratedVariantsApplicationService:
         variants.sort(
             key=lambda item: (
                 VARIANT_TYPE_ORDER.index(
-                    cast(AnalysisGeneratedVariantType, str((item.metadata_json or {}).get("variant_type")))
+                    cast(
+                        AnalysisGeneratedVariantType,
+                        str((item.metadata_json or {}).get("variant_type")),
+                    )
                 ),
                 -item.updated_at.timestamp(),
             )
@@ -205,14 +214,28 @@ class AnalysisGeneratedVariantsApplicationService:
             job_id=job.id,
             parent_creative_version_id=variant.parent_creative_version_id,
             variant_type=cast(AnalysisGeneratedVariantType, str(metadata_json.get("variant_type"))),
-            title=str(metadata_json.get("title") or VARIANT_TITLES.get(cast(AnalysisGeneratedVariantType, str(metadata_json.get("variant_type"))), "Generated variant")),
+            title=str(
+                metadata_json.get("title")
+                or VARIANT_TITLES.get(
+                    cast(AnalysisGeneratedVariantType, str(metadata_json.get("variant_type"))),
+                    "Generated variant",
+                )
+            ),
             summary=str(metadata_json.get("summary") or ""),
-            focus_recommendations=[str(item) for item in metadata_json.get("focus_recommendations") or [] if str(item).strip()],
-            source_suggestion_title=str(metadata_json.get("source_suggestion_title") or "").strip() or None,
-            source_suggestion_type=str(metadata_json.get("source_suggestion_type") or "").strip() or None,
+            focus_recommendations=[
+                str(item)
+                for item in metadata_json.get("focus_recommendations") or []
+                if str(item).strip()
+            ],
+            source_suggestion_title=str(metadata_json.get("source_suggestion_title") or "").strip()
+            or None,
+            source_suggestion_type=str(metadata_json.get("source_suggestion_type") or "").strip()
+            or None,
             sections=sections,
             expected_score_lift_json=expected_score_lift,
-            projected_summary_json=AnalysisSummaryPayload.model_validate(metadata_json.get("projected_summary_json") or {}),
+            projected_summary_json=AnalysisSummaryPayload.model_validate(
+                metadata_json.get("projected_summary_json") or {}
+            ),
             compare_metrics=compare_metrics,
             compare_summary=str(metadata_json.get("compare_summary") or ""),
             created_at=variant.created_at,
@@ -235,7 +258,9 @@ class AnalysisGeneratedVariantsApplicationService:
         job: InferenceJob,
         variant_type: AnalysisGeneratedVariantType,
     ) -> OptimizationSuggestionRead | None:
-        raw_suggestions = list((job.prediction.suggestions if job.prediction is not None else []) or [])
+        raw_suggestions = list(
+            (job.prediction.suggestions if job.prediction is not None else []) or []
+        )
         if not raw_suggestions:
             return None
         suggestions = [OptimizationSuggestionRead.model_validate(item) for item in raw_suggestions]
@@ -266,7 +291,9 @@ class AnalysisGeneratedVariantsApplicationService:
         if job.analysis_result_record is None:
             raise ConflictAppError("Analysis results are not ready yet.")
 
-        summary = AnalysisSummaryPayload.model_validate(job.analysis_result_record.summary_json or {})
+        summary = AnalysisSummaryPayload.model_validate(
+            job.analysis_result_record.summary_json or {}
+        )
         recommendations = list(job.analysis_result_record.recommendations_json or [])
         projected_summary = self._build_projected_summary(
             summary=summary,
@@ -299,8 +326,12 @@ class AnalysisGeneratedVariantsApplicationService:
                 focus_recommendations=focus_recommendations,
             ),
             "focus_recommendations": focus_recommendations,
-            "source_suggestion_title": source_suggestion.title if source_suggestion is not None else None,
-            "source_suggestion_type": source_suggestion.suggestion_type if source_suggestion is not None else None,
+            "source_suggestion_title": source_suggestion.title
+            if source_suggestion is not None
+            else None,
+            "source_suggestion_type": source_suggestion.suggestion_type
+            if source_suggestion is not None
+            else None,
             "sections": sections,
             "expected_score_lift_json": self._build_expected_score_lift(
                 variant_type=variant_type,
@@ -320,10 +351,18 @@ class AnalysisGeneratedVariantsApplicationService:
         focus_recommendations: list[str],
     ) -> list[dict[str, str]]:
         campaign_context = (job.request_payload or {}).get("campaign_context") or {}
-        audience = str(campaign_context.get("audience_segment") or "").strip() or "the target audience"
+        audience = (
+            str(campaign_context.get("audience_segment") or "").strip() or "the target audience"
+        )
         channel = str(campaign_context.get("channel") or "").strip() or "the target channel"
-        objective = str(campaign_context.get("objective") or "").strip() or "the current creative objective"
-        source_title = source_suggestion.title if source_suggestion is not None else "the strongest recommendation"
+        objective = (
+            str(campaign_context.get("objective") or "").strip() or "the current creative objective"
+        )
+        source_title = (
+            source_suggestion.title
+            if source_suggestion is not None
+            else "the strongest recommendation"
+        )
         first_recommendation = focus_recommendations[0] if focus_recommendations else source_title
 
         if variant_type == "hook_rewrite":
@@ -498,7 +537,9 @@ class AnalysisGeneratedVariantsApplicationService:
             source_suggestion=source_suggestion,
         ).items():
             if metric_key in next_values:
-                next_values[metric_key] = round(self._clamp(next_values[metric_key] + metric_value), 2)
+                next_values[metric_key] = round(
+                    self._clamp(next_values[metric_key] + metric_value), 2
+                )
         metadata = dict(summary.metadata or {})
         metadata.update(
             {
@@ -555,14 +596,22 @@ class AnalysisGeneratedVariantsApplicationService:
         top_two = ranked_improvements[:2]
         fragments = []
         for metric in top_two:
-            signed_delta = abs(metric.delta) if metric.key == "cognitive_load_proxy" and metric.delta < 0 else abs(metric.delta)
-            direction = "reduce" if metric.key == "cognitive_load_proxy" and metric.delta < 0 else "lift"
+            signed_delta = (
+                abs(metric.delta)
+                if metric.key == "cognitive_load_proxy" and metric.delta < 0
+                else abs(metric.delta)
+            )
+            direction = (
+                "reduce" if metric.key == "cognitive_load_proxy" and metric.delta < 0 else "lift"
+            )
             if metric.key == "cognitive_load_proxy" and metric.delta > 0:
                 direction = "increase"
             fragments.append(f"{direction} {metric.label.lower()} by {signed_delta:.1f}")
         if not fragments:
             return "This variant is stored and ready for comparison against the original."
-        return f"Compared with the original, this variant is projected to { ' and '.join(fragments) }."
+        return (
+            f"Compared with the original, this variant is projected to {' and '.join(fragments)}."
+        )
 
     def _collect_focus_recommendations(
         self,
@@ -610,14 +659,18 @@ class AnalysisGeneratedVariantsApplicationService:
             value = float(raw_value)
             if raw_key == "attention":
                 translated["overall_attention_score"] += value
-                translated["hook_score_first_3_seconds"] += value * (1.15 if variant_type in {"hook_rewrite", "alternate_thumbnail"} else 0.55)
+                translated["hook_score_first_3_seconds"] += value * (
+                    1.15 if variant_type in {"hook_rewrite", "alternate_thumbnail"} else 0.55
+                )
                 translated["sustained_engagement_score"] += value * 0.45
             elif raw_key == "memory":
                 translated["memory_proxy_score"] += value
                 translated["overall_attention_score"] += value * 0.2
             elif raw_key == "cognitive_load":
                 translated["cognitive_load_proxy"] += value
-                translated["sustained_engagement_score"] += abs(value) * 0.35 if value < 0 else -value * 0.2
+                translated["sustained_engagement_score"] += (
+                    abs(value) * 0.35 if value < 0 else -value * 0.2
+                )
             elif raw_key == "conversion_proxy":
                 translated["sustained_engagement_score"] += value * 0.5
                 translated["overall_attention_score"] += value * 0.35
@@ -636,7 +689,11 @@ class AnalysisGeneratedVariantsApplicationService:
 
     def _suggestion_value_rank(self, expected_lift_json: dict[str, Any]) -> float:
         return round(
-            sum(abs(float(value)) for value in expected_lift_json.values() if isinstance(value, (int, float))),
+            sum(
+                abs(float(value))
+                for value in expected_lift_json.values()
+                if isinstance(value, (int, float))
+            ),
             2,
         )
 

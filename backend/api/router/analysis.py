@@ -11,33 +11,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
 from backend.api.rate_limit import limiter
+from backend.application.services.analysis import AnalysisApplicationService
 from backend.application.services.analysis_comparisons import AnalysisComparisonApplicationService
 from backend.application.services.analysis_evaluations import AnalysisEvaluationApplicationService
-from backend.application.services.analysis_generated_variants import AnalysisGeneratedVariantsApplicationService
+from backend.application.services.analysis_generated_variants import (
+    AnalysisGeneratedVariantsApplicationService,
+)
 from backend.application.services.analysis_insights import AnalysisInsightsApplicationService
 from backend.application.services.collaboration import CollaborationApplicationService
-from backend.application.services.analysis import AnalysisApplicationService
 from backend.core.config import settings
 from backend.db.models import CollaborationEntityType
 from backend.db.session import AsyncSessionLocal, get_db
-from backend.services.analysis_job_events import close_analysis_job_subscription, open_analysis_job_subscription
-from backend.services.analysis_goal_taxonomy import AnalysisChannel, GoalTemplate
 from backend.schemas.analysis import (
     AnalysisAssetListResponse,
+    AnalysisBenchmarkResponse,
+    AnalysisCalibrationResponse,
+    AnalysisClientEventRequest,
     AnalysisComparisonCreateRequest,
     AnalysisComparisonListResponse,
     AnalysisComparisonRead,
-    AnalysisBenchmarkResponse,
-    AnalysisCalibrationResponse,
     AnalysisConfigResponse,
-    AnalysisClientEventRequest,
     AnalysisExecutiveVerdictRead,
     AnalysisGeneratedVariantCreateRequest,
     AnalysisGeneratedVariantListResponse,
+    AnalysisGoalPresetsResponse,
     AnalysisJobCreateRequest,
     AnalysisJobListResponse,
     AnalysisJobStatusResponse,
-    AnalysisGoalPresetsResponse,
     AnalysisOutcomeImportResponse,
     AnalysisResultRead,
     AnalysisUploadCompleteRequest,
@@ -58,7 +58,12 @@ from backend.schemas.evaluators import (
     EvaluationMode,
     EvaluationRecordRead,
 )
-from backend.tasks import dispatch_prediction_job, dispatch_llm_evaluation_job
+from backend.services.analysis_goal_taxonomy import AnalysisChannel, GoalTemplate
+from backend.services.analysis_job_events import (
+    close_analysis_job_subscription,
+    open_analysis_job_subscription,
+)
+from backend.tasks import dispatch_prediction_job
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -82,7 +87,9 @@ def _decode_analysis_job_event_message(message: dict[str, Any] | None) -> dict[s
 
 async def _load_analysis_job_snapshot(*, user_id: UUID, job_id: UUID) -> AnalysisJobStatusResponse:
     async with AsyncSessionLocal() as session:
-        return await AnalysisApplicationService(session).get_analysis_job(user_id=user_id, job_id=job_id)
+        return await AnalysisApplicationService(session).get_analysis_job(
+            user_id=user_id, job_id=job_id
+        )
 
 
 @router.get("/config", response_model=AnalysisConfigResponse)
@@ -134,7 +141,9 @@ async def list_analysis_comparisons(
     )
 
 
-@router.post("/comparisons", response_model=AnalysisComparisonRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/comparisons", response_model=AnalysisComparisonRead, status_code=status.HTTP_201_CREATED
+)
 async def create_analysis_comparison(
     payload: AnalysisComparisonCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -202,7 +211,11 @@ async def update_collaboration_review(
     )
 
 
-@router.post("/collaboration/{entity_type}/{entity_id}/comments", response_model=CollaborationReviewRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/collaboration/{entity_type}/{entity_id}/comments",
+    response_model=CollaborationReviewRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_collaboration_comment(
     entity_type: CollaborationEntityType,
     entity_id: UUID,
@@ -279,7 +292,9 @@ async def list_analysis_jobs(
     )
 
 
-@router.post("/uploads", response_model=AnalysisUploadCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/uploads", response_model=AnalysisUploadCreateResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_analysis_upload_session(
     payload: AnalysisUploadCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -328,7 +343,9 @@ async def fallback_analysis_upload(
     )
 
 
-@router.post("/jobs", response_model=AnalysisJobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs", response_model=AnalysisJobStatusResponse, status_code=status.HTTP_202_ACCEPTED
+)
 @limiter.limit("20/minute")
 async def create_analysis_job(
     payload: AnalysisJobCreateRequest,
@@ -362,7 +379,11 @@ async def get_analysis_job(
     )
 
 
-@router.post("/jobs/{job_id}/rerun", response_model=AnalysisJobStatusResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs/{job_id}/rerun",
+    response_model=AnalysisJobStatusResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 @limiter.limit("10/minute")
 async def rerun_analysis_job(
     job_id: UUID,
@@ -377,7 +398,9 @@ async def rerun_analysis_job(
     await svc.rerun_job(job_id=job_id, user_id=auth.user.id)
     await db.commit()
     await dispatch_prediction_job(job_id)
-    return await AnalysisApplicationService(db).get_analysis_job(user_id=auth.user.id, job_id=job_id)
+    return await AnalysisApplicationService(db).get_analysis_job(
+        user_id=auth.user.id, job_id=job_id
+    )
 
 
 @router.get("/jobs/{job_id}/events")
@@ -395,7 +418,9 @@ async def stream_analysis_job_events(
         last_snapshot_refresh_at = 0.0
 
         try:
-            initial_snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+            initial_snapshot = await _load_analysis_job_snapshot(
+                user_id=auth.user.id, job_id=job_id
+            )
             current_payload = initial_snapshot.model_dump(mode="json")
             last_snapshot_json = json.dumps(current_payload, sort_keys=True)
             last_snapshot_refresh_at = asyncio.get_running_loop().time()
@@ -413,7 +438,9 @@ async def stream_analysis_job_events(
                 if subscription is None:
                     await asyncio.sleep(1.0)
                     heartbeat_elapsed += 1.0
-                    should_refresh_snapshot = heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
+                    should_refresh_snapshot = (
+                        heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
+                    )
                     if heartbeat_elapsed >= 15.0:
                         yield _encode_sse_event(
                             event="heartbeat",
@@ -428,7 +455,9 @@ async def stream_analysis_job_events(
                     )
                     if message is None:
                         heartbeat_elapsed += 10.0
-                        should_refresh_snapshot = heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
+                        should_refresh_snapshot = (
+                            heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
+                        )
                         if heartbeat_elapsed >= 15.0:
                             yield _encode_sse_event(
                                 event="heartbeat",
@@ -446,14 +475,19 @@ async def stream_analysis_job_events(
                         ):
                             progress_payload = decoded_message.get("payload") or {}
                             current_job = dict(current_payload.get("job") or {})
-                            current_job["status"] = progress_payload.get("status") or current_job.get("status") or "processing"
+                            current_job["status"] = (
+                                progress_payload.get("status")
+                                or current_job.get("status")
+                                or "processing"
+                            )
                             current_payload["job"] = current_job
                             current_payload["progress"] = {
                                 "stage": progress_payload.get("stage"),
                                 "stage_label": progress_payload.get("stage_label"),
                                 "diagnostics": progress_payload.get("diagnostics") or {},
                                 "is_partial": bool(
-                                    progress_payload.get("is_partial") or progress_payload.get("partial_result")
+                                    progress_payload.get("is_partial")
+                                    or progress_payload.get("partial_result")
                                 ),
                             }
                             yield _encode_sse_event(
@@ -467,11 +501,18 @@ async def stream_analysis_job_events(
                                     "stage_label": progress_payload.get("stage_label")
                                     or ((current_payload.get("progress") or {}).get("stage_label")),
                                     "diagnostics": progress_payload.get("diagnostics")
-                                    or ((current_payload.get("progress") or {}).get("diagnostics") or {}),
+                                    or (
+                                        (current_payload.get("progress") or {}).get("diagnostics")
+                                        or {}
+                                    ),
                                     "is_partial": bool(
                                         progress_payload.get("is_partial")
                                         or progress_payload.get("partial_result")
-                                        or ((current_payload.get("progress") or {}).get("is_partial"))
+                                        or (
+                                            (current_payload.get("progress") or {}).get(
+                                                "is_partial"
+                                            )
+                                        )
                                     ),
                                 },
                             )
@@ -483,9 +524,12 @@ async def stream_analysis_job_events(
 
                 loop_time = asyncio.get_running_loop().time()
                 if should_refresh_snapshot or (
-                    loop_time - last_snapshot_refresh_at >= settings.analysis_progress_snapshot_refresh_seconds
+                    loop_time - last_snapshot_refresh_at
+                    >= settings.analysis_progress_snapshot_refresh_seconds
                 ):
-                    snapshot = await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
+                    snapshot = await _load_analysis_job_snapshot(
+                        user_id=auth.user.id, job_id=job_id
+                    )
                     payload = snapshot.model_dump(mode="json")
                     snapshot_json = json.dumps(payload, sort_keys=True)
                     current_payload = payload
@@ -589,7 +633,11 @@ async def generate_analysis_variants(
     )
 
 
-@router.post("/outcomes/import", response_model=AnalysisOutcomeImportResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/outcomes/import",
+    response_model=AnalysisOutcomeImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
 async def import_analysis_outcomes(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),

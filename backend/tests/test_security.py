@@ -1,28 +1,27 @@
 """Tests for backend.core.security — token issuance and verification."""
+
 from __future__ import annotations
 
 import time
 import unittest
 from uuid import uuid4
 
+from backend.core.exceptions import UnauthorizedAppError
 from backend.core.security import (
-    SessionClaims,
     MfaChallengeClaims,
-    create_session_token,
-    verify_session_token,
+    SessionClaims,
     create_mfa_challenge_token,
-    verify_mfa_challenge_token,
-    hash_password,
-    verify_password,
+    create_session_token,
     generate_recovery_codes,
+    hash_password,
     hash_recovery_code,
     normalize_recovery_code,
     seal_secret,
     unseal_secret,
-    verify_totp_code,
-    create_totp_secret,
+    verify_mfa_challenge_token,
+    verify_password,
+    verify_session_token,
 )
-from backend.core.exceptions import UnauthorizedAppError
 
 
 class TestSessionToken(unittest.TestCase):
@@ -175,15 +174,15 @@ class TestProductionSecretGuard(unittest.TestCase):
             "DATABASE_URL": "postgresql+asyncpg://x:y@localhost/z",
         }
         try:
-            with patch.dict(os.environ, env, clear=False):
-                with self.assertRaises(Exception):
-                    config_module.Settings(_env_file=None)
+            with patch.dict(os.environ, env, clear=False), self.assertRaises(Exception):
+                config_module.Settings(_env_file=None)
         finally:
             config_module.get_settings.cache_clear()
 
     def test_strong_secret_accepted_in_production(self):
         import os
         from unittest.mock import patch
+
         from backend.core import config as config_module
 
         config_module.get_settings.cache_clear()

@@ -13,7 +13,11 @@ from backend.schemas.schemas import CreativeVersionRead
 router = APIRouter(prefix="/creative-versions", tags=["creative-versions"])
 
 
-@router.post("/from-artifact/{artifact_id}", response_model=CreativeVersionRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/from-artifact/{artifact_id}",
+    response_model=CreativeVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_version_from_artifact(
     artifact_id: UUID,
     db: AsyncSession = Depends(get_db),

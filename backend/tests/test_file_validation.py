@@ -1,4 +1,5 @@
 """Tests for backend.services.file_validation and the MIME-type guard."""
+
 from __future__ import annotations
 
 import io
@@ -6,7 +7,6 @@ import unittest
 
 from backend.services.file_validation import validate_file_content
 from backend.services.storage import ObjectStorageService
-
 
 # Minimal valid JPEG magic bytes (FFD8FF)
 _JPEG_MAGIC = bytes([0xFF, 0xD8, 0xFF, 0xE0]) + b"\x00" * 100
@@ -44,7 +44,9 @@ class TestMimeTypeGuard(unittest.TestCase):
 
     def test_disallowed_type_with_valid_prefix_substring(self):
         # "application/vnd.video-something" should NOT match "video/"
-        self.assertFalse(ObjectStorageService.is_allowed_mime_type("application/vnd.video-something"))
+        self.assertFalse(
+            ObjectStorageService.is_allowed_mime_type("application/vnd.video-something")
+        )
 
 
 class TestFileContentValidation(unittest.TestCase):

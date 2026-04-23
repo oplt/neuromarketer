@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -70,7 +70,9 @@ class InferenceRepository:
                 selectinload(InferenceJob.llm_evaluations),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.scores),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.visualizations),
-                selectinload(InferenceJob.prediction).selectinload(PredictionResult.timeline_points),
+                selectinload(InferenceJob.prediction).selectinload(
+                    PredictionResult.timeline_points
+                ),
                 selectinload(InferenceJob.prediction).selectinload(PredictionResult.suggestions),
             )
             .where(InferenceJob.id == job_id)
@@ -117,7 +119,9 @@ class InferenceRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_prediction_result_full(self, prediction_result_id: UUID) -> PredictionResult | None:
+    async def get_prediction_result_full(
+        self, prediction_result_id: UUID
+    ) -> PredictionResult | None:
         result = await self.session.execute(
             select(PredictionResult)
             .options(
@@ -150,7 +154,7 @@ class InferenceRepository:
         if job.status == JobStatus.SUCCEEDED and job.prediction is not None:
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         is_stale_running_job = (
             job.status == JobStatus.RUNNING
             and job.started_at is not None
@@ -172,7 +176,9 @@ class InferenceRepository:
         await self.session.flush()
         return job
 
-    async def acquire_scoring_job(self, job_id: UUID, *, stale_after_seconds: int) -> InferenceJob | None:
+    async def acquire_scoring_job(
+        self, job_id: UUID, *, stale_after_seconds: int
+    ) -> InferenceJob | None:
         result = await self.session.execute(
             select(InferenceJob)
             .options(
@@ -199,11 +205,11 @@ class InferenceRepository:
             try:
                 phase_updated_at = datetime.fromisoformat(phase_updated_at_raw)
                 if phase_updated_at.tzinfo is None:
-                    phase_updated_at = phase_updated_at.replace(tzinfo=timezone.utc)
+                    phase_updated_at = phase_updated_at.replace(tzinfo=UTC)
             except ValueError:
                 phase_updated_at = None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         is_stale_running_phase = (
             phase_name == "scoring_running"
             and phase_updated_at is not None
@@ -226,7 +232,7 @@ class InferenceRepository:
         runtime_params = dict(job.runtime_params or {})
         runtime_params["analysis_execution_phase"] = {
             "phase": "scoring_queued",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         job.runtime_params = runtime_params
         await self.session.flush()
@@ -240,11 +246,14 @@ class InferenceRepository:
     ) -> None:
         job.status = JobStatus.FAILED
         job.error_message = error_message
-        job.completed_at = datetime.now(timezone.utc)
+        job.completed_at = datetime.now(UTC)
         runtime_params = dict(job.runtime_params or {})
         current_progress = dict(runtime_params.get("analysis_progress") or {})
         current_diagnostics = dict(current_progress.get("diagnostics") or {})
-        stage_label = current_progress.get("stage_label") or "The analysis stopped before results were produced."
+        stage_label = (
+            current_progress.get("stage_label")
+            or "The analysis stopped before results were produced."
+        )
         if partial_result_available:
             stage_label = "TRIBE scene extraction completed, but LLM scoring failed. Showing the saved TRIBE-only result."
         runtime_params["analysis_progress"] = {
@@ -255,7 +264,7 @@ class InferenceRepository:
         }
         runtime_params["analysis_execution_phase"] = {
             "phase": "failed",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         job.runtime_params = runtime_params
         await self.session.flush()
@@ -263,7 +272,7 @@ class InferenceRepository:
     async def mark_job_succeeded(self, job: InferenceJob) -> None:
         job.status = JobStatus.SUCCEEDED
         job.error_message = None
-        job.completed_at = datetime.now(timezone.utc)
+        job.completed_at = datetime.now(UTC)
         runtime_params = dict(job.runtime_params or {})
         runtime_params["analysis_execution_phase"] = {
             "phase": "completed",
@@ -287,7 +296,7 @@ class InferenceRepository:
         }
         runtime_params["analysis_execution_phase"] = {
             "phase": "queued",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         job.runtime_params = runtime_params
         await self.session.flush()
@@ -431,7 +440,9 @@ class InferenceRepository:
         return prediction
 
     async def get_prediction_result_for_job(self, job_id: UUID) -> PredictionResult | None:
-        result = await self.session.execute(select(PredictionResult).where(PredictionResult.job_id == job_id))
+        result = await self.session.execute(
+            select(PredictionResult).where(PredictionResult.job_id == job_id)
+        )
         return result.scalar_one_or_none()
 
     async def replace_analysis_result(
@@ -492,7 +503,9 @@ class InferenceRepository:
                 creative_version_id=creative_version_id,
                 prediction_result_id=prediction.id,
                 created_at=prediction.created_at,
-                scores_by_type={score.score_type.value: score.normalized_score for score in prediction.scores},
+                scores_by_type={
+                    score.score_type.value: score.normalized_score for score in prediction.scores
+                },
             )
 
         return snapshots

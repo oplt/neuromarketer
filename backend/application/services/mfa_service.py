@@ -7,14 +7,14 @@ All public method signatures are identical to the originals so callers
 do not need to change.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
-from backend.core.exceptions import ForbiddenAppError, NotFoundAppError, ValidationAppError
+from backend.core.exceptions import NotFoundAppError, ValidationAppError
 from backend.core.security import (
     build_totp_uri,
     create_totp_secret,
@@ -295,4 +295,4 @@ class MFAService:
         )
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

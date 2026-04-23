@@ -75,7 +75,10 @@ def _fake_scoring_response() -> AnalysisScoringResponse:
                     "score": 78,
                     "confidence": 0.86,
                     "reason": "Opening and mid-stream signals keep attention relatively stable.",
-                    "evidence": ["Segment 0 opens strongly.", "Segment 1 stays above the midpoint."],
+                    "evidence": [
+                        "Segment 0 opens strongly.",
+                        "Segment 1 stays above the midpoint.",
+                    ],
                 },
                 "emotion": {
                     "score": 62,
@@ -233,9 +236,15 @@ def test_neuro_scoring_service_maps_llm_scores_into_bundle() -> None:
     ]
     assert all(score.raw_value is None for score in bundle.scores)
     assert float(bundle.scores[0].normalized_score) == 78.0
-    assert bundle.scores[0].metadata_json["reason"] == "Opening and mid-stream signals keep attention relatively stable."
+    assert (
+        bundle.scores[0].metadata_json["reason"]
+        == "Opening and mid-stream signals keep attention relatively stable."
+    )
     assert bundle.scores[0].metadata_json["prompt_version"] == "analysis_scoring_v2"
-    assert bundle.timeline_points[0].metadata_json["rationale"] == "The opening segment captures attention quickly."
+    assert (
+        bundle.timeline_points[0].metadata_json["rationale"]
+        == "The opening segment captures attention quickly."
+    )
     assert bundle.suggestions[0].suggestion_type.value == "cta"
     assert bundle.suggestions[0].proposed_change_json["timestamp_ms"] == 4000
     assert bundle.notes[0] == "The opening holds attention and the CTA is understandable."
@@ -309,7 +318,9 @@ def test_analysis_scoring_service_caps_ollama_output_tokens(monkeypatch) -> None
     router = _RouterStub(provider="ollama")
     monkeypatch.setattr(settings, "llm_analysis_scoring_max_tokens", 222)
 
-    asyncio.run(AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]}))
+    asyncio.run(
+        AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]})
+    )
 
     assert router.last_options == {"num_predict": 222}
 
@@ -320,7 +331,9 @@ def test_analysis_scoring_service_caps_openai_compatible_output_tokens(monkeypat
     router = _RouterStub(provider="openai_compatible")
     monkeypatch.setattr(settings, "llm_analysis_scoring_max_tokens", 111)
 
-    asyncio.run(AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]}))
+    asyncio.run(
+        AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]})
+    )
 
     assert router.last_options == {"max_tokens": 111}
 
@@ -363,5 +376,8 @@ def test_analysis_postprocessor_uses_llm_outputs_without_threshold_intervals() -
             "confidence": 81.0,
         }
     ]
-    assert any(metric["key"] == "emotion_score" and metric["value"] == 62.0 for metric in payload.metrics_json)
+    assert any(
+        metric["key"] == "emotion_score" and metric["value"] == 62.0
+        for metric in payload.metrics_json
+    )
     assert payload.segments_json[0]["note"] == "The opening segment captures attention quickly."

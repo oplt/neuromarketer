@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl
 
-
 OrgRoleValue = Literal["owner", "admin", "member", "viewer"]
 ApiKeyStatusValue = Literal["active", "revoked"]
 WorkspaceInviteStatusValue = Literal["pending", "accepted", "revoked", "expired"]
@@ -142,7 +141,9 @@ class AccountSecurityOverviewRead(BaseModel):
     mfa: AccountMfaStatusRead = Field(default_factory=AccountMfaStatusRead)
     invites: list[AccountInviteRead] = Field(default_factory=list)
     sso: AccountSsoConfigRead = Field(default_factory=AccountSsoConfigRead)
-    available_sso_providers: list[SsoProviderValue] = Field(default_factory=lambda: ["oidc", "saml"])
+    available_sso_providers: list[SsoProviderValue] = Field(
+        default_factory=lambda: ["oidc", "saml"]
+    )
 
 
 class AccountControlCenterRead(BaseModel):

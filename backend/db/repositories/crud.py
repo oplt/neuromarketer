@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-from datetime import datetime, timezone
-from decimal import Decimal
 import re
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import delete, desc, func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,10 +22,10 @@ from backend.db.models import (
     InferenceJob,
     JobMetric,
     JobStatus,
+    OptimizationSuggestion,
     Organization,
     OrganizationMembership,
     OrgRole,
-    OptimizationSuggestion,
     PredictionResult,
     PredictionScore,
     PredictionTimelinePoint,
@@ -49,15 +49,14 @@ DEFAULT_PROJECT_DESCRIPTION = "System-created project used by the Analysis works
 # Auth / users
 # ---------------------------------------------------------------------
 
+
 def _slugify_workspace_name(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return normalized or "workspace"
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> User | None:
-    result = await db.execute(
-        select(User).where(User.email == email.strip().lower())
-    )
+    result = await db.execute(select(User).where(User.email == email.strip().lower()))
     return result.scalar_one_or_none()
 
 
@@ -67,9 +66,7 @@ async def _build_unique_organization_slug(db: AsyncSession, base_name: str) -> s
     suffix = 2
 
     while True:
-        result = await db.execute(
-            select(Organization.id).where(Organization.slug == candidate)
-        )
+        result = await db.execute(select(Organization.id).where(Organization.slug == candidate))
         if result.scalar_one_or_none() is None:
             return candidate
         candidate = f"{base_slug}-{suffix}"
@@ -294,6 +291,7 @@ async def get_or_create_default_project_for_organization(
 # Project / creative
 # ---------------------------------------------------------------------
 
+
 async def create_project(db: AsyncSession, payload: ProjectCreate) -> Project:
     obj = Project(
         organization_id=payload.organization_id,
@@ -310,9 +308,7 @@ async def create_project(db: AsyncSession, payload: ProjectCreate) -> Project:
 
 
 async def get_project(db: AsyncSession, project_id: UUID) -> Project | None:
-    result = await db.execute(
-        select(Project).where(Project.id == project_id)
-    )
+    result = await db.execute(select(Project).where(Project.id == project_id))
     return result.scalar_one_or_none()
 
 
@@ -333,9 +329,7 @@ async def create_creative(db: AsyncSession, payload: CreativeCreate) -> Creative
 
 
 async def get_creative(db: AsyncSession, creative_id: UUID) -> Creative | None:
-    result = await db.execute(
-        select(Creative).where(Creative.id == creative_id)
-    )
+    result = await db.execute(select(Creative).where(Creative.id == creative_id))
     return result.scalar_one_or_none()
 
 
@@ -374,7 +368,9 @@ async def create_creative_version(
     return obj
 
 
-async def get_creative_version(db: AsyncSession, creative_version_id: UUID) -> CreativeVersion | None:
+async def get_creative_version(
+    db: AsyncSession, creative_version_id: UUID
+) -> CreativeVersion | None:
     result = await db.execute(
         select(CreativeVersion).where(CreativeVersion.id == creative_version_id)
     )
@@ -384,6 +380,7 @@ async def get_creative_version(db: AsyncSession, creative_version_id: UUID) -> C
 # ---------------------------------------------------------------------
 # Inference jobs / prediction results
 # ---------------------------------------------------------------------
+
 
 async def create_inference_job(
     db: AsyncSession,
@@ -413,31 +410,29 @@ async def create_inference_job(
 
 
 async def mark_job_running(db: AsyncSession, job_id: UUID) -> InferenceJob | None:
-    result = await db.execute(
-        select(InferenceJob).where(InferenceJob.id == job_id)
-    )
+    result = await db.execute(select(InferenceJob).where(InferenceJob.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         return None
 
     job.status = JobStatus.RUNNING
-    job.started_at = datetime.now(timezone.utc)
+    job.started_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(job)
     return job
 
 
-async def mark_job_failed(db: AsyncSession, job_id: UUID, error_message: str) -> InferenceJob | None:
-    result = await db.execute(
-        select(InferenceJob).where(InferenceJob.id == job_id)
-    )
+async def mark_job_failed(
+    db: AsyncSession, job_id: UUID, error_message: str
+) -> InferenceJob | None:
+    result = await db.execute(select(InferenceJob).where(InferenceJob.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         return None
 
     job.status = JobStatus.FAILED
     job.error_message = error_message
-    job.completed_at = datetime.now(timezone.utc)
+    job.completed_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(job)
     return job
@@ -594,15 +589,13 @@ async def create_optimization_suggestion(
 
 
 async def mark_job_succeeded(db: AsyncSession, job_id: UUID) -> InferenceJob | None:
-    result = await db.execute(
-        select(InferenceJob).where(InferenceJob.id == job_id)
-    )
+    result = await db.execute(select(InferenceJob).where(InferenceJob.id == job_id))
     job = result.scalar_one_or_none()
     if not job:
         return None
 
     job.status = JobStatus.SUCCEEDED
-    job.completed_at = datetime.now(timezone.utc)
+    job.completed_at = datetime.now(UTC)
     await db.commit()
     await db.refresh(job)
     return job
@@ -642,6 +635,7 @@ async def get_prediction_result_full(
 # ---------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------
+
 
 async def create_comparison(
     db: AsyncSession,

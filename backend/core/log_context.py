@@ -10,7 +10,12 @@ from typing import Any
 from uuid import UUID
 
 from starlette.requests import Request
-from structlog.contextvars import bind_contextvars, clear_contextvars, get_contextvars, reset_contextvars
+from structlog.contextvars import (
+    bind_contextvars,
+    clear_contextvars,
+    get_contextvars,
+    reset_contextvars,
+)
 
 from backend.core.telemetry import get_active_trace_context, parse_traceparent
 
@@ -129,13 +134,18 @@ def normalize_log_value(value: Any, *, key: str | None = None, depth: int = 0) -
         return value
     if isinstance(value, Mapping):
         if _is_large_content_key(lower_key):
-            return {"keys": sorted(str(item) for item in value.keys())[:10], "item_count": len(value)}
+            return {
+                "keys": sorted(str(item) for item in value.keys())[:10],
+                "item_count": len(value),
+            }
         normalized: dict[str, Any] = {}
         for index, (child_key, child_value) in enumerate(value.items()):
             if index >= _MAX_COLLECTION_ITEMS:
                 normalized["_truncated_items"] = len(value) - _MAX_COLLECTION_ITEMS
                 break
-            normalized[str(child_key)] = normalize_log_value(child_value, key=str(child_key), depth=depth + 1)
+            normalized[str(child_key)] = normalize_log_value(
+                child_value, key=str(child_key), depth=depth + 1
+            )
         return normalized
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         items = list(value)
@@ -160,7 +170,9 @@ def clear_log_context() -> None:
 
 
 def bind_log_context(**fields: Any) -> dict[str, Any]:
-    safe_fields = {key: value for key, value in normalize_log_fields(fields).items() if value is not None}
+    safe_fields = {
+        key: value for key, value in normalize_log_fields(fields).items() if value is not None
+    }
     if not safe_fields:
         return {}
     return bind_contextvars(**safe_fields)
@@ -240,7 +252,9 @@ def bind_celery_task_context(
     if correlation:
         set_correlation_id(str(correlation))
 
-    parsed_trace_context = parse_traceparent(str(headers.get("traceparent"))) if headers.get("traceparent") else {}
+    parsed_trace_context = (
+        parse_traceparent(str(headers.get("traceparent"))) if headers.get("traceparent") else {}
+    )
     context_fields = {
         "correlation_id": correlation,
         "request_id": headers.get("request_id") or correlation,

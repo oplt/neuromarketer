@@ -22,5 +22,7 @@ def get_evaluator(mode: EvaluationMode | str) -> BaseEvaluator:
         evaluator_cls = EVALUATOR_REGISTRY[normalized_mode]
     except KeyError as exc:
         valid = ", ".join(sorted(EVALUATOR_REGISTRY))
-        raise ValueError(f"Unsupported evaluation mode '{normalized_mode}'. Valid modes: {valid}") from exc
+        raise ValueError(
+            f"Unsupported evaluation mode '{normalized_mode}'. Valid modes: {valid}"
+        ) from exc
     return evaluator_cls()

@@ -2,34 +2,34 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.application.services.mfa_service import MFAService
 from backend.core.config import settings
-from backend.core.exceptions import ConflictAppError, ForbiddenAppError, NotFoundAppError, UnauthorizedAppError, ValidationAppError
+from backend.core.exceptions import (
+    ConflictAppError,
+    ForbiddenAppError,
+    NotFoundAppError,
+    UnauthorizedAppError,
+    ValidationAppError,
+)
 from backend.core.security import (
     build_token_prefix,
-    build_totp_uri,
     create_mfa_challenge_token,
     create_session_token,
-    create_totp_secret,
-    generate_recovery_codes,
     hash_password,
-    hash_recovery_code,
     hash_token,
     seal_secret,
-    unseal_secret,
     verify_mfa_challenge_token,
     verify_password,
-    verify_totp_code,
 )
 from backend.db.models import (
     AuditLog,
-    MfaMethodType,
     Organization,
     OrganizationMembership,
     OrganizationSsoConfig,
@@ -66,7 +66,6 @@ from backend.schemas.schemas import (
     SignInRequest,
     SignUpRequest,
 )
-from backend.application.services.mfa_service import MFAService
 
 ADMIN_ROLES = {OrgRole.OWNER, OrgRole.ADMIN}
 AVAILABLE_MFA_METHODS = ["totp", "recovery_code"]
@@ -147,7 +146,9 @@ class AuthApplicationService:
                 organization_id=organization.id,
                 email=user.email,
                 expires_at_epoch=int(
-                    (self._now() + timedelta(minutes=max(1, settings.mfa_challenge_ttl_minutes))).timestamp()
+                    (
+                        self._now() + timedelta(minutes=max(1, settings.mfa_challenge_ttl_minutes))
+                    ).timestamp()
                 ),
             )
             return AuthResponse(
@@ -203,9 +204,13 @@ class AuthApplicationService:
 
         credential = await self._get_mfa_credential(user_id=user.id)
         if credential is None or not credential.is_enabled or not credential.secret_ciphertext:
-            raise UnauthorizedAppError("Multi-factor authentication is not configured for this account.")
+            raise UnauthorizedAppError(
+                "Multi-factor authentication is not configured for this account."
+            )
 
-        await self._verify_mfa_assertion(credential=credential, code=payload.code, recovery_code=payload.recovery_code)
+        await self._verify_mfa_assertion(
+            credential=credential, code=payload.code, recovery_code=payload.recovery_code
+        )
         credential.last_used_at = self._now()
         default_project = await crud.get_or_create_default_project_for_organization(
             self.session,
@@ -237,7 +242,11 @@ class AuthApplicationService:
 
     async def sign_out(self, *, session_id: UUID, user_id: UUID, organization_id: UUID) -> None:
         session_record = await self.session.get(UserSession, session_id)
-        if session_record is None or session_record.user_id != user_id or session_record.organization_id != organization_id:
+        if (
+            session_record is None
+            or session_record.user_id != user_id
+            or session_record.organization_id != organization_id
+        ):
             return
         if session_record.revoked_at is None:
             session_record.revoked_at = self._now()
@@ -253,7 +262,9 @@ class AuthApplicationService:
             await self.session.commit()
 
     async def get_invite_preview(self, *, invite_token: str) -> InvitePreviewRead:
-        invite, organization = await self._resolve_invite(invite_token=invite_token, require_pending=True)
+        invite, organization = await self._resolve_invite(
+            invite_token=invite_token, require_pending=True
+        )
         return InvitePreviewRead(
             workspace_name=organization.name,
             workspace_slug=organization.slug,
@@ -262,8 +273,12 @@ class AuthApplicationService:
             expires_at=invite.expires_at,
         )
 
-    async def accept_invite(self, *, payload: AcceptInviteRequest, client: AuthClientMetadata) -> AuthResponse:
-        invite, organization = await self._resolve_invite(invite_token=payload.invite_token, require_pending=True)
+    async def accept_invite(
+        self, *, payload: AcceptInviteRequest, client: AuthClientMetadata
+    ) -> AuthResponse:
+        invite, organization = await self._resolve_invite(
+            invite_token=payload.invite_token, require_pending=True
+        )
         existing_user = await crud.get_user_by_email(self.session, invite.email)
         if existing_user is not None:
             if not verify_password(payload.password, existing_user.password_hash):
@@ -333,7 +348,10 @@ class AuthApplicationService:
                     organization_id=organization.id,
                     email=user.email,
                     expires_at_epoch=int(
-                        (self._now() + timedelta(minutes=max(1, settings.mfa_challenge_ttl_minutes))).timestamp()
+                        (
+                            self._now()
+                            + timedelta(minutes=max(1, settings.mfa_challenge_ttl_minutes))
+                        ).timestamp()
                     ),
                 ),
                 available_mfa_methods=list(AVAILABLE_MFA_METHODS),
@@ -448,7 +466,11 @@ class AuthApplicationService:
     ) -> AccountUserSessionRead:
         await self._get_membership(organization_id=organization_id, user_id=user_id)
         session_record = await self.session.get(UserSession, session_id)
-        if session_record is None or session_record.organization_id != organization_id or session_record.user_id != user_id:
+        if (
+            session_record is None
+            or session_record.organization_id != organization_id
+            or session_record.user_id != user_id
+        ):
             raise NotFoundAppError("Session not found.")
         if session_record.revoked_at is None:
             session_record.revoked_at = self._now()
@@ -471,7 +493,9 @@ class AuthApplicationService:
         actor_user_id: UUID,
         payload: AccountInviteCreateRequest,
     ) -> AccountInviteCreateResponse:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "create invites")
         normalized_email = payload.email.strip().lower()
 
@@ -490,7 +514,9 @@ class AuthApplicationService:
             raise ValidationAppError("There is already a pending invite for this email.")
 
         raw_token = f"nmi_{uuid.uuid4().hex}{uuid.uuid4().hex[:8]}"
-        expires_at = self._now() + timedelta(hours=payload.expires_in_hours or settings.invite_ttl_hours)
+        expires_at = self._now() + timedelta(
+            hours=payload.expires_in_hours or settings.invite_ttl_hours
+        )
         invite = WorkspaceInvite(
             organization_id=organization_id,
             invited_by_user_id=actor_user_id,
@@ -510,7 +536,11 @@ class AuthApplicationService:
             action="auth.invite.created",
             entity_type="workspace_invite",
             entity_id=invite.id,
-            payload_json={"email": normalized_email, "role": payload.role, "expires_at": expires_at.isoformat()},
+            payload_json={
+                "email": normalized_email,
+                "role": payload.role,
+                "expires_at": expires_at.isoformat(),
+            },
         )
         await self.session.commit()
         return AccountInviteCreateResponse(
@@ -526,7 +556,9 @@ class AuthApplicationService:
         actor_user_id: UUID,
         invite_id: UUID,
     ) -> AccountInviteRead:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "revoke invites")
         invite = await self.session.get(WorkspaceInvite, invite_id)
         if invite is None or invite.organization_id != organization_id:
@@ -552,7 +584,9 @@ class AuthApplicationService:
         actor_user_id: UUID,
         payload: AccountSsoConfigUpsertRequest,
     ) -> AccountSsoConfigRead:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "manage SSO configuration")
 
         result = await self.session.execute(
@@ -562,7 +596,9 @@ class AuthApplicationService:
         )
         config = result.scalar_one_or_none()
         if config is None:
-            config = OrganizationSsoConfig(organization_id=organization_id, updated_by_user_id=actor_user_id)
+            config = OrganizationSsoConfig(
+                organization_id=organization_id, updated_by_user_id=actor_user_id
+            )
             self.session.add(config)
             await self.session.flush()
 
@@ -575,7 +611,9 @@ class AuthApplicationService:
         config.client_id = self._clean_optional(payload.client_id)
         if "client_secret" in payload.model_fields_set:
             cleaned_secret = self._clean_optional(payload.client_secret)
-            config.client_secret_ciphertext = seal_secret(cleaned_secret) if cleaned_secret else None
+            config.client_secret_ciphertext = (
+                seal_secret(cleaned_secret) if cleaned_secret else None
+            )
         config.scopes_json = sorted({item.strip() for item in payload.scopes if item.strip()})
         config.attribute_mapping_json = dict(payload.attribute_mapping or {})
         config.certificate_pem = self._clean_optional(payload.certificate_pem)
@@ -630,7 +668,9 @@ class AuthApplicationService:
         touch_cutoff = now - timedelta(seconds=max(1, settings.session_touch_interval_seconds))
         if session_record.last_seen_at <= touch_cutoff:
             session_record.last_seen_at = now
-            session_record.idle_expires_at = now + timedelta(minutes=max(1, settings.session_idle_ttl_minutes))
+            session_record.idle_expires_at = now + timedelta(
+                minutes=max(1, settings.session_idle_ttl_minutes)
+            )
             await self.session.commit()
         return session_record
 
@@ -708,7 +748,9 @@ class AuthApplicationService:
             raise ValidationAppError("This invite has expired.")
         return invite, organization
 
-    async def _get_membership(self, *, organization_id: UUID, user_id: UUID) -> OrganizationMembership:
+    async def _get_membership(
+        self, *, organization_id: UUID, user_id: UUID
+    ) -> OrganizationMembership:
         membership = await crud.get_membership_for_user(
             self.session,
             user_id=user_id,
@@ -783,7 +825,9 @@ class AuthApplicationService:
         accepted_by = None
         if users_by_id is not None:
             invited_by = users_by_id.get(invite.invited_by_user_id)
-            accepted_by = users_by_id.get(invite.accepted_by_user_id) if invite.accepted_by_user_id else None
+            accepted_by = (
+                users_by_id.get(invite.accepted_by_user_id) if invite.accepted_by_user_id else None
+            )
         else:
             invited_by = await crud.get_user_by_id(self.session, invite.invited_by_user_id)
             accepted_by = (
@@ -852,7 +896,9 @@ class AuthApplicationService:
             if not config.audience:
                 checks.append("SAML audience is missing.")
         if not checks:
-            checks.append("Configuration is structurally complete. IdP handshake wiring can be added on top of this.")
+            checks.append(
+                "Configuration is structurally complete. IdP handshake wiring can be added on top of this."
+            )
         return checks
 
     def _build_session_read(
@@ -925,4 +971,4 @@ class AuthApplicationService:
         return cleaned or None
 
     def _now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)

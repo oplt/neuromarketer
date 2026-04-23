@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
 from backend.core.logging import get_logger, log_event, log_exception
-from backend.db.models import PredictionResult, SuggestionType
+from backend.db.models import PredictionResult
 from backend.schemas.schemas import OptimizationSuggestionRead
 
 logger = get_logger(__name__)
@@ -30,7 +29,9 @@ class OptimizationApplicationService:
                 exclude_types=sorted(constraints.get("exclude_types", [])),
                 min_confidence=float(Decimal(str(constraints.get("min_confidence", 0)))),
             )
-            suggestions = [OptimizationSuggestionRead.model_validate(item) for item in prediction.suggestions]
+            suggestions = [
+                OptimizationSuggestionRead.model_validate(item) for item in prediction.suggestions
+            ]
             if not suggestions:
                 log_event(
                     logger,
@@ -87,5 +88,7 @@ class OptimizationApplicationService:
         if focus_metrics:
             weighted_lift = sum(float(expected_lift.get(metric, 0)) for metric in focus_metrics)
         else:
-            weighted_lift = sum(float(value) for value in expected_lift.values() if isinstance(value, (int, float)))
+            weighted_lift = sum(
+                float(value) for value in expected_lift.values() if isinstance(value, (int, float))
+            )
         return weighted_lift + float(confidence or 0)

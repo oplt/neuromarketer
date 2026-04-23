@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import desc, func, select
@@ -107,12 +107,14 @@ class AccountAdminApplicationService:
         actor_user_id: UUID,
         payload: ApiKeyCreateRequest,
     ) -> ApiKeyCreateResponse:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "create API keys")
         scopes = self._normalize_scopes(payload.scopes)
         token, key_prefix, key_hash = await self._generate_api_key_material()
         expires_at = (
-            datetime.now(timezone.utc) + timedelta(days=payload.expires_in_days)
+            datetime.now(UTC) + timedelta(days=payload.expires_in_days)
             if payload.expires_in_days
             else None
         )
@@ -153,7 +155,9 @@ class AccountAdminApplicationService:
         actor_user_id: UUID,
         api_key_id: UUID,
     ) -> AccountApiKeyRead:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "revoke API keys")
         api_key = await self._get_api_key(organization_id=organization_id, api_key_id=api_key_id)
         if api_key.status != ApiKeyStatus.REVOKED:
@@ -177,9 +181,13 @@ class AccountAdminApplicationService:
         actor_user_id: UUID,
         api_key_id: UUID,
     ) -> ApiKeyRotateResponse:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "rotate API keys")
-        existing_key = await self._get_api_key(organization_id=organization_id, api_key_id=api_key_id)
+        existing_key = await self._get_api_key(
+            organization_id=organization_id, api_key_id=api_key_id
+        )
         token, key_prefix, key_hash = await self._generate_api_key_material()
 
         existing_key.status = ApiKeyStatus.REVOKED
@@ -224,7 +232,9 @@ class AccountAdminApplicationService:
         actor_user_id: UUID,
         payload: WebhookCreateRequest,
     ) -> WebhookSecretResponse:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "create webhook endpoints")
         subscribed_events = self._normalize_webhook_events(payload.subscribed_events)
         signing_secret, secret_hash = self._generate_webhook_secret_material()
@@ -265,13 +275,18 @@ class AccountAdminApplicationService:
         webhook_id: UUID,
         payload: WebhookUpdateRequest,
     ) -> AccountWebhookRead:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "update webhook endpoints")
         webhook = await self._get_webhook(organization_id=organization_id, webhook_id=webhook_id)
 
         if "url" in payload.model_fields_set and payload.url is not None:
             webhook.url = str(payload.url)
-        if "subscribed_events" in payload.model_fields_set and payload.subscribed_events is not None:
+        if (
+            "subscribed_events" in payload.model_fields_set
+            and payload.subscribed_events is not None
+        ):
             webhook.subscribed_events = self._normalize_webhook_events(payload.subscribed_events)
         if "is_active" in payload.model_fields_set and payload.is_active is not None:
             webhook.is_active = payload.is_active
@@ -299,7 +314,9 @@ class AccountAdminApplicationService:
         actor_user_id: UUID,
         webhook_id: UUID,
     ) -> WebhookSecretResponse:
-        membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_admin_role(membership.role, "rotate webhook secrets")
         webhook = await self._get_webhook(organization_id=organization_id, webhook_id=webhook_id)
         signing_secret, secret_hash = self._generate_webhook_secret_material()
@@ -328,7 +345,9 @@ class AccountAdminApplicationService:
         membership_id: UUID,
         payload: MemberRoleUpdateRequest,
     ) -> AccountMemberRead:
-        actor_membership = await self._get_membership(organization_id=organization_id, user_id=actor_user_id)
+        actor_membership = await self._get_membership(
+            organization_id=organization_id, user_id=actor_user_id
+        )
         self._require_owner_role(actor_membership.role, "change member roles")
 
         result = await self.session.execute(
@@ -372,9 +391,13 @@ class AccountAdminApplicationService:
         )
         await self.session.commit()
         await self.session.refresh(membership)
-        return self._build_member_read(membership=membership, user=user, current_user_id=actor_user_id)
+        return self._build_member_read(
+            membership=membership, user=user, current_user_id=actor_user_id
+        )
 
-    async def _get_membership(self, *, organization_id: UUID, user_id: UUID) -> OrganizationMembership:
+    async def _get_membership(
+        self, *, organization_id: UUID, user_id: UUID
+    ) -> OrganizationMembership:
         result = await self.session.execute(
             select(OrganizationMembership)
             .where(
@@ -402,7 +425,9 @@ class AccountAdminApplicationService:
     async def _get_webhook(self, *, organization_id: UUID, webhook_id: UUID) -> WebhookEndpoint:
         result = await self.session.execute(
             select(WebhookEndpoint)
-            .where(WebhookEndpoint.id == webhook_id, WebhookEndpoint.organization_id == organization_id)
+            .where(
+                WebhookEndpoint.id == webhook_id, WebhookEndpoint.organization_id == organization_id
+            )
             .limit(1)
         )
         webhook = result.scalar_one_or_none()
@@ -491,11 +516,15 @@ class AccountAdminApplicationService:
             .order_by(OrganizationMembership.created_at.asc(), User.email.asc())
         )
         return [
-            self._build_member_read(membership=membership, user=user, current_user_id=current_user_id)
+            self._build_member_read(
+                membership=membership, user=user, current_user_id=current_user_id
+            )
             for membership, user in result.all()
         ]
 
-    async def _list_audit_logs(self, *, organization_id: UUID, limit: int = 24) -> list[AccountAuditLogRead]:
+    async def _list_audit_logs(
+        self, *, organization_id: UUID, limit: int = 24
+    ) -> list[AccountAuditLogRead]:
         result = await self.session.execute(
             select(AuditLog, User)
             .outerjoin(User, User.id == AuditLog.actor_user_id)

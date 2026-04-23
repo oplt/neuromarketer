@@ -7,10 +7,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-
 # ---------------------------------------------------------------------
 # Shared
 # ---------------------------------------------------------------------
+
 
 class ORMBaseSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -70,7 +70,7 @@ class AuthResponse(BaseModel):
         organization: Any | None,
         default_project: Any | None = None,
         session_token: str | None = None,
-    ) -> "AuthResponse":
+    ) -> AuthResponse:
         return cls(
             message=message,
             user=AuthUserRead(
@@ -122,6 +122,7 @@ class AcceptInviteRequest(BaseModel):
 # ---------------------------------------------------------------------
 # Organization / Project / Creative
 # ---------------------------------------------------------------------
+
 
 class ProjectCreate(BaseModel):
     organization_id: UUID
@@ -215,6 +216,7 @@ class CreativeVersionRead(ORMBaseSchema):
 # Predict / Compare / Optimize requests
 # ---------------------------------------------------------------------
 
+
 class PredictRequest(BaseModel):
     project_id: UUID
     creative_id: UUID
@@ -241,6 +243,7 @@ class OptimizeRequest(BaseModel):
 # ---------------------------------------------------------------------
 # Scores / visualizations / suggestions
 # ---------------------------------------------------------------------
+
 
 class PredictionScoreRead(ORMBaseSchema):
     id: UUID
@@ -297,6 +300,7 @@ class OptimizationSuggestionRead(ORMBaseSchema):
 # ---------------------------------------------------------------------
 # Prediction result payloads
 # ---------------------------------------------------------------------
+
 
 class PredictionResultRead(ORMBaseSchema):
     id: UUID

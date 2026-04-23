@@ -7,8 +7,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import get_logger, log_event
 from backend.db.repositories import ComparisonRepository, CreativeRepository, InferenceRepository
 
@@ -61,11 +61,17 @@ class ComparisonApplicationService:
                     raise NotFoundAppError(f"Creative version {creative_version_id} not found.")
                 creative = await self.creatives.get_creative(version.creative_id)
                 if creative is None or creative.project_id != project_id:
-                    raise ValidationAppError("All comparison candidates must belong to the same project.")
+                    raise ValidationAppError(
+                        "All comparison candidates must belong to the same project."
+                    )
                 creative_items.append((creative.id, version.id))
 
             snapshots = await self.inference.get_latest_prediction_snapshots(creative_version_ids)
-            missing = [str(version_id) for version_id in creative_version_ids if version_id not in snapshots]
+            missing = [
+                str(version_id)
+                for version_id in creative_version_ids
+                if version_id not in snapshots
+            ]
             if missing:
                 raise ConflictAppError(
                     "Comparison requires an existing prediction for each creative version.",

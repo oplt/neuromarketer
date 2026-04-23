@@ -7,7 +7,6 @@ independently of whatever Content-Type header the client sent.  Only the first
 4 KB are read so the file pointer is always reset to 0 before returning.
 """
 
-import io
 from typing import BinaryIO
 
 try:
@@ -119,7 +118,10 @@ def validate_file_content(
         detected_family = detected.split("/")[0]
         # Special case: "application" can legitimately be declared as "text" (JSON, XML, etc.)
         cross_family_ok = {("application", "text"), ("text", "application")}
-        if declared_family != detected_family and (declared_family, detected_family) not in cross_family_ok:
+        if (
+            declared_family != detected_family
+            and (declared_family, detected_family) not in cross_family_ok
+        ):
             return False, detected
 
     return True, detected

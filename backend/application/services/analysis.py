@@ -11,8 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.application.services.predictions import PredictionApplicationService
 from backend.core.config import settings
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import (
     duration_ms,
     get_logger,
@@ -24,31 +24,34 @@ from backend.core.logging import (
 from backend.db.models import AssetType, InferenceJob, JobStatus, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
 from backend.schemas.analysis import (
-    AnalysisAssetRead,
     AnalysisAssetListResponse,
-    AnalysisConfigResponse,
+    AnalysisAssetRead,
     AnalysisClientEventRequest,
+    AnalysisConfigResponse,
     AnalysisGoalPresetsResponse,
     AnalysisJobDiagnosticsRead,
-    AnalysisJobRead,
     AnalysisJobListItemRead,
     AnalysisJobListResponse,
     AnalysisJobProgressRead,
+    AnalysisJobRead,
     AnalysisJobStatusResponse,
     AnalysisResultRead,
+    AnalysisUploadCompleteResponse,
     AnalysisUploadCreateRequest,
     AnalysisUploadCreateResponse,
-    AnalysisUploadCompleteResponse,
     AnalysisUploadSessionRead,
 )
 from backend.schemas.schemas import PredictRequest
-from backend.services.asset_loader import AssetLoader
 from backend.services.analysis_goal_taxonomy import (
     get_goal_presets_payload,
     normalize_analysis_channel,
     normalize_goal_template,
 )
-from backend.services.document_text_extractor import DocumentTextExtractor, is_supported_text_document
+from backend.services.asset_loader import AssetLoader
+from backend.services.document_text_extractor import (
+    DocumentTextExtractor,
+    is_supported_text_document,
+)
 from backend.services.preprocess import PreprocessService
 from backend.services.storage import ObjectStorageService, UploadedObject
 
@@ -122,7 +125,11 @@ class AnalysisApplicationService:
             assets = [
                 asset
                 for asset in assets
-                if str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type)) == media_type
+                if str(
+                    (asset.metadata_json or {}).get("media_type")
+                    or self._detect_media_type(asset.mime_type)
+                )
+                == media_type
             ]
         return AnalysisAssetListResponse(items=[self._build_asset_read(asset) for asset in assets])
 
@@ -137,7 +144,9 @@ class AnalysisApplicationService:
         audience_contains: str | None,
         limit: int,
     ) -> AnalysisJobListResponse:
-        fetch_limit = max(limit * 10, 50) if goal_template or channel or audience_contains else limit
+        fetch_limit = (
+            max(limit * 10, 50) if goal_template or channel or audience_contains else limit
+        )
         jobs = await self.predictions.inference.list_analysis_jobs_for_user(
             project_id=project_id,
             created_by_user_id=user_id,
@@ -146,19 +155,26 @@ class AnalysisApplicationService:
         )
         selected_jobs: list[tuple[InferenceJob, UUID | None]] = []
         asset_ids: list[UUID] = []
-        audience_query = audience_contains.strip().lower() if audience_contains is not None else None
+        audience_query = (
+            audience_contains.strip().lower() if audience_contains is not None else None
+        )
 
         for job in jobs:
             campaign_context = (job.request_payload or {}).get("campaign_context") or {}
-            normalized_goal_template = normalize_goal_template(campaign_context.get("goal_template"))
+            normalized_goal_template = normalize_goal_template(
+                campaign_context.get("goal_template")
+            )
             normalized_channel = normalize_analysis_channel(campaign_context.get("channel"))
-            normalized_audience_segment = str(campaign_context.get("audience_segment") or "").strip() or None
+            normalized_audience_segment = (
+                str(campaign_context.get("audience_segment") or "").strip() or None
+            )
             if goal_template is not None and normalized_goal_template != goal_template:
                 continue
             if channel is not None and normalized_channel != channel:
                 continue
             if audience_query is not None and (
-                not audience_query or audience_query not in str(normalized_audience_segment or "").lower()
+                not audience_query
+                or audience_query not in str(normalized_audience_segment or "").lower()
             ):
                 continue
 
@@ -188,7 +204,9 @@ class AnalysisApplicationService:
                     job=self._build_job_read(job),
                     asset=self._build_asset_read(asset) if asset is not None else None,
                     has_result=job.analysis_result_record is not None,
-                    result_created_at=job.analysis_result_record.created_at if job.analysis_result_record is not None else None,
+                    result_created_at=job.analysis_result_record.created_at
+                    if job.analysis_result_record is not None
+                    else None,
                 )
             )
         return AnalysisJobListResponse(items=items)
@@ -267,7 +285,9 @@ class AnalysisApplicationService:
                 content_type=payload.mime_type,
             )
             if not upload_url:
-                raise ValidationAppError("Unable to create a direct upload URL for the requested asset.")
+                raise ValidationAppError(
+                    "Unable to create a direct upload URL for the requested asset."
+                )
 
             log_event(
                 logger,
@@ -303,7 +323,10 @@ class AnalysisApplicationService:
             upload_token=upload_token,
         )
 
-        if upload_session.status == UploadStatus.STORED and asset.upload_status == UploadStatus.STORED:
+        if (
+            upload_session.status == UploadStatus.STORED
+            and asset.upload_status == UploadStatus.STORED
+        ):
             return AnalysisUploadCompleteResponse(
                 upload_session=self._build_upload_session_read(upload_session),
                 asset=self._build_asset_read(asset),
@@ -396,7 +419,10 @@ class AnalysisApplicationService:
             upload_token=upload_token,
         )
 
-        if upload_session.status == UploadStatus.STORED and asset.upload_status == UploadStatus.STORED:
+        if (
+            upload_session.status == UploadStatus.STORED
+            and asset.upload_status == UploadStatus.STORED
+        ):
             return AnalysisUploadCompleteResponse(
                 upload_session=self._build_upload_session_read(upload_session),
                 asset=self._build_asset_read(asset),
@@ -443,7 +469,9 @@ class AnalysisApplicationService:
                     sha256=sha256_prefix(uploaded_object.sha256),
                     duration_ms=duration_ms(upload_started_at, upload_finished_at),
                     status="uploaded",
-                    **summarize_storage_reference(uploaded_object.bucket_name, uploaded_object.storage_key),
+                    **summarize_storage_reference(
+                        uploaded_object.bucket_name, uploaded_object.storage_key
+                    ),
                 )
                 if uploaded_object.file_size_bytes > settings.upload_max_size_bytes:
                     await run_in_threadpool(
@@ -538,13 +566,17 @@ class AnalysisApplicationService:
             metadata_json=merged_metadata,
         )
         try:
-            creative_version = await self.creatives.create_version_from_artifact(asset, raw_text=raw_text)
+            creative_version = await self.creatives.create_version_from_artifact(
+                asset, raw_text=raw_text
+            )
         except Exception as exc:
             log_exception(
                 logger,
                 "creative_version_promotion_failed",
                 exc,
-                level="warning" if isinstance(exc, (NotFoundAppError, ValidationAppError)) else "error",
+                level="warning"
+                if isinstance(exc, (NotFoundAppError, ValidationAppError))
+                else "error",
                 upload_session_id=str(upload_session.id),
                 artifact_id=str(asset.id),
                 creative_id=str(asset.creative_id) if asset.creative_id else None,
@@ -660,7 +692,10 @@ class AnalysisApplicationService:
         return upload_session, asset
 
     def _validate_asset_mime_type(self, *, asset, mime_type: str | None) -> None:
-        media_type = str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type))
+        media_type = str(
+            (asset.metadata_json or {}).get("media_type")
+            or self._detect_media_type(asset.mime_type)
+        )
         if mime_type is None:
             return
         allowed_by_media_type = {
@@ -690,7 +725,10 @@ class AnalysisApplicationService:
         if asset.creative_id is None or asset.creative_version_id is None:
             raise ConflictAppError("The selected asset is not ready for analysis.")
 
-        media_type = str((asset.metadata_json or {}).get("media_type") or self._detect_media_type(asset.mime_type))
+        media_type = str(
+            (asset.metadata_json or {}).get("media_type")
+            or self._detect_media_type(asset.mime_type)
+        )
         normalized_goal_template = normalize_goal_template(goal_template)
         normalized_channel = normalize_analysis_channel(channel)
         normalized_objective = (objective or "").strip() or None
@@ -793,7 +831,9 @@ class AnalysisApplicationService:
         }
         allowed_mime_types = allowed_by_media_type[payload.media_type]
         if payload.mime_type not in allowed_mime_types:
-            raise ValidationAppError(f"Unsupported {payload.media_type} mime type: {payload.mime_type}")
+            raise ValidationAppError(
+                f"Unsupported {payload.media_type} mime type: {payload.mime_type}"
+            )
 
     def _to_asset_type(self, media_type: str) -> AssetType:
         mapping = {
@@ -823,7 +863,9 @@ class AnalysisApplicationService:
             id=asset.id,
             creative_id=asset.creative_id,
             creative_version_id=asset.creative_version_id,
-            media_type=str(metadata_json.get("media_type") or self._detect_media_type(asset.mime_type)),
+            media_type=str(
+                metadata_json.get("media_type") or self._detect_media_type(asset.mime_type)
+            ),
             original_filename=asset.original_filename,
             mime_type=asset.mime_type,
             size_bytes=asset.file_size_bytes,
@@ -882,7 +924,9 @@ class AnalysisApplicationService:
 
     def _build_job_progress(self, job: InferenceJob) -> AnalysisJobProgressRead | None:
         runtime_params = job.runtime_params or {}
-        raw_progress = runtime_params.get("analysis_progress") if isinstance(runtime_params, dict) else None
+        raw_progress = (
+            runtime_params.get("analysis_progress") if isinstance(runtime_params, dict) else None
+        )
         progress_payload = raw_progress if isinstance(raw_progress, dict) else {}
         diagnostics = self._build_job_diagnostics(job, progress_payload.get("diagnostics"))
 
@@ -904,7 +948,9 @@ class AnalysisApplicationService:
                 stage = "failed"
                 stage_label = stage_label or "The analysis stopped before results were produced."
 
-        if stage is None and not any(value is not None for value in diagnostics.model_dump().values()):
+        if stage is None and not any(
+            value is not None for value in diagnostics.model_dump().values()
+        ):
             return None
 
         return AnalysisJobProgressRead(
@@ -925,20 +971,28 @@ class AnalysisApplicationService:
         if queue_wait_ms is None:
             queue_wait_ms = self._calculate_elapsed_ms(job.created_at, job.started_at)
 
-        processing_duration_ms = self._coerce_non_negative_int(diagnostics_payload.get("processing_duration_ms"))
+        processing_duration_ms = self._coerce_non_negative_int(
+            diagnostics_payload.get("processing_duration_ms")
+        )
         if processing_duration_ms is None:
             processing_duration_ms = self._calculate_elapsed_ms(job.started_at, job.completed_at)
 
-        result_delivery_ms = self._coerce_non_negative_int(diagnostics_payload.get("result_delivery_ms"))
+        result_delivery_ms = self._coerce_non_negative_int(
+            diagnostics_payload.get("result_delivery_ms")
+        )
         if result_delivery_ms is None:
             result_delivery_ms = self._calculate_elapsed_ms(job.created_at, job.completed_at)
 
         return AnalysisJobDiagnosticsRead(
             queue_wait_ms=queue_wait_ms,
             processing_duration_ms=processing_duration_ms,
-            time_to_first_result_ms=self._coerce_non_negative_int(diagnostics_payload.get("time_to_first_result_ms")),
+            time_to_first_result_ms=self._coerce_non_negative_int(
+                diagnostics_payload.get("time_to_first_result_ms")
+            ),
             result_delivery_ms=result_delivery_ms,
-            postprocess_duration_ms=self._coerce_non_negative_int(diagnostics_payload.get("postprocess_duration_ms")),
+            postprocess_duration_ms=self._coerce_non_negative_int(
+                diagnostics_payload.get("postprocess_duration_ms")
+            ),
         )
 
     def _build_result(self, job: InferenceJob) -> AnalysisResultRead | None:
@@ -972,7 +1026,9 @@ class AnalysisApplicationService:
             return None
         return max(coerced, 0)
 
-    def _calculate_elapsed_ms(self, started_at: datetime | None, finished_at: datetime | None) -> int | None:
+    def _calculate_elapsed_ms(
+        self, started_at: datetime | None, finished_at: datetime | None
+    ) -> int | None:
         if started_at is None or finished_at is None:
             return None
         return max(int((finished_at - started_at).total_seconds() * 1000), 0)

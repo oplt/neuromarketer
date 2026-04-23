@@ -5,8 +5,11 @@ from typing import Any
 
 from backend.core.logging import get_logger, log_event
 from backend.db.models import AnalysisResultRecord, CreativeVersion, InferenceJob
+from backend.services.analysis_goal_taxonomy import (
+    normalize_analysis_channel,
+    normalize_goal_template,
+)
 from backend.services.asset_loader import AssetLoader
-from backend.services.analysis_goal_taxonomy import normalize_analysis_channel, normalize_goal_template
 
 logger = get_logger(__name__)
 
@@ -44,7 +47,9 @@ class EvaluationContextBuilder:
             "best_segments": self._select_segments(segments=segments, reverse=True),
             "worst_segments": self._select_segments(segments=segments, reverse=False),
             "visualization_hints": self._build_visualization_hints(visualizations=visualizations),
-            "transcript_excerpt": self._load_text_excerpt(creative_version=resolved_creative_version),
+            "transcript_excerpt": self._load_text_excerpt(
+                creative_version=resolved_creative_version
+            ),
             "existing_recommendations": self._build_recommendations(recommendations),
             "analysis_notes": list(summary.get("notes") or []),
         }
@@ -57,8 +62,12 @@ class EvaluationContextBuilder:
         creative_version: CreativeVersion | None,
         analysis_created_at: str | None,
     ) -> dict[str, Any]:
-        summary_metadata = summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
-        extracted_metadata = creative_version.extracted_metadata if creative_version is not None else {}
+        summary_metadata = (
+            summary.get("metadata") if isinstance(summary.get("metadata"), dict) else {}
+        )
+        extracted_metadata = (
+            creative_version.extracted_metadata if creative_version is not None else {}
+        )
         campaign_context = (job.request_payload or {}).get("campaign_context") or {}
         objective = campaign_context.get("objective")
         title = None
@@ -77,10 +86,13 @@ class EvaluationContextBuilder:
             "channel": normalize_analysis_channel(
                 campaign_context.get("channel") or summary_metadata.get("channel"),
             ),
-            "audience_segment": campaign_context.get("audience_segment") or summary_metadata.get("audience_segment"),
-            "media_type": summary.get("modality") or (creative_version.preprocessing_summary or {}).get("modality"),
+            "audience_segment": campaign_context.get("audience_segment")
+            or summary_metadata.get("audience_segment"),
+            "media_type": summary.get("modality")
+            or (creative_version.preprocessing_summary or {}).get("modality"),
             "title": title,
-            "duration_ms": summary_metadata.get("duration_ms") or extracted_metadata.get("duration_ms"),
+            "duration_ms": summary_metadata.get("duration_ms")
+            or extracted_metadata.get("duration_ms"),
             "segment_count": summary_metadata.get("segment_count"),
             "source_label": summary_metadata.get("source_label"),
             "language": extracted_metadata.get("language"),
@@ -89,7 +101,9 @@ class EvaluationContextBuilder:
             "analysis_created_at": analysis_created_at,
         }
 
-    def _build_summary_metrics(self, *, summary: dict[str, Any], metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_summary_metrics(
+        self, *, summary: dict[str, Any], metrics: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         condensed_metrics: list[dict[str, Any]] = []
         for metric in metrics[:10]:
             condensed_metrics.append(
@@ -123,7 +137,9 @@ class EvaluationContextBuilder:
         opening = [item for item in timeline if int(item.get("timestamp_ms") or 0) < 3_000]
         midpoint = timeline[len(timeline) // 3 : (len(timeline) * 2) // 3] if timeline else []
         closing = timeline[-3:] if len(timeline) >= 3 else timeline
-        strongest = sorted(timeline, key=lambda item: float(item.get("attention_score") or 0.0), reverse=True)[:4]
+        strongest = sorted(
+            timeline, key=lambda item: float(item.get("attention_score") or 0.0), reverse=True
+        )[:4]
         weakest = sorted(timeline, key=lambda item: float(item.get("attention_score") or 0.0))[:4]
 
         def _condense(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -154,7 +170,9 @@ class EvaluationContextBuilder:
             "lowest_attention_points": _condense(weakest),
         }
 
-    def _select_segments(self, *, segments: list[dict[str, Any]], reverse: bool) -> list[dict[str, Any]]:
+    def _select_segments(
+        self, *, segments: list[dict[str, Any]], reverse: bool
+    ) -> list[dict[str, Any]]:
         ranked = sorted(
             segments,
             key=lambda item: (
@@ -178,8 +196,12 @@ class EvaluationContextBuilder:
 
     def _build_visualization_hints(self, *, visualizations: dict[str, Any]) -> dict[str, Any]:
         return {
-            "high_attention_intervals": list(visualizations.get("high_attention_intervals") or [])[:4],
-            "low_attention_intervals": list(visualizations.get("low_attention_intervals") or [])[:4],
+            "high_attention_intervals": list(visualizations.get("high_attention_intervals") or [])[
+                :4
+            ],
+            "low_attention_intervals": list(visualizations.get("low_attention_intervals") or [])[
+                :4
+            ],
             "keyframe_descriptors": [
                 {
                     "timestamp_ms": frame.get("timestamp_ms"),
@@ -223,7 +245,9 @@ class EvaluationContextBuilder:
                 storage_uri=creative_version.source_uri,
                 mime_type=creative_version.mime_type,
             )
-            excerpt = Path(loaded_asset.local_path).read_text(encoding="utf-8", errors="ignore").strip()
+            excerpt = (
+                Path(loaded_asset.local_path).read_text(encoding="utf-8", errors="ignore").strip()
+            )
             return excerpt[:1_600] or None
         except Exception as exc:
             log_event(

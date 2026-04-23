@@ -132,7 +132,9 @@ class VideoPreprocessService:
             probe_data = {}
 
         try:
-            sampled_frame_paths = self.sample_frames(input_path=input_path, output_dir=frame_dir, max_frames=max_frames)
+            sampled_frame_paths = self.sample_frames(
+                input_path=input_path, output_dir=frame_dir, max_frames=max_frames
+            )
         except Exception:
             sampled_frame_paths = []
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 
 from celery import Celery
-from kombu import Queue
 from celery.signals import (
     after_setup_logger,
     after_setup_task_logger,
@@ -13,11 +12,15 @@ from celery.signals import (
     task_prerun,
     worker_process_init,
 )
+from kombu import Queue
 
 from backend.core.config import settings
-from backend.core.log_context import bind_celery_task_context, build_celery_task_headers, clear_log_context
-from backend.core.logging import configure_logging
-from backend.core.logging import log_event
+from backend.core.log_context import (
+    bind_celery_task_context,
+    build_celery_task_headers,
+    clear_log_context,
+)
+from backend.core.logging import configure_logging, log_event
 from backend.services.tribe_runtime import get_shared_tribe_runtime
 
 configure_logging()
@@ -52,6 +55,7 @@ celery_app.conf.update(
         "tasks.process_llm_evaluation": {"queue": settings.celery_scoring_queue},
     },
 )
+
 
 @setup_logging.connect
 def configure_celery_logging(**_: object) -> None:

@@ -74,7 +74,9 @@ class TribeRuntime:
     def __init__(self) -> None:
         self.model_repo_id = settings.tribe_model_repo_id
         self.checkpoint_name = settings.tribe_checkpoint_name
-        self.cache_folder = self._resolve_cache_folder(Path(settings.tribe_cache_folder).expanduser())
+        self.cache_folder = self._resolve_cache_folder(
+            Path(settings.tribe_cache_folder).expanduser()
+        )
         self.device = settings.tribe_device
         self.text_feature_model_name = self._resolve_text_feature_model_name(
             settings.tribe_text_feature_model_name
@@ -155,14 +157,15 @@ class TribeRuntime:
             errors.append(f"{candidate}: not writable")
 
         raise ConfigurationAppError(
-            "TRIBE cache folder could not be initialized. "
-            + "; ".join(errors)
+            "TRIBE cache folder could not be initialized. " + "; ".join(errors)
         )
 
     def _candidate_cache_folders(self, configured_path: Path) -> list[Path]:
         normalized_configured = self._resolve_project_relative_path(configured_path)
         project_cache = (self._project_root() / "cache" / "tribev2").resolve(strict=False)
-        temp_cache = (Path(tempfile.gettempdir()) / "neuromarketer" / "tribev2").resolve(strict=False)
+        temp_cache = (Path(tempfile.gettempdir()) / "neuromarketer" / "tribev2").resolve(
+            strict=False
+        )
         candidates = [normalized_configured, project_cache, temp_cache]
         resolved: list[Path] = []
 
@@ -218,7 +221,9 @@ class TribeRuntime:
         if not settings.tribe_validate_binaries_on_worker_startup:
             return
 
-        missing_binaries = [name for name in ("uvx", "ffmpeg", "ffprobe") if shutil.which(name) is None]
+        missing_binaries = [
+            name for name in ("uvx", "ffmpeg", "ffprobe") if shutil.which(name) is None
+        ]
         if missing_binaries:
             raise DependencyAppError(
                 "TRIBE v2 preprocessing requires missing system binaries: "
@@ -248,7 +253,7 @@ class TribeRuntime:
 
             try:
                 tribe_module = importlib.import_module("tribev2")
-                model_cls = getattr(tribe_module, "TribeModel")
+                model_cls = tribe_module.TribeModel
                 requested_device = self._get_requested_device()
                 model = model_cls.from_pretrained(
                     self.model_repo_id,
@@ -322,7 +327,9 @@ class TribeRuntime:
         path = self._require_local_file(payload.local_path, suffix_hint="audio")
         return model.get_events_dataframe(audio_path=str(path))
 
-    def _prepare_text_events(self, *, model: Any, payload: TribeRuntimeInput) -> tuple[Any, Path | None]:
+    def _prepare_text_events(
+        self, *, model: Any, payload: TribeRuntimeInput
+    ) -> tuple[Any, Path | None]:
         raw_text = payload.raw_text
         if not raw_text or not raw_text.strip():
             path = self._require_local_file(payload.local_path, suffix_hint="text")
@@ -482,7 +489,11 @@ class TribeRuntime:
         mean_activation = float(segment_mean_activation.mean())
         peak_activation = float(segment_peak_activation.max())
         p95_activation = float(np.quantile(segment_peak_activation, 0.95))
-        temporal_delta = np.abs(np.diff(segment_mean_activation)) if len(segment_mean_activation) > 1 else np.array([0.0])
+        temporal_delta = (
+            np.abs(np.diff(segment_mean_activation))
+            if len(segment_mean_activation) > 1
+            else np.array([0.0])
+        )
 
         event_types = event_summary.get("event_types", {})
         segment_count = max(1, len(segment_features))
@@ -498,11 +509,15 @@ class TribeRuntime:
 
         derived_neural_engagement_signal = self._clip01(mean_activation / (p95_activation + 1e-6))
         derived_peak_focus_signal = self._clip01(p95_activation / (peak_activation + 1e-6))
-        derived_temporal_dynamics_signal = self._clip01(float(temporal_delta.mean()) / (mean_activation + 1e-6))
+        derived_temporal_dynamics_signal = self._clip01(
+            float(temporal_delta.mean()) / (mean_activation + 1e-6)
+        )
         derived_temporal_consistency_signal = self._clip01(
             1.0 - float(segment_mean_activation.std()) / (mean_activation + 1e-6)
         )
-        derived_linguistic_load_signal = self._clip01(0.35 + (word_like_count / max(segment_count * 18, 1)))
+        derived_linguistic_load_signal = self._clip01(
+            0.35 + (word_like_count / max(segment_count * 18, 1))
+        )
         derived_context_density_signal = self._clip01(event_rows / max(segment_count * 8, 1))
         derived_hemisphere_balance_signal = self._clip01(float(hemisphere_balance.mean()))
         derived_audio_language_mix_signal = self._clip01(
@@ -545,7 +560,11 @@ class TribeRuntime:
                 "left_mean_abs_activation": round(float(left_mean.mean()), 6),
                 "right_mean_abs_activation": round(float(right_mean.mean()), 6),
                 "hemisphere_balance_signal": round(
-                    self._clip01(1.0 - abs(float(left_mean.mean()) - float(right_mean.mean())) / (float(left_mean.mean() + right_mean.mean()) + 1e-6)),
+                    self._clip01(
+                        1.0
+                        - abs(float(left_mean.mean()) - float(right_mean.mean()))
+                        / (float(left_mean.mean() + right_mean.mean()) + 1e-6)
+                    ),
                     6,
                 ),
             },
@@ -560,17 +579,27 @@ class TribeRuntime:
         summary["top_rois"] = roi_items
         if not roi_items:
             summary["roi_summary_enabled"] = False
-            summary["roi_summary_warning"] = "ROI summarization could not be derived from the installed TRIBE dependencies."
+            summary["roi_summary_warning"] = (
+                "ROI summarization could not be derived from the installed TRIBE dependencies."
+            )
         return summary
 
     def _build_roi_summary(self, averaged_prediction: np.ndarray) -> list[dict[str, Any]]:
         try:
             utils_module = importlib.import_module("tribev2.utils")
-            labels = list(utils_module.get_topk_rois(averaged_prediction, hemi="both", mesh="fsaverage5", k=8))
-            roi_values = np.asarray(utils_module.summarize_by_roi(averaged_prediction, hemi="both", mesh="fsaverage5"))
+            labels = list(
+                utils_module.get_topk_rois(averaged_prediction, hemi="both", mesh="fsaverage5", k=8)
+            )
+            roi_values = np.asarray(
+                utils_module.summarize_by_roi(averaged_prediction, hemi="both", mesh="fsaverage5")
+            )
             label_map = {
                 label: round(float(value), 6)
-                for label, value in zip(utils_module.get_hcp_labels(mesh="fsaverage5", hemi="both").keys(), roi_values, strict=False)
+                for label, value in zip(
+                    utils_module.get_hcp_labels(mesh="fsaverage5", hemi="both").keys(),
+                    roi_values,
+                    strict=False,
+                )
             }
             return [
                 {
@@ -593,11 +622,15 @@ class TribeRuntime:
     ) -> list[dict[str, Any]]:
         mean_baseline = float(segment_mean_activation.mean())
         peak_baseline = float(segment_peak_activation.max())
-        temporal_delta = np.abs(np.diff(segment_mean_activation, prepend=segment_mean_activation[:1]))
+        temporal_delta = np.abs(
+            np.diff(segment_mean_activation, prepend=segment_mean_activation[:1])
+        )
 
         items: list[dict[str, Any]] = []
         for index, segment in enumerate(segments):
-            start_seconds = self._coerce_float(getattr(segment, "start", None), default=float(index))
+            start_seconds = self._coerce_float(
+                getattr(segment, "start", None), default=float(index)
+            )
             duration_seconds = self._resolve_segment_duration(segment)
             items.append(
                 {
@@ -609,11 +642,15 @@ class TribeRuntime:
                     "mean_abs_activation": round(float(segment_mean_activation[index]), 6),
                     "peak_abs_activation": round(float(segment_peak_activation[index]), 6),
                     "engagement_signal": round(
-                        self._clip01(float(segment_mean_activation[index]) / (mean_baseline * 1.35 + 1e-6)),
+                        self._clip01(
+                            float(segment_mean_activation[index]) / (mean_baseline * 1.35 + 1e-6)
+                        ),
                         6,
                     ),
                     "peak_focus_signal": round(
-                        self._clip01(float(segment_peak_activation[index]) / (peak_baseline + 1e-6)),
+                        self._clip01(
+                            float(segment_peak_activation[index]) / (peak_baseline + 1e-6)
+                        ),
                         6,
                     ),
                     "temporal_change_signal": round(
@@ -621,10 +658,16 @@ class TribeRuntime:
                         6,
                     ),
                     "consistency_signal": round(
-                        self._clip01(1.0 - abs(float(segment_mean_activation[index]) - mean_baseline) / (mean_baseline + 1e-6)),
+                        self._clip01(
+                            1.0
+                            - abs(float(segment_mean_activation[index]) - mean_baseline)
+                            / (mean_baseline + 1e-6)
+                        ),
                         6,
                     ),
-                    "hemisphere_balance_signal": round(self._clip01(float(hemisphere_balance[index])), 6),
+                    "hemisphere_balance_signal": round(
+                        self._clip01(float(hemisphere_balance[index])), 6
+                    ),
                 }
             )
         return items
@@ -641,16 +684,25 @@ class TribeRuntime:
                 event_types = {str(key): int(value) for key, value in counts.items()}
             except Exception:
                 event_types = {}
-            for field_name, bucket in (("start", start_values), ("duration", duration_values), ("stop", duration_values)):
+            for field_name, bucket in (
+                ("start", start_values),
+                ("duration", duration_values),
+                ("stop", duration_values),
+            ):
                 if field_name in getattr(events, "columns", []):
-                    values = [self._coerce_float(value, default=0.0) for value in events[field_name].tolist()]
+                    values = [
+                        self._coerce_float(value, default=0.0)
+                        for value in events[field_name].tolist()
+                    ]
                     if field_name == "stop":
                         if values:
                             duration_values.extend(values)
                     else:
                         bucket.extend(values)
         elif isinstance(events, list):
-            counts = Counter(str(item.get("type", "unknown")) for item in events if isinstance(item, dict))
+            counts = Counter(
+                str(item.get("type", "unknown")) for item in events if isinstance(item, dict)
+            )
             event_types = {key: int(value) for key, value in counts.items()}
             for item in events:
                 if not isinstance(item, dict):
@@ -664,7 +716,9 @@ class TribeRuntime:
             "row_count": int(row_count),
             "event_types": event_types,
             "start_time_ms": int(round(min(start_values) * 1000)) if start_values else 0,
-            "duration_ms_estimate": int(round(max(duration_values) * 1000)) if duration_values else None,
+            "duration_ms_estimate": int(round(max(duration_values) * 1000))
+            if duration_values
+            else None,
         }
 
     def _authenticate_huggingface(self) -> None:
@@ -677,7 +731,9 @@ class TribeRuntime:
             if callable(login):
                 login(token=self.hf_token, add_to_git_credential=False)
         except Exception as exc:
-            raise ConfigurationAppError("Configured Hugging Face credentials could not be applied.") from exc
+            raise ConfigurationAppError(
+                "Configured Hugging Face credentials could not be applied."
+            ) from exc
 
     @classmethod
     def _enable_local_huggingface_model_paths(cls) -> None:
@@ -686,14 +742,14 @@ class TribeRuntime:
 
         try:
             base_module = importlib.import_module("neuralset.extractors.base")
-            mixin_cls = getattr(base_module, "HuggingFaceMixin")
+            mixin_cls = base_module.HuggingFaceMixin
         except Exception:
             return
 
         original_repo_exists = getattr(mixin_cls, "_neuromarketer_original_repo_exists", None)
         if original_repo_exists is None:
             original_repo_exists = mixin_cls.repo_exists
-            setattr(mixin_cls, "_neuromarketer_original_repo_exists", original_repo_exists)
+            mixin_cls._neuromarketer_original_repo_exists = original_repo_exists
 
         if getattr(mixin_cls, "_neuromarketer_local_path_patch_applied", False):
             cls._local_hf_model_path_patch_applied = True
@@ -711,7 +767,7 @@ class TribeRuntime:
             return original_repo_exists(mixin_self)
 
         mixin_cls.repo_exists = repo_exists_with_local_paths
-        setattr(mixin_cls, "_neuromarketer_local_path_patch_applied", True)
+        mixin_cls._neuromarketer_local_path_patch_applied = True
         cls._local_hf_model_path_patch_applied = True
 
     def _get_loaded_model(self) -> Any:
@@ -756,7 +812,9 @@ class TribeRuntime:
         }
 
         if settings.tribe_video_feature_frequency_hz is not None:
-            config_update["data.video_feature.frequency"] = settings.tribe_video_feature_frequency_hz
+            config_update["data.video_feature.frequency"] = (
+                settings.tribe_video_feature_frequency_hz
+            )
         if settings.tribe_video_max_imsize is not None:
             config_update["data.video_feature.max_imsize"] = settings.tribe_video_max_imsize
 
@@ -764,7 +822,9 @@ class TribeRuntime:
 
     def _require_local_file(self, local_path: str | None, *, suffix_hint: str) -> Path:
         if not local_path:
-            raise ValidationAppError(f"A local {suffix_hint} file path is required for TRIBE inference.")
+            raise ValidationAppError(
+                f"A local {suffix_hint} file path is required for TRIBE inference."
+            )
         path = Path(local_path)
         if not path.is_file():
             raise ValidationAppError(f"Local file for TRIBE inference does not exist: {path}")
@@ -778,7 +838,9 @@ class TribeRuntime:
         start = getattr(segment, "start", None)
         stop = getattr(segment, "stop", None)
         if start is not None and stop is not None:
-            return max(0.0, self._coerce_float(stop, default=0.0) - self._coerce_float(start, default=0.0))
+            return max(
+                0.0, self._coerce_float(stop, default=0.0) - self._coerce_float(start, default=0.0)
+            )
         return 0.0
 
     def _resolve_segment_event_count(self, segment: Any) -> int:
@@ -830,7 +892,10 @@ class TribeRuntime:
         message = str(exc).strip()
         lowered = message.lower()
 
-        if self._resolve_local_model_path(self.text_feature_model_name) is not None and "does not exist" in lowered:
+        if (
+            self._resolve_local_model_path(self.text_feature_model_name) is not None
+            and "does not exist" in lowered
+        ):
             return (
                 "Failed to load TRIBE v2 because the configured local text feature model path was rejected "
                 "during runtime validation. "

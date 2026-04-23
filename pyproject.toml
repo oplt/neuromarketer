@@ -1,0 +1,78 @@
+[project]
+name = "neuromarketer"
+version = "0.1.0"
+requires-python = ">=3.11"
+description = "AI-powered creative analysis and prediction platform"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["backend"]
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "frontend",
+    "models",
+    "cache",
+    "logs",
+    "backend/alembic/versions",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # Pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "ASYNC", # async best practices (relevant for FastAPI + async SQLAlchemy)
+    "SIM",   # flake8-simplify
+    "C4",    # flake8-comprehensions
+    "T20",   # no bare print statements
+    "ERA",   # eradicate commented-out code
+    "RUF",   # Ruff-specific rules
+]
+fixable = ["ALL"]
+ignore = [
+    "B008",   # function calls in default args — required by FastAPI Depends()
+    "B904",   # raise-without-from — too noisy in HTTP exception handlers
+    "SIM108", # ternary over if-else — sometimes less readable
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+"backend/alembic/versions/*.py" = ["E501"]
+"backend/tests/**/*.py" = ["T20"]
+"backend/workers/**/*.py" = ["T20"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.vulture]
+paths = ["backend"]
+exclude = [".venv/", "build/", "dist/", "backend/alembic/"]
+min_confidence = 90
+sort_by_size = true
+ignore_decorators = [
+    "@app.route",
+    "@app.on_event",
+    "@router.get",
+    "@router.post",
+    "@router.put",
+    "@router.patch",
+    "@router.delete",
+    "@router.*",
+    "@celery.task",
+]
+ignore_names = [
+    "visit_*",
+    "do_*",
+    "test_*",
+    "lifespan",
+    "startup",
+    "shutdown",
+]

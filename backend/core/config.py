@@ -41,7 +41,9 @@ class Settings(BaseSettings):
     log_file_backup_count: int = Field(default=5, validation_alias="LOG_FILE_BACKUP_COUNT")
     otel_enabled: bool = Field(default=False, validation_alias="OTEL_ENABLED")
     otel_service_name: str | None = Field(default=None, validation_alias="OTEL_SERVICE_NAME")
-    otel_exporter_otlp_endpoint: str | None = Field(default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT")
+    otel_exporter_otlp_endpoint: str | None = Field(
+        default=None, validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT"
+    )
 
     database_url: str = Field(validation_alias="DATABASE_URL")
     database_echo: bool = False
@@ -61,8 +63,12 @@ class Settings(BaseSettings):
         default=60 * 24 * 7,
         validation_alias=AliasChoices("SESSION_TTL_MINUTES", "JWT_EXP_MINUTES"),
     )
-    session_idle_ttl_minutes: int = Field(default=60 * 24, validation_alias="SESSION_IDLE_TTL_MINUTES")
-    session_touch_interval_seconds: int = Field(default=60, validation_alias="SESSION_TOUCH_INTERVAL_SECONDS")
+    session_idle_ttl_minutes: int = Field(
+        default=60 * 24, validation_alias="SESSION_IDLE_TTL_MINUTES"
+    )
+    session_touch_interval_seconds: int = Field(
+        default=60, validation_alias="SESSION_TOUCH_INTERVAL_SECONDS"
+    )
     mfa_challenge_ttl_minutes: int = Field(default=10, validation_alias="MFA_CHALLENGE_TTL_MINUTES")
     invite_ttl_hours: int = Field(default=24 * 7, validation_alias="INVITE_TTL_HOURS")
     sso_enforcement_default: bool = Field(default=False, validation_alias="SSO_ENFORCEMENT_DEFAULT")
@@ -72,7 +78,9 @@ class Settings(BaseSettings):
     s3_endpoint_url: str | None = Field(default=None, validation_alias="S3_ENDPOINT_URL")
     s3_public_base_url: str | None = Field(default=None, validation_alias="S3_PUBLIC_BASE_URL")
     aws_access_key_id: str | None = Field(default=None, validation_alias="AWS_ACCESS_KEY_ID")
-    aws_secret_access_key: str | None = Field(default=None, validation_alias="AWS_SECRET_ACCESS_KEY")
+    aws_secret_access_key: str | None = Field(
+        default=None, validation_alias="AWS_SECRET_ACCESS_KEY"
+    )
     aws_session_token: str | None = Field(default=None, validation_alias="AWS_SESSION_TOKEN")
     local_storage_root: str = Field(default="./data", validation_alias="LOCAL_STORAGE_ROOT")
     r2_account_id: str | None = Field(
@@ -99,9 +107,13 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("CLOUDFLARE_R2_ENDPOINT_URL", "R2_ENDPOINT_URL"),
     )
-    upload_presign_expires_seconds: int = Field(default=900, validation_alias="UPLOAD_PRESIGN_EXPIRES_SECONDS")
+    upload_presign_expires_seconds: int = Field(
+        default=900, validation_alias="UPLOAD_PRESIGN_EXPIRES_SECONDS"
+    )
 
-    upload_max_size_bytes: int = Field(default=250 * 1024 * 1024, validation_alias="UPLOAD_MAX_SIZE_BYTES")
+    upload_max_size_bytes: int = Field(
+        default=250 * 1024 * 1024, validation_alias="UPLOAD_MAX_SIZE_BYTES"
+    )
     allowed_upload_mime_prefixes: list[str] = Field(
         default_factory=lambda: ["image/", "video/", "audio/", "text/", "application/json"],
         validation_alias="ALLOWED_UPLOAD_MIME_PREFIXES",
@@ -111,34 +123,60 @@ class Settings(BaseSettings):
         validation_alias="ANALYSIS_ALLOWED_VIDEO_MIME_TYPES",
     )
     analysis_allowed_audio_mime_types: list[str] = Field(
-        default_factory=lambda: ["audio/mpeg", "audio/mp4", "audio/wav", "audio/x-wav", "audio/webm"],
+        default_factory=lambda: [
+            "audio/mpeg",
+            "audio/mp4",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/webm",
+        ],
         validation_alias="ANALYSIS_ALLOWED_AUDIO_MIME_TYPES",
     )
     analysis_allowed_text_mime_types: list[str] = Field(
         default_factory=lambda: list(DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES),
         validation_alias="ANALYSIS_ALLOWED_TEXT_MIME_TYPES",
     )
-    analysis_max_text_characters: int = Field(default=50_000, validation_alias="ANALYSIS_MAX_TEXT_CHARACTERS")
+    analysis_max_text_characters: int = Field(
+        default=50_000, validation_alias="ANALYSIS_MAX_TEXT_CHARACTERS"
+    )
 
-    celery_broker_url: str = Field(default="redis://localhost:6379/0", validation_alias="CELERY_BROKER_URL")
+    celery_broker_url: str = Field(
+        default="redis://localhost:6379/0", validation_alias="CELERY_BROKER_URL"
+    )
     celery_result_backend: str = Field(
         default="redis://localhost:6379/1",
         validation_alias="CELERY_RESULT_BACKEND",
     )
-    celery_inference_queue: str = Field(default="analysis-inference", validation_alias="CELERY_INFERENCE_QUEUE")
-    celery_scoring_queue: str = Field(default="analysis-scoring", validation_alias="CELERY_SCORING_QUEUE")
+    celery_inference_queue: str = Field(
+        default="analysis-inference", validation_alias="CELERY_INFERENCE_QUEUE"
+    )
+    celery_scoring_queue: str = Field(
+        default="analysis-scoring", validation_alias="CELERY_SCORING_QUEUE"
+    )
     celery_worker_role: str = Field(default="default", validation_alias="CELERY_WORKER_ROLE")
-    celery_soft_time_limit_seconds: int = Field(default=900, validation_alias="CELERY_SOFT_TIME_LIMIT_SECONDS")
-    celery_time_limit_seconds: int = Field(default=1200, validation_alias="CELERY_TIME_LIMIT_SECONDS")
-    celery_job_stale_after_seconds: int = Field(default=1800, validation_alias="CELERY_JOB_STALE_AFTER_SECONDS")
+    celery_soft_time_limit_seconds: int = Field(
+        default=900, validation_alias="CELERY_SOFT_TIME_LIMIT_SECONDS"
+    )
+    celery_time_limit_seconds: int = Field(
+        default=1200, validation_alias="CELERY_TIME_LIMIT_SECONDS"
+    )
+    celery_job_stale_after_seconds: int = Field(
+        default=1800, validation_alias="CELERY_JOB_STALE_AFTER_SECONDS"
+    )
     analysis_progress_snapshot_refresh_seconds: float = Field(
         default=5.0,
         validation_alias="ANALYSIS_PROGRESS_SNAPSHOT_REFRESH_SECONDS",
     )
 
-    tribe_model_repo_id: str = Field(default="facebook/tribev2", validation_alias="TRIBE_MODEL_REPO_ID")
-    tribe_checkpoint_name: str = Field(default="best.ckpt", validation_alias="TRIBE_CHECKPOINT_NAME")
-    tribe_cache_folder: str = Field(default="./cache/tribev2", validation_alias="TRIBE_CACHE_FOLDER")
+    tribe_model_repo_id: str = Field(
+        default="facebook/tribev2", validation_alias="TRIBE_MODEL_REPO_ID"
+    )
+    tribe_checkpoint_name: str = Field(
+        default="best.ckpt", validation_alias="TRIBE_CHECKPOINT_NAME"
+    )
+    tribe_cache_folder: str = Field(
+        default="./cache/tribev2", validation_alias="TRIBE_CACHE_FOLDER"
+    )
     asset_cache_folder: str = Field(default="./cache/assets", validation_alias="ASSET_CACHE_FOLDER")
     tribe_runtime_output_cache_folder: str = Field(
         default="./cache/tribev2/runtime-output",
@@ -149,7 +187,9 @@ class Settings(BaseSettings):
         default="microsoft/Phi-3-mini-4k-instruct",
         validation_alias=AliasChoices("TRIBE_TEXT_FEATURE_MODEL_NAME", "TRIBE_TEXT_MODEL_NAME"),
     )
-    tribe_feature_cluster: str | None = Field(default=None, validation_alias="TRIBE_FEATURE_CLUSTER")
+    tribe_feature_cluster: str | None = Field(
+        default=None, validation_alias="TRIBE_FEATURE_CLUSTER"
+    )
     tribe_hf_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TRIBE_HF_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
@@ -162,7 +202,9 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TRIBE_VIDEO_MAX_IMSIZE",
     )
-    tribe_preload_on_worker_startup: bool = Field(default=True, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP")
+    tribe_preload_on_worker_startup: bool = Field(
+        default=True, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP"
+    )
     tribe_validate_binaries_on_worker_startup: bool = Field(
         default=True,
         validation_alias="TRIBE_VALIDATE_BINARIES_ON_WORKER_STARTUP",
@@ -183,7 +225,9 @@ class Settings(BaseSettings):
         default=15,
         validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_CLEANUP_INTERVAL_MINUTES",
     )
-    tribe_enable_roi_summary: bool = Field(default=False, validation_alias="TRIBE_ENABLE_ROI_SUMMARY")
+    tribe_enable_roi_summary: bool = Field(
+        default=False, validation_alias="TRIBE_ENABLE_ROI_SUMMARY"
+    )
 
     llm_provider: Literal["ollama", "openai_compatible", "vllm", "lm_studio"] = Field(
         default="ollama",
@@ -215,7 +259,9 @@ class Settings(BaseSettings):
     )
     llm_request_budget_usd: float = Field(default=0.25, validation_alias="LLM_REQUEST_BUDGET_USD")
     llm_retry_max_attempts: int = Field(default=2, validation_alias="LLM_RETRY_MAX_ATTEMPTS")
-    llm_retry_backoff_seconds: float = Field(default=1.0, validation_alias="LLM_RETRY_BACKOFF_SECONDS")
+    llm_retry_backoff_seconds: float = Field(
+        default=1.0, validation_alias="LLM_RETRY_BACKOFF_SECONDS"
+    )
     llm_circuit_breaker_failure_threshold: int = Field(
         default=3,
         validation_alias="LLM_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
@@ -224,8 +270,12 @@ class Settings(BaseSettings):
         default=300,
         validation_alias="LLM_CIRCUIT_BREAKER_RESET_SECONDS",
     )
-    llm_cost_input_per_1k_tokens: float = Field(default=0.0, validation_alias="LLM_COST_INPUT_PER_1K_TOKENS")
-    llm_cost_output_per_1k_tokens: float = Field(default=0.0, validation_alias="LLM_COST_OUTPUT_PER_1K_TOKENS")
+    llm_cost_input_per_1k_tokens: float = Field(
+        default=0.0, validation_alias="LLM_COST_INPUT_PER_1K_TOKENS"
+    )
+    llm_cost_output_per_1k_tokens: float = Field(
+        default=0.0, validation_alias="LLM_COST_OUTPUT_PER_1K_TOKENS"
+    )
     llm_processing_stale_after_seconds: int = Field(
         default=900,
         validation_alias="LLM_PROCESSING_STALE_AFTER_SECONDS",
@@ -314,7 +364,7 @@ class Settings(BaseSettings):
         return aliases.get(normalized, value)
 
     @model_validator(mode="after")
-    def _block_insecure_production_defaults(self) -> "Settings":
+    def _block_insecure_production_defaults(self) -> Settings:
         if self.app_env == "production":
             insecure_secrets = ("dev-session-secret", "CHANGE_ME_USE_openssl_rand_hex_64", "")
             if self.session_secret in insecure_secrets or len(self.session_secret) < 32:

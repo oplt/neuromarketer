@@ -105,7 +105,9 @@ class AnalysisComparisonApplicationService:
             winner = ranked_candidates[0].candidate if ranked_candidates else None
             await self.comparisons.replace_result(
                 comparison_id=comparison.id,
-                winning_creative_version_id=winner.creative_version_id if winner is not None else None,
+                winning_creative_version_id=winner.creative_version_id
+                if winner is not None
+                else None,
                 summary_json=self._build_summary_json(
                     ranked_candidates=ranked_candidates,
                     baseline_job_id=baseline_job_id,
@@ -133,7 +135,9 @@ class AnalysisComparisonApplicationService:
                 comparison_id=str(comparison.id),
                 project_id=str(project_id),
                 user_id=str(user_id),
-                winning_analysis_job_id=str(response.winning_analysis_job_id) if response.winning_analysis_job_id else None,
+                winning_analysis_job_id=str(response.winning_analysis_job_id)
+                if response.winning_analysis_job_id
+                else None,
                 candidate_count=len(response.items),
                 status="succeeded",
             )
@@ -145,7 +149,9 @@ class AnalysisComparisonApplicationService:
         project_id: UUID,
         limit: int,
     ) -> AnalysisComparisonListResponse:
-        comparisons = await self.comparisons.list_comparisons_for_project(project_id=project_id, limit=limit)
+        comparisons = await self.comparisons.list_comparisons_for_project(
+            project_id=project_id, limit=limit
+        )
         items = [
             self._build_list_item(comparison)
             for comparison in comparisons
@@ -160,7 +166,9 @@ class AnalysisComparisonApplicationService:
         comparison_id: UUID,
     ) -> AnalysisComparisonRead:
         comparison = await self.comparisons.get_comparison(comparison_id, project_id=project_id)
-        if comparison is None or not self._is_analysis_workspace_comparison(comparison.comparison_context):
+        if comparison is None or not self._is_analysis_workspace_comparison(
+            comparison.comparison_context
+        ):
             raise NotFoundAppError("Comparison not found.")
         return self._build_comparison_read(comparison)
 
@@ -169,7 +177,9 @@ class AnalysisComparisonApplicationService:
         if len(set(job_ids)) != len(job_ids):
             raise ValidationAppError("Select distinct analyses before creating a comparison.")
         if payload.baseline_job_id is not None and payload.baseline_job_id not in job_ids:
-            raise ValidationAppError("The selected baseline must also be part of the comparison set.")
+            raise ValidationAppError(
+                "The selected baseline must also be part of the comparison set."
+            )
 
     async def _load_candidates(
         self,
@@ -184,8 +194,13 @@ class AnalysisComparisonApplicationService:
             raw_job = await self.predictions.get_job(analysis_job_id)
             self.analysis._ensure_job_ownership(raw_job, user_id=user_id)
             if raw_job.project_id != project_id:
-                raise ValidationAppError("All analyses in a comparison must belong to the active workspace.")
-            if str((raw_job.runtime_params or {}).get("analysis_surface") or "") != "analysis_dashboard":
+                raise ValidationAppError(
+                    "All analyses in a comparison must belong to the active workspace."
+                )
+            if (
+                str((raw_job.runtime_params or {}).get("analysis_surface") or "")
+                != "analysis_dashboard"
+            ):
                 raise ValidationAppError("Only analysis workspace jobs can be compared here.")
             if raw_job.creative_version_id in creative_version_ids:
                 raise ValidationAppError(
@@ -194,7 +209,9 @@ class AnalysisComparisonApplicationService:
 
             snapshot = await self.analysis._build_job_status_response(raw_job)
             if snapshot.result is None:
-                raise ConflictAppError("Each selected analysis must have completed results before comparison.")
+                raise ConflictAppError(
+                    "Each selected analysis must have completed results before comparison."
+                )
 
             creative_version_ids.add(raw_job.creative_version_id)
             loaded.append(
@@ -245,10 +262,7 @@ class AnalysisComparisonApplicationService:
         ]
 
     def _extract_score_map(self, result: AnalysisResultRead) -> dict[str, float]:
-        metrics_by_key = {
-            str(metric.key): float(metric.value)
-            for metric in result.metrics_json
-        }
+        metrics_by_key = {str(metric.key): float(metric.value) for metric in result.metrics_json}
         summary = result.summary_json
         score_map = {
             "conversion_proxy": round(float(metrics_by_key.get("conversion_proxy_score", 0.0)), 2),
@@ -275,7 +289,9 @@ class AnalysisComparisonApplicationService:
             key=lambda item: item[1],
             reverse=True,
         )
-        strongest = ", ".join(self._format_metric_label(metric_name) for metric_name, _ in ranked_metrics[:2])
+        strongest = ", ".join(
+            self._format_metric_label(metric_name) for metric_name, _ in ranked_metrics[:2]
+        )
         weakest_metric = ranked_metrics[-1][0] if ranked_metrics else "unknown"
         return f"Strongest predicted drivers: {strongest}. Primary drag: {self._format_metric_label(weakest_metric)}."
 
@@ -314,7 +330,9 @@ class AnalysisComparisonApplicationService:
             "weights": self.SCORE_WEIGHTS,
             "candidate_count": len(ranked_candidates),
             "baseline_job_id": str(baseline_job_id),
-            "winning_analysis_job_id": str(winner.candidate.analysis_job_id) if winner is not None else None,
+            "winning_analysis_job_id": str(winner.candidate.analysis_job_id)
+            if winner is not None
+            else None,
             "winning_rationale": winner.rationale if winner is not None else None,
             "metric_leaders": metric_leaders,
         }
@@ -347,14 +365,23 @@ class AnalysisComparisonApplicationService:
                     "result": ranked_candidate.candidate.result.model_dump(mode="json"),
                     "scores_json": ranked_candidate.scores_json,
                     "rationale": ranked_candidate.rationale,
-                    "selected_order": payload.analysis_job_ids.index(ranked_candidate.candidate.analysis_job_id) + 1,
+                    "selected_order": payload.analysis_job_ids.index(
+                        ranked_candidate.candidate.analysis_job_id
+                    )
+                    + 1,
                 }
                 for ranked_candidate in ranked_candidates
             ],
         }
 
-    def _build_default_name(self, loaded_candidates: list[LoadedAnalysisComparisonCandidate]) -> str:
-        primary_label = self._build_candidate_label(loaded_candidates[0]) if loaded_candidates else "Analysis compare"
+    def _build_default_name(
+        self, loaded_candidates: list[LoadedAnalysisComparisonCandidate]
+    ) -> str:
+        primary_label = (
+            self._build_candidate_label(loaded_candidates[0])
+            if loaded_candidates
+            else "Analysis compare"
+        )
         if len(loaded_candidates) == 2:
             return f"{primary_label} vs {self._build_candidate_label(loaded_candidates[1])}"
         return f"{primary_label} + {len(loaded_candidates) - 1} more"
@@ -363,7 +390,9 @@ class AnalysisComparisonApplicationService:
         items_metadata = self._read_items_metadata(comparison.comparison_context)
         winning_analysis_job_id = self._resolve_winning_analysis_job_id(
             comparison_context=comparison.comparison_context,
-            winning_creative_version_id=comparison.result.winning_creative_version_id if comparison.result else None,
+            winning_creative_version_id=comparison.result.winning_creative_version_id
+            if comparison.result
+            else None,
         )
         baseline_job_id = self._read_uuid(comparison.comparison_context.get("baseline_job_id"))
         return AnalysisComparisonListItemRead(
@@ -386,13 +415,16 @@ class AnalysisComparisonApplicationService:
             str(item_result.creative_version_id): item_result
             for item_result in comparison.result.item_results
         }
-        metadata_by_job_id = {
-            str(item.get("analysis_job_id")): item
-            for item in items_metadata
-        }
+        metadata_by_job_id = {str(item.get("analysis_job_id")): item for item in items_metadata}
         baseline_job_id = self._read_uuid(comparison.comparison_context.get("baseline_job_id"))
-        baseline_metadata = metadata_by_job_id.get(str(baseline_job_id)) if baseline_job_id is not None else None
-        baseline_result = self._parse_result_metadata(baseline_metadata.get("result")) if baseline_metadata is not None else None
+        baseline_metadata = (
+            metadata_by_job_id.get(str(baseline_job_id)) if baseline_job_id is not None else None
+        )
+        baseline_result = (
+            self._parse_result_metadata(baseline_metadata.get("result"))
+            if baseline_metadata is not None
+            else None
+        )
 
         items: list[AnalysisComparisonItemRead] = []
         for metadata in items_metadata:
@@ -411,14 +443,19 @@ class AnalysisComparisonApplicationService:
                     asset=self._parse_asset_metadata(metadata.get("asset")),
                     result=candidate_result,
                     overall_rank=item_result.overall_rank,
-                    is_winner=item_result.creative_version_id == comparison.result.winning_creative_version_id,
+                    is_winner=item_result.creative_version_id
+                    == comparison.result.winning_creative_version_id,
                     is_baseline=analysis_job_id == baseline_job_id,
                     scores_json=dict(item_result.scores_json or metadata.get("scores_json") or {}),
                     delta_json=self._build_delta_json(
                         baseline_result=baseline_result,
                         candidate_result=candidate_result,
-                        baseline_scores=baseline_metadata.get("scores_json") if baseline_metadata is not None else None,
-                        candidate_scores=item_result.scores_json or metadata.get("scores_json") or {},
+                        baseline_scores=baseline_metadata.get("scores_json")
+                        if baseline_metadata is not None
+                        else None,
+                        candidate_scores=item_result.scores_json
+                        or metadata.get("scores_json")
+                        or {},
                     ),
                     rationale=item_result.rationale or metadata.get("rationale"),
                     scene_deltas_json=self._build_scene_deltas(
@@ -456,7 +493,9 @@ class AnalysisComparisonApplicationService:
         comparison_context: dict[str, Any],
         winning_creative_version_id: UUID | None,
     ) -> UUID | None:
-        winning_version = str(winning_creative_version_id) if winning_creative_version_id is not None else None
+        winning_version = (
+            str(winning_creative_version_id) if winning_creative_version_id is not None else None
+        )
         if winning_version is None:
             return None
         for metadata in self._read_items_metadata(comparison_context):
@@ -475,9 +514,15 @@ class AnalysisComparisonApplicationService:
         if baseline_result is None:
             return {}
 
-        baseline_metric_rows = {metric.key: float(metric.value) for metric in baseline_result.metrics_json}
-        candidate_metric_rows = {metric.key: float(metric.value) for metric in candidate_result.metrics_json}
-        baseline_score_map = {str(key): float(value) for key, value in (baseline_scores or {}).items()}
+        baseline_metric_rows = {
+            metric.key: float(metric.value) for metric in baseline_result.metrics_json
+        }
+        candidate_metric_rows = {
+            metric.key: float(metric.value) for metric in candidate_result.metrics_json
+        }
+        baseline_score_map = {
+            str(key): float(value) for key, value in (baseline_scores or {}).items()
+        }
         candidate_score_map = {str(key): float(value) for key, value in candidate_scores.items()}
 
         return {
@@ -533,7 +578,9 @@ class AnalysisComparisonApplicationService:
         candidate_segments = candidate_result.segments_json
         for index, candidate_segment in enumerate(candidate_segments):
             baseline_segment = baseline_segments[index] if index < len(baseline_segments) else None
-            baseline_attention = float(baseline_segment.attention_score) if baseline_segment is not None else 0.0
+            baseline_attention = (
+                float(baseline_segment.attention_score) if baseline_segment is not None else 0.0
+            )
             candidate_attention = float(candidate_segment.attention_score)
             rows.append(
                 {
@@ -550,10 +597,16 @@ class AnalysisComparisonApplicationService:
                     "attention_delta": round(candidate_attention - baseline_attention, 2),
                     "engagement_delta_delta": round(
                         float(candidate_segment.engagement_delta)
-                        - float(baseline_segment.engagement_delta if baseline_segment is not None else 0.0),
+                        - float(
+                            baseline_segment.engagement_delta
+                            if baseline_segment is not None
+                            else 0.0
+                        ),
                         2,
                     ),
-                    "baseline_note": baseline_segment.note if baseline_segment is not None else None,
+                    "baseline_note": baseline_segment.note
+                    if baseline_segment is not None
+                    else None,
                     "candidate_note": candidate_segment.note,
                 }
             )
@@ -567,7 +620,9 @@ class AnalysisComparisonApplicationService:
         candidate_result: AnalysisResultRead,
         is_baseline: bool,
     ) -> dict[str, Any]:
-        candidate_titles = [recommendation.title for recommendation in candidate_result.recommendations_json]
+        candidate_titles = [
+            recommendation.title for recommendation in candidate_result.recommendations_json
+        ]
         if baseline_result is None or is_baseline:
             return {
                 "shared_titles": [],
@@ -575,9 +630,15 @@ class AnalysisComparisonApplicationService:
                 "baseline_only_titles": [],
             }
 
-        baseline_titles = [recommendation.title for recommendation in baseline_result.recommendations_json]
-        normalized_baseline = {self._normalize_recommendation_title(title): title for title in baseline_titles}
-        normalized_candidate = {self._normalize_recommendation_title(title): title for title in candidate_titles}
+        baseline_titles = [
+            recommendation.title for recommendation in baseline_result.recommendations_json
+        ]
+        normalized_baseline = {
+            self._normalize_recommendation_title(title): title for title in baseline_titles
+        }
+        normalized_candidate = {
+            self._normalize_recommendation_title(title): title for title in candidate_titles
+        }
         shared_keys = sorted(set(normalized_baseline).intersection(normalized_candidate))
         candidate_only_keys = sorted(set(normalized_candidate) - set(normalized_baseline))
         baseline_only_keys = sorted(set(normalized_baseline) - set(normalized_candidate))
@@ -595,9 +656,14 @@ class AnalysisComparisonApplicationService:
         return f"Analysis {str(candidate.analysis_job_id)[:8]}"
 
     def _is_analysis_workspace_comparison(self, comparison_context: dict[str, Any] | None) -> bool:
-        return str((comparison_context or {}).get("analysis_surface") or "") == "analysis_compare_workspace"
+        return (
+            str((comparison_context or {}).get("analysis_surface") or "")
+            == "analysis_compare_workspace"
+        )
 
-    def _read_items_metadata(self, comparison_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    def _read_items_metadata(
+        self, comparison_context: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
         raw_items = (comparison_context or {}).get("items_metadata") or []
         return [item for item in raw_items if isinstance(item, dict)]
 

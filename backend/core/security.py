@@ -157,7 +157,7 @@ def hash_token(token: str) -> str:
 
 
 def build_token_prefix(token: str, length: int = 16) -> str:
-    return token[:max(8, length)]
+    return token[: max(8, length)]
 
 
 def create_totp_secret() -> str:
@@ -169,7 +169,9 @@ def build_totp_uri(*, secret: str, email: str, issuer: str) -> str:
     return f"otpauth://totp/{_quote_uri_component(label)}?secret={secret}&issuer={_quote_uri_component(issuer)}"
 
 
-def verify_totp_code(code: str, secret: str, *, now_epoch: int | None = None, window: int = 1) -> bool:
+def verify_totp_code(
+    code: str, secret: str, *, now_epoch: int | None = None, window: int = 1
+) -> bool:
     normalized_code = "".join(ch for ch in code if ch.isdigit())
     if len(normalized_code) != TOTP_DIGITS:
         return False
@@ -238,7 +240,9 @@ def unseal_secret(value: str | None) -> str | None:
 
 
 def _create_signed_token(payload: dict[str, object]) -> str:
-    encoded_payload = _base64url_encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+    encoded_payload = _base64url_encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
     signature = _sign_value(encoded_payload)
     return f"{encoded_payload}.{signature}"
 
@@ -306,7 +310,9 @@ def _decode_base32_secret(value: str) -> bytes:
 
 def _quote_uri_component(value: str) -> str:
     safe = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"
-    return "".join(character if character in safe else f"%{ord(character):02X}" for character in value)
+    return "".join(
+        character if character in safe else f"%{ord(character):02X}" for character in value
+    )
 
 
 def _sign_value(value: str) -> str:

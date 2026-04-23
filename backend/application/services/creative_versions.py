@@ -4,8 +4,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import NotFoundAppError, ValidationAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import get_logger, log_event, log_exception
 from backend.db.repositories import CreativeRepository
 
@@ -47,7 +47,9 @@ class CreativeVersionApplicationService:
                     logger,
                     "creative_version_promotion_failed",
                     exc,
-                    level="warning" if isinstance(exc, (NotFoundAppError, ValidationAppError)) else "error",
+                    level="warning"
+                    if isinstance(exc, (NotFoundAppError, ValidationAppError))
+                    else "error",
                     artifact_id=str(artifact_id),
                     status="failed",
                 )

@@ -206,7 +206,9 @@ class ObjectStorageService:
             code = str(error.get("Code") or "Unknown")
             message = str(error.get("Message") or "Object storage upload failed.")
             if self.provider == "cloudflare-r2":
-                raise ConfigurationAppError(f"Cloudflare R2 upload failed: {message} ({code}).") from exc
+                raise ConfigurationAppError(
+                    f"Cloudflare R2 upload failed: {message} ({code})."
+                ) from exc
             raise
 
         return UploadedObject(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -49,7 +49,10 @@ class AnalysisPostprocessor:
         reduced_feature_vector = runtime_output.reduced_feature_vector or {}
         segment_features = list(reduced_feature_vector.get("segment_features", []))
         score_items = {score.score_type: score for score in scoring_bundle.scores}
-        score_map = {score.score_type: self._to_float(score.normalized_score) for score in scoring_bundle.scores}
+        score_map = {
+            score.score_type: self._to_float(score.normalized_score)
+            for score in scoring_bundle.scores
+        }
         confidence_values = [
             self._to_float(score.confidence)
             for score in scoring_bundle.scores
@@ -59,10 +62,14 @@ class AnalysisPostprocessor:
             segment_count=len(segment_features),
             event_row_count=int(reduced_feature_vector.get("event_row_count", 0)),
         )
-        confidence_score = round(
-            sum(confidence_values) / len(confidence_values) * 100.0,
-            2,
-        ) if confidence_values else round(completeness_score, 2)
+        confidence_score = (
+            round(
+                sum(confidence_values) / len(confidence_values) * 100.0,
+                2,
+            )
+            if confidence_values
+            else round(completeness_score, 2)
+        )
 
         timeline_rows = self._build_timeline_rows(
             segment_features=segment_features,
@@ -76,10 +83,7 @@ class AnalysisPostprocessor:
             score_map=score_map,
         )
         total_duration_ms = max(
-            (
-                int(row["end_time_ms"])
-                for row in segment_rows
-            ),
+            (int(row["end_time_ms"]) for row in segment_rows),
             default=max((int(row["timestamp_ms"]) for row in timeline_rows), default=0),
         )
 
@@ -151,23 +155,24 @@ class AnalysisPostprocessor:
             segment_count=len(segment_features),
             event_row_count=int(reduced_feature_vector.get("event_row_count", 0)),
         )
-        timeline_rows = self._build_scene_extraction_timeline_rows(segment_features=segment_features)
+        timeline_rows = self._build_scene_extraction_timeline_rows(
+            segment_features=segment_features
+        )
         segment_rows = self._build_segment_rows(
             timeline_rows=timeline_rows,
             segment_features=segment_features,
         )
         total_duration_ms = max(
-            (
-                int(row["end_time_ms"])
-                for row in segment_rows
-            ),
+            (int(row["end_time_ms"]) for row in segment_rows),
             default=max((int(row["timestamp_ms"]) for row in timeline_rows), default=0),
         )
 
         for row in segment_rows:
             row["attention_score"] = 0.0
             row["engagement_delta"] = 0.0
-            row["note"] = "Scene extraction is ready. Primary scoring is still generating the attention profile."
+            row["note"] = (
+                "Scene extraction is ready. Primary scoring is still generating the attention profile."
+            )
 
         summary_json = {
             "modality": modality,
@@ -223,7 +228,7 @@ class AnalysisPostprocessor:
         dashboard_payload: AnalysisDashboardPayload,
         created_at: datetime | None = None,
     ) -> dict[str, Any]:
-        timestamp = created_at or datetime.now(timezone.utc)
+        timestamp = created_at or datetime.now(UTC)
         return {
             "job_id": str(job_id),
             "summary_json": dashboard_payload.summary_json,
@@ -282,25 +287,25 @@ class AnalysisPostprocessor:
     ) -> dict[str, Any]:
         overall_attention_score = round(score_map.get("attention", 0.0), 2)
         opening_attention_scores = [
-            row["attention_score"]
-            for row in timeline_rows
-            if row["timestamp_ms"] < 3_000
+            row["attention_score"] for row in timeline_rows if row["timestamp_ms"] < 3_000
         ]
         post_opening_engagement_scores = [
-            row["engagement_score"]
-            for row in timeline_rows
-            if row["timestamp_ms"] >= 3_000
+            row["engagement_score"] for row in timeline_rows if row["timestamp_ms"] >= 3_000
         ]
-        hook_score = round(
-            self._average(opening_attention_scores) if opening_attention_scores else self._average(
-                [row["attention_score"] for row in timeline_rows]
-            ),
-            2,
-        ) if timeline_rows else 0.0
+        hook_score = (
+            round(
+                self._average(opening_attention_scores)
+                if opening_attention_scores
+                else self._average([row["attention_score"] for row in timeline_rows]),
+                2,
+            )
+            if timeline_rows
+            else 0.0
+        )
         sustained_engagement_score = round(
-            self._average(post_opening_engagement_scores) if post_opening_engagement_scores else self._average(
-                [row["engagement_score"] for row in timeline_rows]
-            ),
+            self._average(post_opening_engagement_scores)
+            if post_opening_engagement_scores
+            else self._average([row["engagement_score"] for row in timeline_rows]),
             2,
         )
         return {
@@ -341,7 +346,9 @@ class AnalysisPostprocessor:
                 "unit": "/100",
                 "source": "llm_analysis_scoring",
                 "detail": "LLM-evaluated attention proxy grounded in TRIBE-derived evidence.",
-                "confidence": self._score_confidence(score_items, "attention", fallback=summary_json["confidence"]),
+                "confidence": self._score_confidence(
+                    score_items, "attention", fallback=summary_json["confidence"]
+                ),
             },
             {
                 "key": "emotion_score",
@@ -350,7 +357,9 @@ class AnalysisPostprocessor:
                 "unit": "/100",
                 "source": "llm_analysis_scoring",
                 "detail": "LLM-evaluated emotion proxy grounded in TRIBE-derived evidence.",
-                "confidence": self._score_confidence(score_items, "emotion", fallback=summary_json["confidence"]),
+                "confidence": self._score_confidence(
+                    score_items, "emotion", fallback=summary_json["confidence"]
+                ),
             },
             {
                 "key": "hook_score_first_3_seconds",
@@ -377,7 +386,9 @@ class AnalysisPostprocessor:
                 "unit": "/100",
                 "source": "llm_analysis_scoring",
                 "detail": "LLM-evaluated recall proxy grounded in TRIBE-derived evidence.",
-                "confidence": self._score_confidence(score_items, "memory", fallback=summary_json["confidence"]),
+                "confidence": self._score_confidence(
+                    score_items, "memory", fallback=summary_json["confidence"]
+                ),
             },
             {
                 "key": "cognitive_load_proxy",
@@ -386,7 +397,9 @@ class AnalysisPostprocessor:
                 "unit": "/100",
                 "source": "llm_analysis_scoring",
                 "detail": "LLM-evaluated processing-friction proxy grounded in TRIBE-derived evidence.",
-                "confidence": self._score_confidence(score_items, "cognitive_load", fallback=summary_json["confidence"]),
+                "confidence": self._score_confidence(
+                    score_items, "cognitive_load", fallback=summary_json["confidence"]
+                ),
             },
             {
                 "key": "conversion_proxy_score",
@@ -395,12 +408,16 @@ class AnalysisPostprocessor:
                 "unit": "/100",
                 "source": "llm_analysis_scoring",
                 "detail": "LLM-evaluated persuasive-action proxy grounded in TRIBE-derived evidence.",
-                "confidence": self._score_confidence(score_items, "conversion_proxy", fallback=summary_json["confidence"]),
+                "confidence": self._score_confidence(
+                    score_items, "conversion_proxy", fallback=summary_json["confidence"]
+                ),
             },
             {
                 "key": "average_engagement",
                 "label": "Average Engagement",
-                "value": round(self._average([row["engagement_score"] for row in timeline_rows]), 2),
+                "value": round(
+                    self._average([row["engagement_score"] for row in timeline_rows]), 2
+                ),
                 "unit": "/100",
                 "source": "analysis_postprocessor",
                 "detail": "Mean engagement across all segments.",
@@ -444,8 +461,7 @@ class AnalysisPostprocessor:
         score_map: dict[str, float],
     ) -> list[dict[str, Any]]:
         point_by_timestamp = {
-            int(point.timestamp_ms): point
-            for point in scoring_bundle.timeline_points
+            int(point.timestamp_ms): point for point in scoring_bundle.timeline_points
         }
         # Secondary index by segment_index stored in metadata_json for robust lookup
         point_by_index: dict[int, Any] = {}
@@ -461,11 +477,17 @@ class AnalysisPostprocessor:
             point_attention = self._to_float(getattr(scoring_point, "attention_score", None))
             point_memory = self._to_float(getattr(scoring_point, "memory_score", None))
             attention_score = round(
-                point_attention if scoring_point is not None and getattr(scoring_point, "attention_score", None) is not None else score_map.get("attention", 0.0),
+                point_attention
+                if scoring_point is not None
+                and getattr(scoring_point, "attention_score", None) is not None
+                else score_map.get("attention", 0.0),
                 2,
             )
             memory_proxy = round(
-                point_memory if scoring_point is not None and getattr(scoring_point, "memory_score", None) is not None else score_map.get("memory", 0.0),
+                point_memory
+                if scoring_point is not None
+                and getattr(scoring_point, "memory_score", None) is not None
+                else score_map.get("memory", 0.0),
                 2,
             )
             rows.append(
@@ -513,23 +535,33 @@ class AnalysisPostprocessor:
             engagement_score = float(timeline_row["engagement_score"])
             attention_score = float(timeline_row["attention_score"])
             memory_proxy = float(timeline_row.get("memory_proxy", 0.0))
-            scoring_point = _point_by_ts.get(int(timeline_row["timestamp_ms"])) or _point_by_idx.get(index)
-            engagement_delta = round(
-                engagement_score - previous_engagement,
-                2,
-            ) if previous_engagement is not None else 0.0
+            scoring_point = _point_by_ts.get(
+                int(timeline_row["timestamp_ms"])
+            ) or _point_by_idx.get(index)
+            engagement_delta = (
+                round(
+                    engagement_score - previous_engagement,
+                    2,
+                )
+                if previous_engagement is not None
+                else 0.0
+            )
             note = self._build_segment_note(scoring_point=scoring_point)
 
             # TRIBE-direct per-segment signals (model output, 0–1 → 0–100)
             peak_focus = round(float(segment.get("peak_focus_signal", 0.0)) * 100.0, 2)
             temporal_change = round(float(segment.get("temporal_change_signal", 0.0)) * 100.0, 2)
             consistency = round(float(segment.get("consistency_signal", 0.0)) * 100.0, 2)
-            hemisphere_balance = round(float(segment.get("hemisphere_balance_signal", 0.0)) * 100.0, 2)
+            hemisphere_balance = round(
+                float(segment.get("hemisphere_balance_signal", 0.0)) * 100.0, 2
+            )
 
             # LLM-evaluated per-segment signals (with global fallback)
             def _pt(attr: str, fallback_key: str) -> float:
                 val = getattr(scoring_point, attr, None) if scoring_point is not None else None
-                return round(self._to_float(val) if val is not None else _score_map.get(fallback_key, 0.0), 2)
+                return round(
+                    self._to_float(val) if val is not None else _score_map.get(fallback_key, 0.0), 2
+                )
 
             rows.append(
                 {
@@ -587,8 +619,16 @@ class AnalysisPostprocessor:
             peak_focus = float(segment.get("peak_focus_signal", 0.0)) * 100.0
             grid = [
                 [round(engagement_score, 2), round(attention_score, 2), round(peak_focus, 2)],
-                [round(memory_proxy, 2), round(attention_score, 2), round(max(0.0, 100.0 - cognitive_load), 2)],
-                [round(consistency, 2), round(temporal_change, 2), round(score_map.get("conversion_proxy", 0.0), 2)],
+                [
+                    round(memory_proxy, 2),
+                    round(attention_score, 2),
+                    round(max(0.0, 100.0 - cognitive_load), 2),
+                ],
+                [
+                    round(consistency, 2),
+                    round(temporal_change, 2),
+                    round(score_map.get("conversion_proxy", 0.0), 2),
+                ],
             ]
             flat_grid = [value for row in grid for value in row]
             max_index = flat_grid.index(max(flat_grid))
@@ -670,7 +710,9 @@ class AnalysisPostprocessor:
                     "title": suggestion.title,
                     "detail": suggestion.rationale,
                     "priority": "medium",
-                    "timestamp_ms": int(timestamp_ms) if isinstance(timestamp_ms, (int, float)) else None,
+                    "timestamp_ms": int(timestamp_ms)
+                    if isinstance(timestamp_ms, (int, float))
+                    else None,
                     "confidence": round(self._to_float(suggestion.confidence) * 100.0, 2)
                     if suggestion.confidence is not None
                     else None,
@@ -690,7 +732,11 @@ class AnalysisPostprocessor:
     def _build_segment_note(self, *, scoring_point) -> str:
         if scoring_point is None:
             return "Segment included in the scored timeline."
-        rationale = scoring_point.metadata_json.get("rationale") if isinstance(scoring_point.metadata_json, dict) else None
+        rationale = (
+            scoring_point.metadata_json.get("rationale")
+            if isinstance(scoring_point.metadata_json, dict)
+            else None
+        )
         if isinstance(rationale, str) and rationale.strip():
             return rationale.strip()
         return "Segment included in the scored timeline."
@@ -711,7 +757,9 @@ class AnalysisPostprocessor:
             return 0.0
         return float(value)
 
-    def _score_confidence(self, score_items: dict[str, Any], key: str, *, fallback: float | None) -> float | None:
+    def _score_confidence(
+        self, score_items: dict[str, Any], key: str, *, fallback: float | None
+    ) -> float | None:
         score_item = score_items.get(key)
         if score_item is None or score_item.confidence is None:
             return fallback

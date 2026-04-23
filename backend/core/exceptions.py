@@ -5,7 +5,9 @@ class AppError(Exception):
     status_code = 400
     code = "app_error"
 
-    def __init__(self, message: str, *, code: str | None = None, status_code: int | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str | None = None, status_code: int | None = None
+    ) -> None:
         super().__init__(message)
         if code is not None:
             self.code = code

@@ -59,11 +59,17 @@ class ComparisonRepository:
         await self.session.execute(
             delete(CreativeComparisonItemResult).where(
                 CreativeComparisonItemResult.comparison_result_id.in_(
-                    select(CreativeComparisonResult.id).where(CreativeComparisonResult.comparison_id == comparison_id)
+                    select(CreativeComparisonResult.id).where(
+                        CreativeComparisonResult.comparison_id == comparison_id
+                    )
                 )
             )
         )
-        await self.session.execute(delete(CreativeComparisonResult).where(CreativeComparisonResult.comparison_id == comparison_id))
+        await self.session.execute(
+            delete(CreativeComparisonResult).where(
+                CreativeComparisonResult.comparison_id == comparison_id
+            )
+        )
 
         comparison_result = CreativeComparisonResult(
             comparison_id=comparison_id,
@@ -96,12 +102,16 @@ class ComparisonRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_comparison(self, comparison_id: UUID, *, project_id: UUID) -> CreativeComparison | None:
+    async def get_comparison(
+        self, comparison_id: UUID, *, project_id: UUID
+    ) -> CreativeComparison | None:
         result = await self.session.execute(
             select(CreativeComparison)
             .options(
                 selectinload(CreativeComparison.items),
-                selectinload(CreativeComparison.result).selectinload(CreativeComparisonResult.item_results),
+                selectinload(CreativeComparison.result).selectinload(
+                    CreativeComparisonResult.item_results
+                ),
             )
             .where(
                 CreativeComparison.id == comparison_id,
@@ -120,7 +130,9 @@ class ComparisonRepository:
             select(CreativeComparison)
             .options(
                 selectinload(CreativeComparison.items),
-                selectinload(CreativeComparison.result).selectinload(CreativeComparisonResult.item_results),
+                selectinload(CreativeComparison.result).selectinload(
+                    CreativeComparisonResult.item_results
+                ),
             )
             .where(CreativeComparison.project_id == project_id)
             .order_by(desc(CreativeComparison.created_at))

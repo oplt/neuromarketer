@@ -77,7 +77,7 @@ class LLMRouteConfig:
             (max(tokens_in, 0) / 1_000.0) * self.cost_input_per_1k_tokens
             + (max(tokens_out, 0) / 1_000.0) * self.cost_output_per_1k_tokens,
             6,
-            )
+        )
 
 
 @dataclass(slots=True)
@@ -114,7 +114,8 @@ class _CircuitBreakerRegistry:
         with self._lock:
             state = self._states.get(route_id) or _CircuitState()
             is_open = (
-                    state.opened_until_monotonic is not None and state.opened_until_monotonic > time.monotonic()
+                state.opened_until_monotonic is not None
+                and state.opened_until_monotonic > time.monotonic()
             )
             remaining_seconds = (
                 max(state.opened_until_monotonic - time.monotonic(), 0.0)
@@ -148,11 +149,11 @@ _circuit_breakers = _CircuitBreakerRegistry()
 
 class LLMRouter:
     def __init__(
-            self,
-            *,
-            routes: list[LLMRouteConfig],
-            mode_preferences: dict[str, list[str]] | None = None,
-            mode_budgets: dict[str, float] | None = None,
+        self,
+        *,
+        routes: list[LLMRouteConfig],
+        mode_preferences: dict[str, list[str]] | None = None,
+        mode_budgets: dict[str, float] | None = None,
     ) -> None:
         if not routes:
             raise ValueError("At least one LLM route is required.")
@@ -167,7 +168,7 @@ class LLMRouter:
         self.mode_budgets = {key: float(value) for key, value in (mode_budgets or {}).items()}
 
     @classmethod
-    def from_settings(cls, app_settings: Settings = settings) -> "LLMRouter":
+    def from_settings(cls, app_settings: Settings = settings) -> LLMRouter:
         routes: list[LLMRouteConfig] = []
         raw_routes = app_settings.llm_router_providers_json or []
         if not raw_routes:
@@ -194,7 +195,9 @@ class LLMRouter:
             )
         else:
             for index, raw_route in enumerate(raw_routes):
-                route_id = str(raw_route.get("id") or raw_route.get("route_id") or f"route_{index + 1}").strip()
+                route_id = str(
+                    raw_route.get("id") or raw_route.get("route_id") or f"route_{index + 1}"
+                ).strip()
                 provider = str(raw_route.get("provider") or app_settings.llm_provider).strip()
                 base_url = str(raw_route.get("base_url") or app_settings.llm_base_url).strip()
                 model = str(raw_route.get("model") or app_settings.llm_model).strip()
@@ -207,8 +210,12 @@ class LLMRouter:
                         base_url=base_url,
                         model=model,
                         api_key=cast_or_none(raw_route.get("api_key")) or app_settings.llm_api_key,
-                        timeout_seconds=int(raw_route.get("timeout_seconds") or app_settings.llm_timeout_seconds),
-                        temperature=float(raw_route.get("temperature") or app_settings.llm_temperature),
+                        timeout_seconds=int(
+                            raw_route.get("timeout_seconds") or app_settings.llm_timeout_seconds
+                        ),
+                        temperature=float(
+                            raw_route.get("temperature") or app_settings.llm_temperature
+                        ),
                         top_p=float(raw_route.get("top_p") or app_settings.llm_top_p),
                         max_tokens=int(raw_route.get("max_tokens") or app_settings.llm_max_tokens),
                         think=raw_route.get("think", app_settings.llm_ollama_think),
@@ -216,9 +223,12 @@ class LLMRouter:
                             raw_route.get("request_budget_usd"),
                             fallback=app_settings.llm_request_budget_usd,
                         ),
-                        max_attempts=int(raw_route.get("max_attempts") or app_settings.llm_retry_max_attempts),
+                        max_attempts=int(
+                            raw_route.get("max_attempts") or app_settings.llm_retry_max_attempts
+                        ),
                         retry_backoff_seconds=float(
-                            raw_route.get("retry_backoff_seconds") or app_settings.llm_retry_backoff_seconds
+                            raw_route.get("retry_backoff_seconds")
+                            or app_settings.llm_retry_backoff_seconds
                         ),
                         circuit_breaker_failure_threshold=int(
                             raw_route.get("circuit_breaker_failure_threshold")
@@ -229,10 +239,12 @@ class LLMRouter:
                             or app_settings.llm_circuit_breaker_reset_seconds
                         ),
                         cost_input_per_1k_tokens=float(
-                            raw_route.get("cost_input_per_1k_tokens") or app_settings.llm_cost_input_per_1k_tokens
+                            raw_route.get("cost_input_per_1k_tokens")
+                            or app_settings.llm_cost_input_per_1k_tokens
                         ),
                         cost_output_per_1k_tokens=float(
-                            raw_route.get("cost_output_per_1k_tokens") or app_settings.llm_cost_output_per_1k_tokens
+                            raw_route.get("cost_output_per_1k_tokens")
+                            or app_settings.llm_cost_output_per_1k_tokens
                         ),
                     )
                 )
@@ -262,7 +274,10 @@ class LLMRouter:
         return cls(
             routes=routes,
             mode_preferences=app_settings.llm_routing_modes_json,
-            mode_budgets={key: float(value) for key, value in app_settings.llm_mode_request_budgets_json.items()},
+            mode_budgets={
+                key: float(value)
+                for key, value in app_settings.llm_mode_request_budgets_json.items()
+            },
         )
 
     def preview_route(self, *, mode: ModeKey) -> LLMRoutePreview:
@@ -287,11 +302,11 @@ class LLMRouter:
         )
 
     def _request_options_for_attempt(
-            self,
-            *,
-            route: LLMRouteConfig,
-            options: dict[str, Any] | None,
-            attempt: int,
+        self,
+        *,
+        route: LLMRouteConfig,
+        options: dict[str, Any] | None,
+        attempt: int,
     ) -> dict[str, Any]:
         resolved = copy.deepcopy(options or {})
 
@@ -311,17 +326,19 @@ class LLMRouter:
         # Retry with a materially larger cap so malformed/truncated JSON
         # does not repeat with the same output limit.
         retry_floor = 1200
-        scaled_value = base_value if attempt == 1 else max(base_value * (2 ** (attempt - 1)), retry_floor)
+        scaled_value = (
+            base_value if attempt == 1 else max(base_value * (2 ** (attempt - 1)), retry_floor)
+        )
         resolved[token_key] = max(scaled_value, base_value)
         return resolved
 
     async def generate_structured(
-            self,
-            *,
-            mode: ModeKey,
-            messages: list[dict[str, str]],
-            response_schema: dict[str, Any] | None = None,
-            options: dict[str, Any] | None = None,
+        self,
+        *,
+        mode: ModeKey,
+        messages: list[dict[str, str]],
+        response_schema: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
     ) -> StructuredGeneration:
         mode_key = _mode_key(mode)
         candidate_order = self._candidate_order(mode)
@@ -477,12 +494,20 @@ class LLMRouter:
                     metrics.observe(
                         "llm_provider_latency_seconds",
                         latency_ms / 1_000,
-                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
-                        )
+                        labels={
+                            "route_id": route.route_id,
+                            "provider": route.provider,
+                            "mode": mode_key,
+                        },
+                    )
                     metrics.observe(
                         "llm_provider_cost_usd",
                         actual_cost,
-                        labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
+                        labels={
+                            "route_id": route.route_id,
+                            "provider": route.provider,
+                            "mode": mode_key,
+                        },
                     )
                     return generation
                 except (LLMTransportError, LLMResponseFormatError, LLMClientError) as exc:
@@ -547,12 +572,20 @@ class LLMRouter:
                     if opened:
                         metrics.increment(
                             "llm_provider_circuit_open_total",
-                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
+                            labels={
+                                "route_id": route.route_id,
+                                "provider": route.provider,
+                                "mode": mode_key,
+                            },
                         )
                     if is_retry:
                         metrics.increment(
                             "llm_provider_retries_total",
-                            labels={"route_id": route.route_id, "provider": route.provider, "mode": mode_key},
+                            labels={
+                                "route_id": route.route_id,
+                                "provider": route.provider,
+                                "mode": mode_key,
+                            },
                         )
                         await asyncio.sleep(route.retry_backoff_seconds * attempt)
 
@@ -560,11 +593,13 @@ class LLMRouter:
         raise LLMRoutingError(
             last_error or "No healthy LLM routes were available.",
             telemetry=telemetry,
-            )
+        )
 
     def _candidate_order(self, mode: ModeKey) -> list[str]:
         mode_key = _mode_key(mode)
-        configured = self.mode_preferences.get(mode_key) or self.mode_preferences.get("default") or []
+        configured = (
+            self.mode_preferences.get(mode_key) or self.mode_preferences.get("default") or []
+        )
         deduplicated = [route_id for route_id in configured if route_id in self.routes]
         if not deduplicated:
             deduplicated = list(self.route_order)

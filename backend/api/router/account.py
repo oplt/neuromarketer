@@ -15,12 +15,12 @@ from backend.schemas.account import (
     AccountInviteCreateRequest,
     AccountInviteCreateResponse,
     AccountInviteRead,
+    AccountMemberRead,
     AccountMfaConfirmRequest,
     AccountMfaDisableRequest,
     AccountMfaRecoveryCodesResponse,
     AccountMfaSetupStartResponse,
     AccountMfaStatusRead,
-    AccountMemberRead,
     AccountSecurityOverviewRead,
     AccountSsoConfigRead,
     AccountSsoConfigUpsertRequest,
@@ -156,7 +156,9 @@ async def update_member_role(
     )
 
 
-@router.post("/invites", response_model=AccountInviteCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/invites", response_model=AccountInviteCreateResponse, status_code=status.HTTP_201_CREATED
+)
 async def create_workspace_invite(
     payload: AccountInviteCreateRequest,
     db: AsyncSession = Depends(get_db),
@@ -195,7 +197,9 @@ async def revoke_account_session(
     )
 
 
-@router.post("/mfa/setup", response_model=AccountMfaSetupStartResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/mfa/setup", response_model=AccountMfaSetupStartResponse, status_code=status.HTTP_201_CREATED
+)
 async def start_mfa_setup(
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),

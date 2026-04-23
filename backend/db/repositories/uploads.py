@@ -48,11 +48,15 @@ class UploadRepository:
         return upload_session
 
     async def get_upload_session_by_token(self, upload_token: str) -> UploadSession | None:
-        result = await self.session.execute(select(UploadSession).where(UploadSession.upload_token == upload_token))
+        result = await self.session.execute(
+            select(UploadSession).where(UploadSession.upload_token == upload_token)
+        )
         return result.scalar_one_or_none()
 
     async def get_upload_session(self, upload_session_id: UUID) -> UploadSession | None:
-        result = await self.session.execute(select(UploadSession).where(UploadSession.id == upload_session_id))
+        result = await self.session.execute(
+            select(UploadSession).where(UploadSession.id == upload_session_id)
+        )
         return result.scalar_one_or_none()
 
     async def mark_uploading(self, upload_session: UploadSession) -> UploadSession:
@@ -109,7 +113,9 @@ class UploadRepository:
         return artifact
 
     async def get_stored_artifact(self, artifact_id: UUID) -> StoredArtifact | None:
-        result = await self.session.execute(select(StoredArtifact).where(StoredArtifact.id == artifact_id))
+        result = await self.session.execute(
+            select(StoredArtifact).where(StoredArtifact.id == artifact_id)
+        )
         return result.scalar_one_or_none()
 
     async def get_analysis_artifacts_by_ids(
@@ -153,7 +159,9 @@ class UploadRepository:
         )
         return list(result.scalars().all())
 
-    async def mark_stored(self, upload_session: UploadSession, uploaded_artifact_id: UUID) -> UploadSession:
+    async def mark_stored(
+        self, upload_session: UploadSession, uploaded_artifact_id: UUID
+    ) -> UploadSession:
         upload_session.status = UploadStatus.STORED
         upload_session.uploaded_artifact_id = uploaded_artifact_id
         upload_session.error_message = None
@@ -165,7 +173,9 @@ class UploadRepository:
         await self.session.flush()
         return artifact
 
-    async def mark_artifact_failed(self, artifact: StoredArtifact, error_message: str | None = None) -> StoredArtifact:
+    async def mark_artifact_failed(
+        self, artifact: StoredArtifact, error_message: str | None = None
+    ) -> StoredArtifact:
         artifact.upload_status = UploadStatus.FAILED
         metadata_json = dict(artifact.metadata_json or {})
         if error_message:

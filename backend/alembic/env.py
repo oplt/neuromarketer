@@ -1,21 +1,20 @@
 from __future__ import annotations
 
 from logging.config import fileConfig
-import os
 
-from alembic import context
+from backend.core.config import settings
+from backend.db.models import Base
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-from backend.db.models import Base
-from backend.core.config import settings
+
+from alembic import context
 
 config = context.config
 config.set_main_option(
     "sqlalchemy.url",
     settings.database_url,
 )
-
 
 
 if config.config_file_name is not None:
@@ -65,4 +64,5 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     import asyncio
+
     asyncio.run(run_migrations_online())

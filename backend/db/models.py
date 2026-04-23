@@ -4,17 +4,14 @@ import enum
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import (
     Boolean,
-    CheckConstraint,
     DateTime,
     Enum,
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     Numeric,
     String,
     Text,
@@ -36,6 +33,7 @@ def _enum_values(enum_cls: type[enum.Enum]) -> list[str]:
 # ---------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------
+
 
 class OrgRole(str, enum.Enum):
     OWNER = "owner"
@@ -171,6 +169,7 @@ class ReviewStatus(str, enum.Enum):
 # Mixins
 # ---------------------------------------------------------------------
 
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -184,31 +183,30 @@ class TimestampMixin:
 
 
 class UUIDPrimaryKeyMixin:
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
 
 # ---------------------------------------------------------------------
 # Core org / auth / tenancy
 # ---------------------------------------------------------------------
 
+
 class Organization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "organizations"
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    billing_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+    billing_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    users: Mapped[list["OrganizationMembership"]] = relationship(
+    users: Mapped[list[OrganizationMembership]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
-    projects: Mapped[list["Project"]] = relationship(
+    projects: Mapped[list[Project]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
-    api_keys: Mapped[list["ApiKey"]] = relationship(
+    api_keys: Mapped[list[ApiKey]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )
 
@@ -217,23 +215,23 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "users"
 
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
-    first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    password_hash: Mapped[Optional[str]] = mapped_column("hashed_password", String(255), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    password_hash: Mapped[str | None] = mapped_column("hashed_password", String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    memberships: Mapped[list["OrganizationMembership"]] = relationship(
+    memberships: Mapped[list[OrganizationMembership]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
-    created_projects: Mapped[list["Project"]] = relationship(
+    created_projects: Mapped[list[Project]] = relationship(
         back_populates="created_by_user", foreign_keys="Project.created_by_user_id"
     )
-    created_creatives: Mapped[list["Creative"]] = relationship(
+    created_creatives: Mapped[list[Creative]] = relationship(
         back_populates="created_by_user", foreign_keys="Creative.created_by_user_id"
     )
-    created_jobs: Mapped[list["InferenceJob"]] = relationship(
+    created_jobs: Mapped[list[InferenceJob]] = relationship(
         back_populates="created_by_user", foreign_keys="InferenceJob.created_by_user_id"
     )
 
@@ -255,12 +253,10 @@ class OrganizationMembership(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    role: Mapped[OrgRole] = mapped_column(
-        Enum(OrgRole, name="org_role"), nullable=False
-    )
+    role: Mapped[OrgRole] = mapped_column(Enum(OrgRole, name="org_role"), nullable=False)
 
-    organization: Mapped["Organization"] = relationship(back_populates="users")
-    user: Mapped["User"] = relationship(back_populates="memberships")
+    organization: Mapped[Organization] = relationship(back_populates="users")
+    user: Mapped[User] = relationship(back_populates="memberships")
 
 
 class WorkspaceInvite(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -277,13 +273,11 @@ class WorkspaceInvite(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     invited_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    accepted_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    accepted_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     email: Mapped[str] = mapped_column(String(320), nullable=False)
-    role: Mapped[OrgRole] = mapped_column(
-        Enum(OrgRole, name="org_role"), nullable=False
-    )
+    role: Mapped[OrgRole] = mapped_column(Enum(OrgRole, name="org_role"), nullable=False)
     token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[WorkspaceInviteStatus] = mapped_column(
@@ -292,8 +286,8 @@ class WorkspaceInvite(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=WorkspaceInviteStatus.PENDING,
     )
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
@@ -316,14 +310,14 @@ class UserSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     token_prefix: Mapped[str] = mapped_column(String(24), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    ip_address: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(120), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     idle_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    replaced_by_session_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    replaced_by_session_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("user_sessions.id", ondelete="SET NULL"), nullable=True
     )
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -345,23 +339,21 @@ class UserMfaCredential(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=MfaMethodType.TOTP,
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    pending_secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pending_secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     recovery_code_hashes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class OrganizationSsoConfig(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "organization_sso_configs"
-    __table_args__ = (
-        UniqueConstraint("organization_id", name="uq_organization_sso_config_org"),
-    )
+    __table_args__ = (UniqueConstraint("organization_id", name="uq_organization_sso_config_org"),)
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
-    updated_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     provider_type: Mapped[SsoProviderType] = mapped_column(
@@ -370,24 +362,22 @@ class OrganizationSsoConfig(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=SsoProviderType.OIDC,
     )
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    issuer_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    entrypoint_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metadata_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    audience: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    client_secret_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    issuer_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    entrypoint_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audience: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    client_secret_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     scopes_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     attribute_mapping_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    certificate_pem: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    login_hint_domain: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    certificate_pem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    login_hint_domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "api_keys"
-    __table_args__ = (
-        Index("ix_api_keys_org_status", "organization_id", "status"),
-    )
+    __table_args__ = (Index("ix_api_keys_org_status", "organization_id", "status"),)
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
@@ -398,16 +388,17 @@ class ApiKey(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     status: Mapped[ApiKeyStatus] = mapped_column(
         Enum(ApiKeyStatus, name="api_key_status"), nullable=False, default=ApiKeyStatus.ACTIVE
     )
-    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scopes: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
-    organization: Mapped["Organization"] = relationship(back_populates="api_keys")
+    organization: Mapped[Organization] = relationship(back_populates="api_keys")
 
 
 # ---------------------------------------------------------------------
 # Project / campaign structure
 # ---------------------------------------------------------------------
+
 
 class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "projects"
@@ -419,47 +410,46 @@ class Project(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
-    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    external_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     settings: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    organization: Mapped["Organization"] = relationship(back_populates="projects")
-    created_by_user: Mapped[Optional["User"]] = relationship(back_populates="created_projects")
-    creatives: Mapped[list["Creative"]] = relationship(
+    organization: Mapped[Organization] = relationship(back_populates="projects")
+    created_by_user: Mapped[User | None] = relationship(back_populates="created_projects")
+    creatives: Mapped[list[Creative]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
-    comparisons: Mapped[list["CreativeComparison"]] = relationship(
+    comparisons: Mapped[list[CreativeComparison]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
-    feedback_events: Mapped[list["OutcomeEvent"]] = relationship(
+    feedback_events: Mapped[list[OutcomeEvent]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 
 
 class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "campaigns"
-    __table_args__ = (
-        Index("ix_campaigns_project_name", "project_id", "name"),
-    )
+    __table_args__ = (Index("ix_campaigns_project_name", "project_id", "name"),)
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    channel: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(100), nullable=True)
     audience_definition: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    project: Mapped["Project"] = relationship()
+    project: Mapped[Project] = relationship()
 
 
 # ---------------------------------------------------------------------
 # Assets / creatives
 # ---------------------------------------------------------------------
+
 
 class Creative(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "creatives"
@@ -471,7 +461,7 @@ class Creative(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
-    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -484,15 +474,17 @@ class Creative(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    project: Mapped["Project"] = relationship(back_populates="creatives")
-    created_by_user: Mapped[Optional["User"]] = relationship(back_populates="created_creatives")
-    versions: Mapped[list["CreativeVersion"]] = relationship(
-        back_populates="creative", cascade="all, delete-orphan", order_by="CreativeVersion.version_number"
+    project: Mapped[Project] = relationship(back_populates="creatives")
+    created_by_user: Mapped[User | None] = relationship(back_populates="created_creatives")
+    versions: Mapped[list[CreativeVersion]] = relationship(
+        back_populates="creative",
+        cascade="all, delete-orphan",
+        order_by="CreativeVersion.version_number",
     )
-    jobs: Mapped[list["InferenceJob"]] = relationship(
+    jobs: Mapped[list[InferenceJob]] = relationship(
         back_populates="creative", cascade="all, delete-orphan"
     )
-    outcomes: Mapped[list["OutcomeEvent"]] = relationship(
+    outcomes: Mapped[list[OutcomeEvent]] = relationship(
         back_populates="creative", cascade="all, delete-orphan"
     )
 
@@ -511,31 +503,31 @@ class CreativeVersion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Storage / content
-    source_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Text / URL specific
-    raw_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    html_snapshot_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    html_snapshot_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Media metadata
-    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    width_px: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    height_px: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    frame_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(8, 3), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    width_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height_px: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_rate: Mapped[Decimal | None] = mapped_column(Numeric(8, 3), nullable=True)
 
     # Flexible structured fields
     extracted_metadata: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     preprocessing_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    creative: Mapped["Creative"] = relationship(back_populates="versions")
-    precomputed_embeddings: Mapped[list["AssetEmbedding"]] = relationship(
+    creative: Mapped[Creative] = relationship(back_populates="versions")
+    precomputed_embeddings: Mapped[list[AssetEmbedding]] = relationship(
         back_populates="creative_version", cascade="all, delete-orphan"
     )
-    jobs: Mapped[list["InferenceJob"]] = relationship(
+    jobs: Mapped[list[InferenceJob]] = relationship(
         back_populates="creative_version", cascade="all, delete-orphan"
     )
 
@@ -545,26 +537,33 @@ class AssetEmbedding(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_asset_embeddings_version_kind", "creative_version_id", "embedding_kind"),
         UniqueConstraint(
-            "creative_version_id", "embedding_kind", "model_name",
-            name="uq_asset_embedding_version_kind_model"
+            "creative_version_id",
+            "embedding_kind",
+            "model_name",
+            name="uq_asset_embedding_version_kind_model",
         ),
     )
 
     creative_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="CASCADE"), nullable=False
     )
-    embedding_kind: Mapped[str] = mapped_column(String(50), nullable=False)  # image, video, audio, text, multimodal
+    embedding_kind: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # image, video, audio, text, multimodal
     model_name: Mapped[str] = mapped_column(String(120), nullable=False)
     vector_dim: Mapped[int] = mapped_column(Integer, nullable=False)
-    storage_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    vector_json: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    storage_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vector_json: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
-    creative_version: Mapped["CreativeVersion"] = relationship(back_populates="precomputed_embeddings")
+    creative_version: Mapped[CreativeVersion] = relationship(
+        back_populates="precomputed_embeddings"
+    )
 
 
 # ---------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------
+
 
 class ModelRegistry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "model_registry"
@@ -575,19 +574,18 @@ class ModelRegistry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     version: Mapped[str] = mapped_column(String(60), nullable=False)
-    kind: Mapped[ModelKind] = mapped_column(
-        Enum(ModelKind, name="model_kind"), nullable=False
-    )
+    kind: Mapped[ModelKind] = mapped_column(Enum(ModelKind, name="model_kind"), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     config_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    artifact_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    checksum: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    artifact_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ---------------------------------------------------------------------
 # Inference jobs / predictions
 # ---------------------------------------------------------------------
+
 
 class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "inference_jobs"
@@ -595,7 +593,12 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_inference_jobs_project_status", "project_id", "status"),
         Index("ix_inference_jobs_creative_status", "creative_id", "status"),
         Index("ix_inference_jobs_created_at", "created_at"),
-        Index("ix_inference_jobs_project_user_created_at", "project_id", "created_by_user_id", "created_at"),
+        Index(
+            "ix_inference_jobs_project_user_created_at",
+            "project_id",
+            "created_by_user_id",
+            "created_at",
+        ),
     )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -607,70 +610,72 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     creative_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="CASCADE"), nullable=False
     )
-    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
     prediction_type: Mapped[PredictionType] = mapped_column(
-        Enum(PredictionType, name="prediction_type"), nullable=False, default=PredictionType.SINGLE_ASSET
+        Enum(PredictionType, name="prediction_type"),
+        nullable=False,
+        default=PredictionType.SINGLE_ASSET,
     )
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus, name="job_status"), nullable=False, default=JobStatus.QUEUED
     )
 
-    tribe_model_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    tribe_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("model_registry.id", ondelete="SET NULL"), nullable=True
     )
-    scoring_model_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    scoring_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("model_registry.id", ondelete="SET NULL"), nullable=True
     )
-    calibration_model_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    calibration_model_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("model_registry.id", ondelete="SET NULL"), nullable=True
     )
 
     request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     runtime_params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    project: Mapped["Project"] = relationship()
-    creative: Mapped["Creative"] = relationship(back_populates="jobs")
-    creative_version: Mapped["CreativeVersion"] = relationship(back_populates="jobs")
-    created_by_user: Mapped[Optional["User"]] = relationship(back_populates="created_jobs")
-    tribe_model: Mapped[Optional["ModelRegistry"]] = relationship(foreign_keys=[tribe_model_id])
-    scoring_model: Mapped[Optional["ModelRegistry"]] = relationship(foreign_keys=[scoring_model_id])
-    calibration_model: Mapped[Optional["ModelRegistry"]] = relationship(foreign_keys=[calibration_model_id])
+    project: Mapped[Project] = relationship()
+    creative: Mapped[Creative] = relationship(back_populates="jobs")
+    creative_version: Mapped[CreativeVersion] = relationship(back_populates="jobs")
+    created_by_user: Mapped[User | None] = relationship(back_populates="created_jobs")
+    tribe_model: Mapped[ModelRegistry | None] = relationship(foreign_keys=[tribe_model_id])
+    scoring_model: Mapped[ModelRegistry | None] = relationship(foreign_keys=[scoring_model_id])
+    calibration_model: Mapped[ModelRegistry | None] = relationship(
+        foreign_keys=[calibration_model_id]
+    )
 
-    prediction: Mapped[Optional["PredictionResult"]] = relationship(
+    prediction: Mapped[PredictionResult | None] = relationship(
         back_populates="job", cascade="all, delete-orphan", uselist=False
     )
-    analysis_result_record: Mapped[Optional["AnalysisResultRecord"]] = relationship(
+    analysis_result_record: Mapped[AnalysisResultRecord | None] = relationship(
         back_populates="job", cascade="all, delete-orphan", uselist=False
     )
-    llm_evaluations: Mapped[list["LLMEvaluationRecord"]] = relationship(
+    llm_evaluations: Mapped[list[LLMEvaluationRecord]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
-    metrics: Mapped[list["JobMetric"]] = relationship(
+    metrics: Mapped[list[JobMetric]] = relationship(
         back_populates="job", cascade="all, delete-orphan"
     )
 
 
 class JobMetric(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "job_metrics"
-    __table_args__ = (
-        Index("ix_job_metrics_job_name", "job_id", "metric_name"),
-    )
+    __table_args__ = (Index("ix_job_metrics_job_name", "job_id", "metric_name"),)
 
     job_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("inference_jobs.id", ondelete="CASCADE"), nullable=False
     )
     metric_name: Mapped[str] = mapped_column(String(100), nullable=False)
     metric_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
-    metric_unit: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    metric_unit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    job: Mapped["InferenceJob"] = relationship(back_populates="metrics")
+    job: Mapped[InferenceJob] = relationship(back_populates="metrics")
 
 
 class PredictionResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -694,7 +699,7 @@ class PredictionResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     # Raw TRIBE or intermediate outputs
-    raw_brain_response_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    raw_brain_response_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_brain_response_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     reduced_feature_vector: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     region_activation_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
@@ -702,17 +707,17 @@ class PredictionResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Explainability / provenance
     provenance_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    job: Mapped["InferenceJob"] = relationship(back_populates="prediction")
-    scores: Mapped[list["PredictionScore"]] = relationship(
+    job: Mapped[InferenceJob] = relationship(back_populates="prediction")
+    scores: Mapped[list[PredictionScore]] = relationship(
         back_populates="prediction_result", cascade="all, delete-orphan"
     )
-    visualizations: Mapped[list["PredictionVisualization"]] = relationship(
+    visualizations: Mapped[list[PredictionVisualization]] = relationship(
         back_populates="prediction_result", cascade="all, delete-orphan"
     )
-    timeline_points: Mapped[list["PredictionTimelinePoint"]] = relationship(
+    timeline_points: Mapped[list[PredictionTimelinePoint]] = relationship(
         back_populates="prediction_result", cascade="all, delete-orphan"
     )
-    suggestions: Mapped[list["OptimizationSuggestion"]] = relationship(
+    suggestions: Mapped[list[OptimizationSuggestion]] = relationship(
         back_populates="prediction_result", cascade="all, delete-orphan"
     )
 
@@ -734,7 +739,7 @@ class AnalysisResultRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     visualizations_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     recommendations_json: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
-    job: Mapped["InferenceJob"] = relationship(back_populates="analysis_result_record")
+    job: Mapped[InferenceJob] = relationship(back_populates="analysis_result_record")
 
 
 class LLMEvaluationRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -752,16 +757,16 @@ class LLMEvaluationRecord(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
-    model_provider: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    model_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    prompt_version: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    model_provider: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     input_snapshot_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    evaluation_json: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    evaluation_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    job: Mapped["InferenceJob"] = relationship(back_populates="llm_evaluations")
+    job: Mapped[InferenceJob] = relationship(back_populates="llm_evaluations")
 
 
 class PredictionScore(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -782,15 +787,15 @@ class PredictionScore(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     normalized_score: Mapped[Decimal] = mapped_column(Numeric(6, 2), nullable=False)
 
     # Raw model value before calibration / normalization
-    raw_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    raw_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
 
     # Confidence / uncertainty
-    confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
-    percentile: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
+    percentile: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
 
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    prediction_result: Mapped["PredictionResult"] = relationship(back_populates="scores")
+    prediction_result: Mapped[PredictionResult] = relationship(back_populates="scores")
 
 
 class PredictionVisualization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -805,11 +810,11 @@ class PredictionVisualization(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     visualization_type: Mapped[VisualizationType] = mapped_column(
         Enum(VisualizationType, name="visualization_type"), nullable=False
     )
-    title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    storage_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    storage_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     data_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    prediction_result: Mapped["PredictionResult"] = relationship(back_populates="visualizations")
+    prediction_result: Mapped[PredictionResult] = relationship(back_populates="visualizations")
 
 
 class PredictionTimelinePoint(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -823,20 +828,21 @@ class PredictionTimelinePoint(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     timestamp_ms: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    attention_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
-    emotion_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
-    memory_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
-    cognitive_load_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
-    conversion_proxy_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 2), nullable=True)
+    attention_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    emotion_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    memory_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    cognitive_load_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    conversion_proxy_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
 
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    prediction_result: Mapped["PredictionResult"] = relationship(back_populates="timeline_points")
+    prediction_result: Mapped[PredictionResult] = relationship(back_populates="timeline_points")
 
 
 # ---------------------------------------------------------------------
 # Optimization / recommendations
 # ---------------------------------------------------------------------
+
 
 class OptimizationSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "optimization_suggestions"
@@ -851,7 +857,9 @@ class OptimizationSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Enum(SuggestionType, name="suggestion_type"), nullable=False
     )
     status: Mapped[SuggestionStatus] = mapped_column(
-        Enum(SuggestionStatus, name="suggestion_status"), nullable=False, default=SuggestionStatus.PROPOSED
+        Enum(SuggestionStatus, name="suggestion_status"),
+        nullable=False,
+        default=SuggestionStatus.PROPOSED,
     )
 
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -859,51 +867,52 @@ class OptimizationSuggestion(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     proposed_change_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
     expected_score_lift_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(6, 4), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(6, 4), nullable=True)
 
-    prediction_result: Mapped["PredictionResult"] = relationship(back_populates="suggestions")
+    prediction_result: Mapped[PredictionResult] = relationship(back_populates="suggestions")
 
 
 class GeneratedVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "generated_variants"
-    __table_args__ = (
-        Index("ix_generated_variants_parent_version", "parent_creative_version_id"),
-    )
+    __table_args__ = (Index("ix_generated_variants_parent_version", "parent_creative_version_id"),)
 
     parent_creative_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="CASCADE"), nullable=False
     )
-    optimization_suggestion_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("optimization_suggestions.id", ondelete="SET NULL"), nullable=True
+    optimization_suggestion_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("optimization_suggestions.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
-    source_uri: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    source_uri: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    was_promoted_to_creative_version: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    was_promoted_to_creative_version: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
 
 # ---------------------------------------------------------------------
 # A/B and multi-creative comparison
 # ---------------------------------------------------------------------
 
+
 class CreativeComparison(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "creative_comparisons"
-    __table_args__ = (
-        Index("ix_creative_comparisons_project_name", "project_id", "name"),
-    )
+    __table_args__ = (Index("ix_creative_comparisons_project_name", "project_id", "name"),)
 
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     comparison_context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    project: Mapped["Project"] = relationship(back_populates="comparisons")
-    items: Mapped[list["CreativeComparisonItem"]] = relationship(
+    project: Mapped[Project] = relationship(back_populates="comparisons")
+    items: Mapped[list[CreativeComparisonItem]] = relationship(
         back_populates="comparison", cascade="all, delete-orphan"
     )
-    result: Mapped[Optional["CreativeComparisonResult"]] = relationship(
+    result: Mapped[CreativeComparisonResult | None] = relationship(
         back_populates="comparison", cascade="all, delete-orphan", uselist=False
     )
 
@@ -911,14 +920,14 @@ class CreativeComparison(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class CreativeComparisonItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "creative_comparison_items"
     __table_args__ = (
-        UniqueConstraint(
-            "comparison_id", "creative_version_id", name="uq_comparison_version"
-        ),
+        UniqueConstraint("comparison_id", "creative_version_id", name="uq_comparison_version"),
         Index("ix_creative_comparison_items_rank", "comparison_id", "candidate_rank"),
     )
 
     comparison_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("creative_comparisons.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("creative_comparisons.id", ondelete="CASCADE"),
+        nullable=False,
     )
     creative_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creatives.id", ondelete="CASCADE"), nullable=False
@@ -926,27 +935,27 @@ class CreativeComparisonItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     creative_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="CASCADE"), nullable=False
     )
-    candidate_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    candidate_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    comparison: Mapped["CreativeComparison"] = relationship(back_populates="items")
+    comparison: Mapped[CreativeComparison] = relationship(back_populates="items")
 
 
 class CreativeComparisonResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "creative_comparison_results"
-    __table_args__ = (
-        UniqueConstraint("comparison_id", name="uq_comparison_result_comparison"),
-    )
+    __table_args__ = (UniqueConstraint("comparison_id", name="uq_comparison_result_comparison"),)
 
     comparison_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("creative_comparisons.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("creative_comparisons.id", ondelete="CASCADE"),
+        nullable=False,
     )
-    winning_creative_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    winning_creative_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="SET NULL"), nullable=True
     )
     summary_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    comparison: Mapped["CreativeComparison"] = relationship(back_populates="result")
-    item_results: Mapped[list["CreativeComparisonItemResult"]] = relationship(
+    comparison: Mapped[CreativeComparison] = relationship(back_populates="result")
+    item_results: Mapped[list[CreativeComparisonItemResult]] = relationship(
         back_populates="comparison_result", cascade="all, delete-orphan"
     )
 
@@ -955,27 +964,31 @@ class CreativeComparisonItemResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "creative_comparison_item_results"
     __table_args__ = (
         UniqueConstraint(
-            "comparison_result_id", "creative_version_id",
-            name="uq_comparison_item_result_version"
+            "comparison_result_id", "creative_version_id", name="uq_comparison_item_result_version"
         ),
     )
 
     comparison_result_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("creative_comparison_results.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("creative_comparison_results.id", ondelete="CASCADE"),
+        nullable=False,
     )
     creative_version_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="CASCADE"), nullable=False
     )
     overall_rank: Mapped[int] = mapped_column(Integer, nullable=False)
     scores_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    rationale: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    comparison_result: Mapped["CreativeComparisonResult"] = relationship(back_populates="item_results")
+    comparison_result: Mapped[CreativeComparisonResult] = relationship(
+        back_populates="item_results"
+    )
 
 
 # ---------------------------------------------------------------------
 # Ground-truth / feedback loop
 # ---------------------------------------------------------------------
+
 
 class OutcomeEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "outcome_events"
@@ -988,13 +1001,13 @@ class OutcomeEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     project_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
-    creative_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creatives.id", ondelete="SET NULL"), nullable=True
     )
-    creative_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("creative_versions.id", ondelete="SET NULL"), nullable=True
     )
-    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
     )
 
@@ -1002,15 +1015,15 @@ class OutcomeEvent(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Enum(OutcomeMetricType, name="outcome_metric_type"), nullable=False
     )
     metric_value: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
-    metric_unit: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+    metric_unit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
-    source_system: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    source_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_system: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    source_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     dimensions_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    project: Mapped["Project"] = relationship(back_populates="feedback_events")
-    creative: Mapped[Optional["Creative"]] = relationship(back_populates="outcomes")
+    project: Mapped[Project] = relationship(back_populates="feedback_events")
+    creative: Mapped[Creative | None] = relationship(back_populates="outcomes")
 
 
 class CalibrationObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -1041,6 +1054,7 @@ class CalibrationObservation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 # Workspace settings
 # ---------------------------------------------------------------------
 
+
 class Setting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "settings"
     __table_args__ = (
@@ -1051,16 +1065,16 @@ class Setting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
     )
-    updated_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     key: Mapped[str] = mapped_column(String(120), nullable=False)
     env_name: Mapped[str] = mapped_column(String(120), nullable=False)
     group_id: Mapped[str] = mapped_column(String(80), nullable=False)
     label: Mapped[str] = mapped_column(String(255), nullable=False)
-    value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    value: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_type: Mapped[str] = mapped_column(String(40), nullable=False, default="string")
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source: Mapped[str] = mapped_column(String(40), nullable=False, default="env_file")
 
@@ -1069,10 +1083,13 @@ class Setting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 # Collaboration
 # ---------------------------------------------------------------------
 
+
 class CollaborationReview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "collaboration_reviews"
     __table_args__ = (
-        UniqueConstraint("project_id", "entity_type", "entity_id", name="uq_collaboration_review_entity"),
+        UniqueConstraint(
+            "project_id", "entity_type", "entity_id", name="uq_collaboration_review_entity"
+        ),
         Index("ix_collaboration_reviews_project_status", "project_id", "status"),
         Index("ix_collaboration_reviews_project_assignee", "project_id", "assignee_user_id"),
     )
@@ -1081,17 +1098,19 @@ class CollaborationReview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
     )
     entity_type: Mapped[CollaborationEntityType] = mapped_column(
-        Enum(CollaborationEntityType, name="collaboration_entity_type", values_callable=_enum_values),
+        Enum(
+            CollaborationEntityType, name="collaboration_entity_type", values_callable=_enum_values
+        ),
         nullable=False,
     )
     entity_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
-    assignee_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    assignee_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     status: Mapped[ReviewStatus] = mapped_column(
@@ -1099,11 +1118,11 @@ class CollaborationReview(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=ReviewStatus.DRAFT,
     )
-    review_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    comments: Mapped[list["CollaborationComment"]] = relationship(
+    comments: Mapped[list[CollaborationComment]] = relationship(
         back_populates="review", cascade="all, delete-orphan"
     )
 
@@ -1115,28 +1134,29 @@ class CollaborationComment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     review_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("collaboration_reviews.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True),
+        ForeignKey("collaboration_reviews.id", ondelete="CASCADE"),
+        nullable=False,
     )
     author_user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    timestamp_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    segment_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timestamp_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    segment_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
-    review: Mapped["CollaborationReview"] = relationship(back_populates="comments")
+    review: Mapped[CollaborationReview] = relationship(back_populates="comments")
 
 
 # ---------------------------------------------------------------------
 # Optional audit / webhook support
 # ---------------------------------------------------------------------
 
+
 class WebhookEndpoint(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "webhook_endpoints"
-    __table_args__ = (
-        Index("ix_webhook_endpoints_org_active", "organization_id", "is_active"),
-    )
+    __table_args__ = (Index("ix_webhook_endpoints_org_active", "organization_id", "is_active"),)
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
@@ -1158,22 +1178,23 @@ class AuditLog(UUIDPrimaryKeyMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    organization_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True
     )
-    actor_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
     action: Mapped[str] = mapped_column(String(120), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(120), nullable=False)
-    entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
 
 
 # ---------------------------------------------------------------------
 # Upload sessions / stored artifacts
 # ---------------------------------------------------------------------
+
 
 class UploadStatus(str, enum.Enum):
     PENDING = "pending"
@@ -1196,17 +1217,17 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
-    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    creative_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("creatives.id", ondelete="SET NULL"),
         nullable=True,
     )
-    creative_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("creative_versions.id", ondelete="SET NULL"),
         nullable=True,
@@ -1217,10 +1238,10 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
     storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
 
-    original_filename: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    file_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     upload_status: Mapped[UploadStatus] = mapped_column(
         Enum(UploadStatus, name="upload_status"),
         nullable=False,
@@ -1243,17 +1264,17 @@ class UploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
-    created_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
-    creative_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("creatives.id", ondelete="SET NULL"),
         nullable=True,
     )
-    creative_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    creative_version_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("creative_versions.id", ondelete="SET NULL"),
         nullable=True,
@@ -1268,15 +1289,15 @@ class UploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     bucket_name: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_key: Mapped[str] = mapped_column(Text, nullable=False)
-    original_filename: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    mime_type: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
-    expected_size_bytes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    expected_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    uploaded_artifact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    uploaded_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("stored_artifacts.id", ondelete="SET NULL"),
         nullable=True,
     )
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

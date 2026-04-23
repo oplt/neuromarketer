@@ -53,7 +53,9 @@ HTML_MIME_TYPES = frozenset({"text/html"})
 XML_MIME_TYPES = frozenset({"application/xml", "text/xml"})
 PDF_MIME_TYPES = frozenset({"application/pdf"})
 DOC_MIME_TYPES = frozenset({"application/msword"})
-DOCX_MIME_TYPES = frozenset({"application/vnd.openxmlformats-officedocument.wordprocessingml.document"})
+DOCX_MIME_TYPES = frozenset(
+    {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+)
 ODT_MIME_TYPES = frozenset({"application/vnd.oasis.opendocument.text"})
 RTF_MIME_TYPES = frozenset({"application/rtf", "text/rtf"})
 
@@ -260,7 +262,9 @@ class DocumentTextExtractor:
         try:
             reader = PdfReader(str(path))
         except Exception as exc:  # pragma: no cover - library-specific failure path
-            raise ValidationAppError("The uploaded PDF could not be opened for text extraction.") from exc
+            raise ValidationAppError(
+                "The uploaded PDF could not be opened for text extraction."
+            ) from exc
 
         return "\n\n".join(page.extract_text() or "" for page in reader.pages)
 
@@ -276,7 +280,9 @@ class DocumentTextExtractor:
                 ]
                 fragments = [self._extract_xml_fragment(archive.read(member)) for member in members]
         except zipfile.BadZipFile as exc:
-            raise ValidationAppError("The uploaded DOCX document is not a valid Office archive.") from exc
+            raise ValidationAppError(
+                "The uploaded DOCX document is not a valid Office archive."
+            ) from exc
 
         return "\n\n".join(fragment for fragment in fragments if fragment)
 
@@ -285,15 +291,21 @@ class DocumentTextExtractor:
             with zipfile.ZipFile(path) as archive:
                 content_xml = archive.read("content.xml")
         except KeyError as exc:
-            raise ValidationAppError("The uploaded ODT document does not contain a readable content.xml file.") from exc
+            raise ValidationAppError(
+                "The uploaded ODT document does not contain a readable content.xml file."
+            ) from exc
         except zipfile.BadZipFile as exc:
-            raise ValidationAppError("The uploaded ODT document is not a valid OpenDocument archive.") from exc
+            raise ValidationAppError(
+                "The uploaded ODT document is not a valid OpenDocument archive."
+            ) from exc
 
         return self._extract_xml_fragment(content_xml)
 
     def _extract_rtf(self, path: Path) -> str:
         if rtf_to_text is None:
-            raise DependencyAppError("RTF extraction requires the `striprtf` package on the server.")
+            raise DependencyAppError(
+                "RTF extraction requires the `striprtf` package on the server."
+            )
         return rtf_to_text(self._decode_text_bytes(path.read_bytes()))
 
     def _extract_doc(self, path: Path) -> tuple[str, str]:
@@ -340,18 +352,24 @@ class DocumentTextExtractor:
                 check=False,
             )
             if completed.returncode != 0:
-                raise ValidationAppError("LibreOffice could not convert the uploaded DOC document to text.")
+                raise ValidationAppError(
+                    "LibreOffice could not convert the uploaded DOC document to text."
+                )
 
             converted_files = sorted(out_dir.glob("*.txt"))
             if not converted_files:
-                raise ValidationAppError("LibreOffice did not produce a readable text export for the DOC document.")
+                raise ValidationAppError(
+                    "LibreOffice did not produce a readable text export for the DOC document."
+                )
             return converted_files[0].read_text(encoding="utf-8", errors="ignore")
 
     def _extract_xml_fragment(self, raw_bytes: bytes) -> str:
         try:
             root = ElementTree.fromstring(raw_bytes)
         except ElementTree.ParseError as exc:
-            raise ValidationAppError("The uploaded document contains malformed XML content.") from exc
+            raise ValidationAppError(
+                "The uploaded document contains malformed XML content."
+            ) from exc
         return "\n".join(fragment.strip() for fragment in root.itertext() if fragment.strip())
 
     def _decode_text_bytes(self, raw_bytes: bytes) -> str:

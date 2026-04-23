@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from backend.services.tribe_inference_service import TribeInferenceService
 
 
-def _write_cache_entry(path, *, created_at: datetime, last_accessed_at: datetime, payload: dict, size_bytes: int = 128):
+def _write_cache_entry(
+    path, *, created_at: datetime, last_accessed_at: datetime, payload: dict, size_bytes: int = 128
+):
     path.write_text(
         json.dumps(
             {
@@ -33,7 +35,7 @@ def test_runtime_cache_cleanup_removes_expired_entries(tmp_path):
 
     expired_path = tmp_path / "expired.json"
     fresh_path = tmp_path / "fresh.json"
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     _write_cache_entry(
         expired_path,
         created_at=now - timedelta(hours=3),
@@ -62,7 +64,7 @@ def test_runtime_cache_cleanup_enforces_max_size_by_oldest_access(tmp_path):
     service.runtime_output_cache_cleanup_interval_seconds = 0
     TribeInferenceService._last_cache_cleanup_monotonic = 0.0
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     oldest_path = tmp_path / "oldest.json"
     newest_path = tmp_path / "newest.json"
     _write_cache_entry(

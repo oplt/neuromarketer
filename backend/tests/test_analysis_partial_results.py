@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -14,7 +14,7 @@ from backend.db.repositories.inference import InferenceRepository
 class TestFailedAnalysisResultRead(unittest.IsolatedAsyncioTestCase):
     async def test_build_result_returns_persisted_partial_record_for_failed_job(self) -> None:
         service = AnalysisApplicationService(AsyncMock())
-        created_at = datetime.now(timezone.utc)
+        created_at = datetime.now(UTC)
         record = SimpleNamespace(
             created_at=created_at,
             summary_json={

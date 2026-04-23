@@ -35,7 +35,9 @@ class TestTextDocumentSupport(unittest.TestCase):
 
     def test_preprocess_detects_document_uploads_as_text(self):
         service = PreprocessService()
-        self.assertEqual(service.detect_modality(filename="brief.pdf", mime_type="application/pdf"), "text")
+        self.assertEqual(
+            service.detect_modality(filename="brief.pdf", mime_type="application/pdf"), "text"
+        )
         self.assertEqual(
             service.detect_modality(
                 filename="script.docx",
@@ -54,7 +56,9 @@ class TestDocumentTextExtractor(unittest.TestCase):
             path = Path(temp_dir) / "brief.txt"
             path.write_text("Hello world\n\nThis is the analysis input.", encoding="utf-8")
 
-            result = self.extractor.extract(local_path=str(path), mime_type="text/plain", filename=path.name)
+            result = self.extractor.extract(
+                local_path=str(path), mime_type="text/plain", filename=path.name
+            )
 
         self.assertEqual(result.text, "Hello world\n\nThis is the analysis input.")
         self.assertEqual(result.parser, "plain_text")
@@ -67,7 +71,9 @@ class TestDocumentTextExtractor(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = self.extractor.extract(local_path=str(path), mime_type="text/html", filename=path.name)
+            result = self.extractor.extract(
+                local_path=str(path), mime_type="text/html", filename=path.name
+            )
 
         self.assertIn("Headline", result.text)
         self.assertIn("Primary promise.", result.text)
@@ -100,9 +106,13 @@ class TestDocumentTextExtractor(unittest.TestCase):
     def test_extracts_rtf_documents(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "brief.rtf"
-            path.write_text(r"{\rtf1\ansi Hello \b world\b0\par Product narrative}", encoding="utf-8")
+            path.write_text(
+                r"{\rtf1\ansi Hello \b world\b0\par Product narrative}", encoding="utf-8"
+            )
 
-            result = self.extractor.extract(local_path=str(path), mime_type="application/rtf", filename=path.name)
+            result = self.extractor.extract(
+                local_path=str(path), mime_type="application/rtf", filename=path.name
+            )
 
         self.assertIn("Hello world", result.text)
         self.assertIn("Product narrative", result.text)

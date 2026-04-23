@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import csv
 import io
-from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from statistics import median
-from typing import Any
 from uuid import UUID
 
 from fastapi import UploadFile
@@ -16,29 +14,20 @@ from sqlalchemy.orm import selectinload
 
 from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
 from backend.db.models import (
-    AuditLog,
     CalibrationObservation,
     InferenceJob,
     JobStatus,
     OutcomeEvent,
     OutcomeMetricType,
     PredictionResult,
-    PredictionScore,
-    ScoreType,
-    User,
 )
 from backend.schemas.analysis import (
     AnalysisBenchmarkMetricRead,
     AnalysisBenchmarkResponse,
-    AnalysisCalibrationDashboardResponse,
-    AnalysisCalibrationDashboardSummaryRead,
-    AnalysisCalibrationMetricSummaryRead,
     AnalysisCalibrationObservationRead,
     AnalysisCalibrationResponse,
     AnalysisCalibrationSummaryRead,
-    AnalysisCalibrationTrendPointRead,
     AnalysisExecutiveVerdictRead,
-    AnalysisOutcomeImportHistoryRead,
     AnalysisOutcomeImportResponse,
 )
 
@@ -94,7 +83,12 @@ class AnalysisInsightsApplicationService:
                     key=key,
                     label=label,
                     value=round(current_value, 2),
-                    percentile=round(self._compute_percentile(current_value, cohort_values, orientation=orientation), 1),
+                    percentile=round(
+                        self._compute_percentile(
+                            current_value, cohort_values, orientation=orientation
+                        ),
+                        1,
+                    ),
                     cohort_median=round(self._compute_quantile(cohort_values, percentile=50), 2),
                     cohort_p75=round(self._compute_quantile(cohort_values, percentile=75), 2),
                     orientation=orientation,
@@ -108,10 +102,12 @@ class AnalysisInsightsApplicationService:
             cohort_size=len(cohort_jobs),
             fallback_level=fallback_level,
             metrics=metrics,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
 
-    async def get_executive_verdict(self, *, user_id: UUID, job_id: UUID) -> AnalysisExecutiveVerdictRead:
+    async def get_executive_verdict(
+        self, *, user_id: UUID, job_id: UUID
+    ) -> AnalysisExecutiveVerdictRead:
         benchmark = await self.get_benchmark(user_id=user_id, job_id=job_id)
         job = await self._load_analysis_job(user_id=user_id, job_id=job_id)
         analysis_record = job.analysis_result_record
@@ -177,7 +173,7 @@ class AnalysisInsightsApplicationService:
             top_strengths=top_strengths,
             top_risks=top_risks,
             recommended_actions=recommended_actions,
-            generated_at=datetime.now(timezone.utc),
+            generated_at=datetime.now(UTC),
         )
 
     async def import_outcomes_csv(
@@ -306,8 +302,16 @@ class AnalysisInsightsApplicationService:
             )
             for observation, outcome_event in rows
         ]
-        average_predicted = round(sum(item.predicted_value for item in observations) / len(observations), 2) if observations else None
-        average_actual = round(sum(item.actual_value for item in observations) / len(observations), 2) if observations else None
+        average_predicted = (
+            round(sum(item.predicted_value for item in observations) / len(observations), 2)
+            if observations
+            else None
+        )
+        average_actual = (
+            round(sum(item.actual_value for item in observations) / len(observations), 2)
+            if observations
+            else None
+        )
         latest_observed_at = observations[0].observed_at if observations else None
         metric_types = sorted({item.metric_type for item in observations})
 
@@ -369,8 +373,20 @@ class AnalysisInsightsApplicationService:
                     candidate
                     for candidate in candidates
                     if str((candidate.runtime_params or {}).get("media_type") or "") == media_type
-                    and str(((candidate.request_payload or {}).get("campaign_context") or {}).get("goal_template") or "") == goal_template
-                    and str(((candidate.request_payload or {}).get("campaign_context") or {}).get("channel") or "") == channel
+                    and str(
+                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
+                            "goal_template"
+                        )
+                        or ""
+                    )
+                    == goal_template
+                    and str(
+                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
+                            "channel"
+                        )
+                        or ""
+                    )
+                    == channel
                 ],
                 f"{media_type or 'analysis'} cohort for {goal_template or 'general'} / {channel or 'default'}",
                 "exact_match",
@@ -380,7 +396,13 @@ class AnalysisInsightsApplicationService:
                     candidate
                     for candidate in candidates
                     if str((candidate.runtime_params or {}).get("media_type") or "") == media_type
-                    and str(((candidate.request_payload or {}).get("campaign_context") or {}).get("goal_template") or "") == goal_template
+                    and str(
+                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
+                            "goal_template"
+                        )
+                        or ""
+                    )
+                    == goal_template
                 ],
                 f"{media_type or 'analysis'} cohort for {goal_template or 'general'}",
                 "goal_template",
@@ -434,7 +456,9 @@ class AnalysisInsightsApplicationService:
                 raise ValidationAppError("Unable to resolve the provided creative_version_id.")
             return job.prediction, job
 
-        raise ValidationAppError("Each CSV row must include analysis_job_id or creative_version_id.")
+        raise ValidationAppError(
+            "Each CSV row must include analysis_job_id or creative_version_id."
+        )
 
     def _extract_metric_value(self, analysis_record, key: str) -> float:
         summary_json = analysis_record.summary_json or {}
@@ -445,7 +469,9 @@ class AnalysisInsightsApplicationService:
                 return float(item.get("value") or 0.0)
         return 0.0
 
-    def _compute_percentile(self, current_value: float, cohort_values: list[float], *, orientation: str) -> float:
+    def _compute_percentile(
+        self, current_value: float, cohort_values: list[float], *, orientation: str
+    ) -> float:
         comparable_values = sorted(float(value) for value in cohort_values)
         if not comparable_values:
             return 50.0
@@ -467,7 +493,10 @@ class AnalysisInsightsApplicationService:
         lower_index = int(position)
         upper_index = min(lower_index + 1, len(comparable_values) - 1)
         weight = position - lower_index
-        return comparable_values[lower_index] + (comparable_values[upper_index] - comparable_values[lower_index]) * weight
+        return (
+            comparable_values[lower_index]
+            + (comparable_values[upper_index] - comparable_values[lower_index]) * weight
+        )
 
     def _ordinal_percentile(self, value: float) -> str:
         rounded = max(1, min(99, int(round(value))))
@@ -486,5 +515,5 @@ class AnalysisInsightsApplicationService:
         except ValueError as exc:
             raise ValidationAppError(f"Invalid observed_at timestamp: {value}") from exc
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return parsed

@@ -4,19 +4,23 @@ import hashlib
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from backend.core.config import settings
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import ValidationAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import duration_ms, get_logger, log_event, log_exception
 from backend.core.metrics import metrics
 from backend.db.models import CreativeVersion
 from backend.services.asset_loader import AssetLoader, LoadedAsset
 from backend.services.preprocess import PreprocessService
-from backend.services.tribe_runtime import TribeRuntimeInput, TribeRuntimeOutput, get_shared_tribe_runtime
+from backend.services.tribe_runtime import (
+    TribeRuntimeInput,
+    TribeRuntimeOutput,
+    get_shared_tribe_runtime,
+)
 
 logger = get_logger(__name__)
 CACHE_FORMAT_VERSION = 1
@@ -38,9 +42,13 @@ class TribeInferenceService:
         self.preprocess = PreprocessService()
         self.runtime = get_shared_tribe_runtime()
         self.runtime_output_cache_enabled = settings.tribe_runtime_output_cache_enabled
-        self.runtime_output_cache_folder = Path(settings.tribe_runtime_output_cache_folder).expanduser()
+        self.runtime_output_cache_folder = Path(
+            settings.tribe_runtime_output_cache_folder
+        ).expanduser()
         self.runtime_output_cache_max_bytes = max(0, settings.tribe_runtime_output_cache_max_bytes)
-        self.runtime_output_cache_max_age = timedelta(hours=max(0, settings.tribe_runtime_output_cache_max_age_hours))
+        self.runtime_output_cache_max_age = timedelta(
+            hours=max(0, settings.tribe_runtime_output_cache_max_age_hours)
+        )
         self.runtime_output_cache_cleanup_interval_seconds = max(
             0,
             settings.tribe_runtime_output_cache_cleanup_interval_minutes * 60,
@@ -60,7 +68,9 @@ class TribeInferenceService:
             return "text"
         return self.preprocess.detect_modality(filename=None, mime_type=creative_version.mime_type)
 
-    def assert_ready_for_inference(self, *, creative_version: CreativeVersion, modality: str) -> None:
+    def assert_ready_for_inference(
+        self, *, creative_version: CreativeVersion, modality: str
+    ) -> None:
         self.runtime.assert_supported_modality(modality)
 
         if modality == "text":
@@ -73,7 +83,9 @@ class TribeInferenceService:
             )
 
         if modality in {"video", "audio"} and not creative_version.source_uri:
-            raise ValidationAppError(f"{modality.title()} creative versions require source_uri for TRIBE inference.")
+            raise ValidationAppError(
+                f"{modality.title()} creative versions require source_uri for TRIBE inference."
+            )
 
     def run_for_version(
         self,
@@ -122,15 +134,10 @@ class TribeInferenceService:
                         inference_duration_seconds=finished_at - inference_started_at,
                     )
 
-                if modality in {"video", "audio"}:
-                    asset_load_started_at = time.perf_counter()
-                    loaded_asset = self._load_asset(creative_version, modality=modality)
-                    metrics.observe(
-                        "prediction_job_stage_seconds",
-                        time.perf_counter() - asset_load_started_at,
-                        labels={"stage": "asset_load", "modality": modality},
-                    )
-                elif modality == "text" and not (creative_version.raw_text and creative_version.raw_text.strip()):
+                if modality in {"video", "audio"} or (
+                    modality == "text"
+                    and not (creative_version.raw_text and creative_version.raw_text.strip())
+                ):
                     asset_load_started_at = time.perf_counter()
                     loaded_asset = self._load_asset(creative_version, modality=modality)
                     metrics.observe(
@@ -169,7 +176,9 @@ class TribeInferenceService:
                     modality=modality,
                     source_label=source_label,
                     duration_ms=duration_ms(inference_started_at, finished_at),
-                    segment_count=int((runtime_output.reduced_feature_vector or {}).get("segment_count", 0)),
+                    segment_count=int(
+                        (runtime_output.reduced_feature_vector or {}).get("segment_count", 0)
+                    ),
                     status="succeeded",
                 )
 
@@ -201,7 +210,9 @@ class TribeInferenceService:
             "creative_version_id": str(creative_version.id),
             "sha256": creative_version.sha256,
             "source_uri": creative_version.source_uri,
-            "raw_text_sha256": hashlib.sha256((creative_version.raw_text or "").encode("utf-8")).hexdigest(),
+            "raw_text_sha256": hashlib.sha256(
+                (creative_version.raw_text or "").encode("utf-8")
+            ).hexdigest(),
             "mime_type": creative_version.mime_type,
             "modality": modality,
             "extracted_metadata": creative_version.extracted_metadata or {},
@@ -243,18 +254,28 @@ class TribeInferenceService:
         if not isinstance(payload, dict):
             return None
 
-        runtime_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+        runtime_payload = (
+            payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
+        )
         self._touch_runtime_cache_entry(cache_path, payload)
 
         return TribeRuntimeOutput(
             raw_brain_response_uri=runtime_payload.get("raw_brain_response_uri"),
-            raw_brain_response_summary=self._coerce_mapping(runtime_payload.get("raw_brain_response_summary")),
-            reduced_feature_vector=self._coerce_mapping(runtime_payload.get("reduced_feature_vector")),
-            region_activation_summary=self._coerce_mapping(runtime_payload.get("region_activation_summary")),
+            raw_brain_response_summary=self._coerce_mapping(
+                runtime_payload.get("raw_brain_response_summary")
+            ),
+            reduced_feature_vector=self._coerce_mapping(
+                runtime_payload.get("reduced_feature_vector")
+            ),
+            region_activation_summary=self._coerce_mapping(
+                runtime_payload.get("region_activation_summary")
+            ),
             provenance_json=self._coerce_mapping(runtime_payload.get("provenance_json")),
         )
 
-    def _store_cached_runtime_output(self, cache_key: str, runtime_output: TribeRuntimeOutput) -> None:
+    def _store_cached_runtime_output(
+        self, cache_key: str, runtime_output: TribeRuntimeOutput
+    ) -> None:
         if not self.runtime_output_cache_enabled:
             return
 
@@ -263,8 +284,8 @@ class TribeInferenceService:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "cache_version": CACHE_FORMAT_VERSION,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "last_accessed_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
+                "last_accessed_at": datetime.now(UTC).isoformat(),
                 "payload": {
                     "raw_brain_response_uri": runtime_output.raw_brain_response_uri,
                     "raw_brain_response_summary": runtime_output.raw_brain_response_summary,
@@ -295,8 +316,10 @@ class TribeInferenceService:
 
         try:
             next_payload = dict(payload)
-            next_payload["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
-            cache_path.write_text(self._encode_runtime_cache_document(next_payload), encoding="utf-8")
+            next_payload["last_accessed_at"] = datetime.now(UTC).isoformat()
+            cache_path.write_text(
+                self._encode_runtime_cache_document(next_payload), encoding="utf-8"
+            )
         except Exception as exc:
             log_exception(
                 logger,
@@ -326,11 +349,14 @@ class TribeInferenceService:
 
         try:
             entries = self._collect_runtime_cache_entries()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             retained_entries: list[dict[str, Any]] = []
 
             for entry in entries:
-                if self.runtime_output_cache_max_age > timedelta(0) and now - entry["last_accessed_at"] > self.runtime_output_cache_max_age:
+                if (
+                    self.runtime_output_cache_max_age > timedelta(0)
+                    and now - entry["last_accessed_at"] > self.runtime_output_cache_max_age
+                ):
                     evicted_files += 1
                     evicted_bytes += entry["size_bytes"]
                     self._delete_runtime_cache_path(entry["path"], reason="expired")
@@ -338,8 +364,14 @@ class TribeInferenceService:
                 retained_entries.append(entry)
 
             total_bytes = sum(entry["size_bytes"] for entry in retained_entries)
-            if self.runtime_output_cache_max_bytes > 0 and total_bytes > self.runtime_output_cache_max_bytes:
-                for entry in sorted(retained_entries, key=lambda item: (item["last_accessed_at"], item["created_at"])):
+            if (
+                self.runtime_output_cache_max_bytes > 0
+                and total_bytes > self.runtime_output_cache_max_bytes
+            ):
+                for entry in sorted(
+                    retained_entries,
+                    key=lambda item: (item["last_accessed_at"], item["created_at"]),
+                ):
                     if total_bytes <= self.runtime_output_cache_max_bytes:
                         break
                     total_bytes -= entry["size_bytes"]
@@ -347,7 +379,9 @@ class TribeInferenceService:
                     evicted_bytes += entry["size_bytes"]
                     self._delete_runtime_cache_path(entry["path"], reason="size_limit")
 
-            metrics.observe("tribe_runtime_cache_cleanup_seconds", time.perf_counter() - cleanup_started_at)
+            metrics.observe(
+                "tribe_runtime_cache_cleanup_seconds", time.perf_counter() - cleanup_started_at
+            )
             remaining_entries = self._collect_runtime_cache_entries()
             log_event(
                 logger,
@@ -385,8 +419,8 @@ class TribeInferenceService:
                 continue
 
             stat = resolved_path.stat()
-            created_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
-            last_accessed_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            created_at = datetime.fromtimestamp(stat.st_ctime, tz=UTC)
+            last_accessed_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
             size_bytes = int(stat.st_size)
 
             try:
@@ -396,7 +430,9 @@ class TribeInferenceService:
 
             if isinstance(payload, dict):
                 created_at = self._parse_cache_timestamp(payload.get("created_at")) or created_at
-                last_accessed_at = self._parse_cache_timestamp(payload.get("last_accessed_at")) or last_accessed_at
+                last_accessed_at = (
+                    self._parse_cache_timestamp(payload.get("last_accessed_at")) or last_accessed_at
+                )
                 size_bytes = int(payload.get("size_bytes") or size_bytes)
 
             entries.append(
@@ -448,7 +484,7 @@ class TribeInferenceService:
             parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
     def _load_asset(self, creative_version: CreativeVersion, *, modality: str) -> LoadedAsset:
         return self._asset_loader().load(

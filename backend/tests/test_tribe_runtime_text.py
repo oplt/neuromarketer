@@ -10,8 +10,12 @@ from backend.services.tribe_runtime import TribeRuntime, TribeRuntimeInput
 
 
 class _ExplodingTextModel:
-    def get_events_dataframe(self, *args, **kwargs):  # pragma: no cover - this should never be called
-        raise AssertionError("Text inference should not call tribev2.get_events_dataframe(text_path=...)")
+    def get_events_dataframe(
+        self, *args, **kwargs
+    ):  # pragma: no cover - this should never be called
+        raise AssertionError(
+            "Text inference should not call tribev2.get_events_dataframe(text_path=...)"
+        )
 
 
 def test_prepare_text_events_bypasses_whisperx_text_path() -> None:
@@ -49,7 +53,9 @@ def test_runtime_config_update_overrides_gated_default_text_model(
     assert config_update["data.text_feature.device"] == "cpu"
 
 
-def test_runtime_resolves_relative_local_text_feature_model_path(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_resolves_relative_local_text_feature_model_path(
+    monkeypatch, tmp_path: Path
+) -> None:
     local_model = tmp_path / "models" / "phi3-mini-4k-instruct"
     local_model.mkdir(parents=True)
 
@@ -66,7 +72,9 @@ def test_runtime_falls_back_to_bundled_local_phi3_model(monkeypatch, tmp_path: P
     local_model = tmp_path / "models" / "phi3-mini-4k-instruct"
     local_model.mkdir(parents=True)
 
-    monkeypatch.setattr(settings, "tribe_text_feature_model_name", "microsoft/Phi-3-mini-4k-instruct")
+    monkeypatch.setattr(
+        settings, "tribe_text_feature_model_name", "microsoft/Phi-3-mini-4k-instruct"
+    )
     monkeypatch.setattr(TribeRuntime, "_project_root", lambda self: tmp_path)
 
     runtime = TribeRuntime()
@@ -74,7 +82,9 @@ def test_runtime_falls_back_to_bundled_local_phi3_model(monkeypatch, tmp_path: P
     assert runtime.text_feature_model_name == str(local_model.resolve())
 
 
-def test_runtime_resolves_relative_cache_folder_under_project_root(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_resolves_relative_cache_folder_under_project_root(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(settings, "tribe_cache_folder", "./cache/tribev2")
     monkeypatch.setattr(TribeRuntime, "_project_root", lambda self: tmp_path)
 
@@ -83,7 +93,9 @@ def test_runtime_resolves_relative_cache_folder_under_project_root(monkeypatch, 
     assert runtime.cache_folder == (tmp_path / "cache" / "tribev2").resolve()
 
 
-def test_runtime_does_not_log_cache_fallback_for_project_relative_path(monkeypatch, tmp_path: Path) -> None:
+def test_runtime_does_not_log_cache_fallback_for_project_relative_path(
+    monkeypatch, tmp_path: Path
+) -> None:
     monkeypatch.setattr(settings, "tribe_cache_folder", "./cache/tribev2")
     monkeypatch.setattr(TribeRuntime, "_project_root", lambda self: tmp_path)
 
@@ -133,7 +145,9 @@ def test_prediction_error_mentions_text_model_for_gated_repo() -> None:
     runtime = TribeRuntime()
 
     message = runtime._format_prediction_error(
-        RuntimeError("Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.2-3B/resolve/main/config.json")
+        RuntimeError(
+            "Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.2-3B/resolve/main/config.json"
+        )
     )
 
     assert "configured Hugging Face feature model is gated" in message

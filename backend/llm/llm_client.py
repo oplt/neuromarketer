@@ -91,7 +91,9 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
         try:
             parsed = json.loads(cleaned[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise LLMResponseFormatError(f"Model output is not valid JSON: {exc}", raw_text=cleaned) from exc
+            raise LLMResponseFormatError(
+                f"Model output is not valid JSON: {exc}", raw_text=cleaned
+            ) from exc
 
     if not isinstance(parsed, dict):
         raise LLMResponseFormatError("Model output JSON must be an object.", raw_text=cleaned)
@@ -191,9 +193,13 @@ class OllamaLLMClient(BaseLLMClient):
         except httpx.HTTPStatusError as exc:
             detail = _summarize_error_response(exc.response)
             suffix = f"; response: {detail}" if detail else ""
-            raise LLMTransportError(f"Failed to call Ollama endpoint: {_describe_http_error(exc)}{suffix}") from exc
+            raise LLMTransportError(
+                f"Failed to call Ollama endpoint: {_describe_http_error(exc)}{suffix}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise LLMTransportError(f"Failed to call Ollama endpoint: {_describe_http_error(exc)}") from exc
+            raise LLMTransportError(
+                f"Failed to call Ollama endpoint: {_describe_http_error(exc)}"
+            ) from exc
 
         try:
             response_json = response.json()
@@ -281,7 +287,9 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
                 f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}{suffix}"
             ) from exc
         except httpx.HTTPError as exc:
-            raise LLMTransportError(f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}") from exc
+            raise LLMTransportError(
+                f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}"
+            ) from exc
 
         try:
             response_json = response.json()

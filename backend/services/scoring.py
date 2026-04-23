@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any
 
 from backend.core.logging import duration_ms, get_logger, log_event
 from backend.db.models import SuggestionStatus, SuggestionType, VisualizationType
@@ -59,11 +60,7 @@ def _compact_audience_context(value: Any) -> dict[str, Any]:
         if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
             compacted[normalized_key] = raw_value
         elif isinstance(raw_value, list):
-            scalar_items = [
-                item
-                for item in raw_value
-                if isinstance(item, (str, int, float, bool))
-            ]
+            scalar_items = [item for item in raw_value if isinstance(item, (str, int, float, bool))]
             if scalar_items:
                 compacted[normalized_key] = scalar_items[:4]
         if len(compacted) >= MAX_AUDIENCE_CONTEXT_FIELDS:
@@ -139,7 +136,9 @@ class NeuroScoringService:
     SCORE_MODEL_NAME = "llm_analysis_scorer_v1"
 
     def __init__(self, analysis_scoring_service: AnalysisScoringService | None = None) -> None:
-        self.analysis_scoring_service = analysis_scoring_service or AnalysisScoringService.from_settings()
+        self.analysis_scoring_service = (
+            analysis_scoring_service or AnalysisScoringService.from_settings()
+        )
 
     async def score(
         self,
@@ -150,7 +149,9 @@ class NeuroScoringService:
         modality: str,
     ) -> ScoringBundle:
         started_at = time.perf_counter()
-        segment_features = list(reduced_feature_vector.get("segment_features", []))[:MAX_SCORING_SEGMENTS]
+        segment_features = list(reduced_feature_vector.get("segment_features", []))[
+            :MAX_SCORING_SEGMENTS
+        ]
 
         log_event(
             logger,
@@ -199,8 +200,7 @@ class NeuroScoringService:
             suggestion_count=len(bundle.suggestions),
             timeline_points=len(bundle.timeline_points),
             score_summary={
-                score.score_type: round(float(score.normalized_score), 2)
-                for score in bundle.scores
+                score.score_type: round(float(score.normalized_score), 2) for score in bundle.scores
             },
             provider=scoring_response.provider,
             model=scoring_response.model,
@@ -307,7 +307,9 @@ class NeuroScoringService:
                 data_json={
                     "modality": modality,
                     "curve": timeline_curve,
-                    "summary_scores": {key: round(value * 100.0, 2) for key, value in score_values.items()},
+                    "summary_scores": {
+                        key: round(value * 100.0, 2) for key, value in score_values.items()
+                    },
                     "note": "Summary scores are LLM-evaluated from TRIBE-derived evidence. Timeline curve values come from TRIBE segment features.",
                     "provider": scoring_response.provider,
                     "model_name": scoring_response.model,
@@ -330,8 +332,7 @@ class NeuroScoringService:
     ) -> list[TimelinePointItem]:
         overall_scores = scoring_response.result.scores
         points_by_index = {
-            int(point.segment_index): point
-            for point in scoring_response.result.timeline_points
+            int(point.segment_index): point for point in scoring_response.result.timeline_points
         }
 
         if segment_features:
@@ -421,15 +422,21 @@ class NeuroScoringService:
                 point.memory_score if point is not None else fallback_scores.memory.score
             ),
             cognitive_load_score=_score_decimal(
-                point.cognitive_load_score if point is not None else fallback_scores.cognitive_load.score
+                point.cognitive_load_score
+                if point is not None
+                else fallback_scores.cognitive_load.score
             ),
             conversion_proxy_score=_score_decimal(
-                point.conversion_proxy_score if point is not None else fallback_scores.conversion_proxy.score
+                point.conversion_proxy_score
+                if point is not None
+                else fallback_scores.conversion_proxy.score
             ),
             metadata_json=metadata_json,
         )
 
-    def _build_suggestions(self, *, scoring_response: AnalysisScoringResponse) -> list[SuggestionItem]:
+    def _build_suggestions(
+        self, *, scoring_response: AnalysisScoringResponse
+    ) -> list[SuggestionItem]:
         suggestions: list[SuggestionItem] = []
         for suggestion in scoring_response.result.suggestions:
             proposed_change_json = dict(suggestion.proposed_change_json or {})
@@ -471,7 +478,9 @@ class NeuroScoringService:
         campaign_context = campaign_context if isinstance(campaign_context, dict) else {}
         audience_context = context.get("audience_context") if isinstance(context, dict) else {}
         audience_context = audience_context if isinstance(audience_context, dict) else {}
-        segment_features = list(reduced_feature_vector.get("segment_features", []))[:MAX_SCORING_SEGMENTS]
+        segment_features = list(reduced_feature_vector.get("segment_features", []))[
+            :MAX_SCORING_SEGMENTS
+        ]
 
         scalar_features = {
             key: reduced_feature_vector.get(key)
@@ -509,22 +518,33 @@ class NeuroScoringService:
                     "start_ms": int(segment.get("start_ms", index * 1000)),
                     "duration_ms": int(segment.get("duration_ms", 1000)),
                     "event_count": int(segment.get("event_count", 0)),
-                    "event_types": [str(item) for item in list(segment.get("event_types", []))[:MAX_SCORING_EVENT_TYPES]],
+                    "event_types": [
+                        str(item)
+                        for item in list(segment.get("event_types", []))[:MAX_SCORING_EVENT_TYPES]
+                    ],
                     "engagement_signal": _round_signal(segment.get("engagement_signal", 0.0)),
                     "peak_focus_signal": _round_signal(segment.get("peak_focus_signal", 0.0)),
                     "consistency_signal": _round_signal(segment.get("consistency_signal", 0.0)),
-                    "temporal_change_signal": _round_signal(segment.get("temporal_change_signal", 0.0)),
-                    "hemisphere_balance_signal": _round_signal(segment.get("hemisphere_balance_signal", 0.0)),
+                    "temporal_change_signal": _round_signal(
+                        segment.get("temporal_change_signal", 0.0)
+                    ),
+                    "hemisphere_balance_signal": _round_signal(
+                        segment.get("hemisphere_balance_signal", 0.0)
+                    ),
                 }
                 for index, segment in enumerate(segment_features)
             ],
             "region_activation_summary": {
                 "hemisphere_summary": region_activation_summary.get("hemisphere_summary"),
-                "top_rois": list(region_activation_summary.get("top_rois") or [])[:MAX_SCORING_TOP_ROIS],
+                "top_rois": list(region_activation_summary.get("top_rois") or [])[
+                    :MAX_SCORING_TOP_ROIS
+                ],
             },
         }
 
-    def _score_values_from_response(self, scoring_response: AnalysisScoringResponse) -> dict[str, float]:
+    def _score_values_from_response(
+        self, scoring_response: AnalysisScoringResponse
+    ) -> dict[str, float]:
         assessments = scoring_response.result.scores
         return {
             "attention": float(assessments.attention.score) / 100.0,

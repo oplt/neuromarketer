@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import signal
 import socket
-import threading
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
@@ -29,10 +27,13 @@ from backend.core.logging import duration_ms, get_logger, log_event, log_excepti
 from backend.core.metrics import metrics
 from backend.db.repositories import CreativeRepository, InferenceRepository
 from backend.db.session import AsyncSessionLocal
-from backend.services.analysis_job_events import publish_analysis_job_event
-from backend.services.analysis_goal_taxonomy import normalize_analysis_channel, normalize_goal_template
-from backend.services.analysis_postprocessor import AnalysisPostprocessor
 from backend.schemas.evaluators import EvaluationMode
+from backend.services.analysis_goal_taxonomy import (
+    normalize_analysis_channel,
+    normalize_goal_template,
+)
+from backend.services.analysis_job_events import publish_analysis_job_event
+from backend.services.analysis_postprocessor import AnalysisPostprocessor
 from backend.services.tribe_inference_service import TribeInferenceService
 
 logger = get_logger(__name__)
@@ -71,12 +72,16 @@ async def _run_prediction_scoring_job(job_id: UUID) -> None:
             await db.commit()
         except Exception as exc:
             await db.rollback()
-            partial_result_available = await _preserve_failed_scoring_result(db, job_id=job_id, error_message=str(exc))
+            partial_result_available = await _preserve_failed_scoring_result(
+                db, job_id=job_id, error_message=str(exc)
+            )
             await db.commit()
             repo = InferenceRepository(db)
             job = await repo.get_job(job_id)
             if job is not None:
-                await repo.mark_job_failed(job, str(exc), partial_result_available=partial_result_available)
+                await repo.mark_job_failed(
+                    job, str(exc), partial_result_available=partial_result_available
+                )
                 await db.commit()
             await publish_analysis_job_event(
                 job_id=job_id,
@@ -154,7 +159,9 @@ async def _run_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> None:
                 await service.evaluations.mark_failed(
                     record=record,
                     error_message=str(exc),
-                    metadata_json=failure_metadata if isinstance(failure_metadata, dict) else record.metadata_json,
+                    metadata_json=failure_metadata
+                    if isinstance(failure_metadata, dict)
+                    else record.metadata_json,
                 )
                 await db.commit()
             raise
@@ -164,7 +171,11 @@ async def _run_prediction_job_in_process(job_id: UUID) -> None:
     start = time.perf_counter()
     try:
         await _run_prediction_job(job_id)
-        metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "succeeded"})
+        metrics.observe(
+            "prediction_job_duration_seconds",
+            time.perf_counter() - start,
+            labels={"status": "succeeded"},
+        )
     except Exception as exc:
         log_exception(
             logger,
@@ -175,7 +186,11 @@ async def _run_prediction_job_in_process(job_id: UUID) -> None:
             execution_mode="in_process",
             duration_ms=duration_ms(start, time.perf_counter()),
         )
-        metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "failed"})
+        metrics.observe(
+            "prediction_job_duration_seconds",
+            time.perf_counter() - start,
+            labels={"status": "failed"},
+        )
 
 
 def _run_prediction_job_in_process_entrypoint(job_id: UUID) -> None:
@@ -284,7 +299,9 @@ def _schedule_prediction_scoring_job_in_process(job_id: UUID) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         context = copy_context()
-        _fallback_executor.submit(context.run, _run_prediction_scoring_job_in_process_entrypoint, job_id)
+        _fallback_executor.submit(
+            context.run, _run_prediction_scoring_job_in_process_entrypoint, job_id
+        )
         return
 
     task = loop.create_task(
@@ -566,7 +583,11 @@ def process_prediction_job_task(self, job_id: str) -> None:
     start = time.perf_counter()
     try:
         asyncio.run(_run_prediction_job(UUID(job_id)))
-        metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "succeeded"})
+        metrics.observe(
+            "prediction_job_duration_seconds",
+            time.perf_counter() - start,
+            labels={"status": "succeeded"},
+        )
     except (ConfigurationAppError, DependencyAppError, NotFoundAppError, ValidationAppError) as exc:
         log_exception(
             logger,
@@ -579,7 +600,11 @@ def process_prediction_job_task(self, job_id: str) -> None:
             retryable=False,
             duration_ms=duration_ms(start, time.perf_counter()),
         )
-        metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "failed"})
+        metrics.observe(
+            "prediction_job_duration_seconds",
+            time.perf_counter() - start,
+            labels={"status": "failed"},
+        )
         raise
     except Exception as exc:
         log_exception(
@@ -593,7 +618,11 @@ def process_prediction_job_task(self, job_id: str) -> None:
             retry_count=self.request.retries + 1,
             duration_ms=duration_ms(start, time.perf_counter()),
         )
-        metrics.observe("prediction_job_duration_seconds", time.perf_counter() - start, labels={"status": "retry"})
+        metrics.observe(
+            "prediction_job_duration_seconds",
+            time.perf_counter() - start,
+            labels={"status": "retry"},
+        )
         raise self.retry(exc=exc)
 
 

@@ -363,3 +363,8 @@ TODO.txt
 /models
 /cache
 .gitnexus
+.aider*
+.agents
+.claude
+logs/*
+

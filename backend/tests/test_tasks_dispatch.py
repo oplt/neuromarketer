@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import warnings
 
-from celery.app.control import DuplicateNodenameWarning
-
 from backend import tasks
+from celery.app.control import DuplicateNodenameWarning
 
 
 class _InspectorStub:

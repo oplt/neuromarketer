@@ -4,6 +4,7 @@ from fastapi import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
+
 # Key function: use the real IP from X-Forwarded-For when behind a proxy,
 # falling back to the direct client address.
 def _get_client_ip(request: Request) -> str:

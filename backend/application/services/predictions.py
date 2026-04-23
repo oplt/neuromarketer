@@ -4,13 +4,13 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.log_context import bound_log_context
+from backend.application.services.analysis_job_processor import AnalysisJobProcessor
 from backend.core.exceptions import ConflictAppError, NotFoundAppError, ValidationAppError
-from backend.db.models import JobStatus
+from backend.core.log_context import bound_log_context
 from backend.core.logging import get_logger, log_event
 from backend.core.metrics import metrics
+from backend.db.models import JobStatus
 from backend.db.repositories import CreativeRepository, InferenceRepository
-from backend.application.services.analysis_job_processor import AnalysisJobProcessor
 from backend.schemas.schemas import PredictRequest
 from backend.services.tribe_inference_service import TribeInferenceService
 
@@ -36,14 +36,18 @@ class PredictionApplicationService:
             if creative.project_id != payload.project_id:
                 raise ValidationAppError("Creative does not belong to project.")
 
-            creative_version = await self.creatives.get_creative_version(payload.creative_version_id)
+            creative_version = await self.creatives.get_creative_version(
+                payload.creative_version_id
+            )
             if creative_version is None:
                 raise NotFoundAppError("Creative version not found.")
             if creative_version.creative_id != payload.creative_id:
                 raise ValidationAppError("Creative version does not belong to creative.")
 
             modality = self.tribe_inference.resolve_modality(creative_version)
-            self.tribe_inference.assert_ready_for_inference(creative_version=creative_version, modality=modality)
+            self.tribe_inference.assert_ready_for_inference(
+                creative_version=creative_version, modality=modality
+            )
 
             job = await self.inference.create_job(
                 project_id=payload.project_id,

@@ -54,7 +54,7 @@ class EvaluationService:
         self.router = router
 
     @classmethod
-    def from_settings(cls) -> "EvaluationService":
+    def from_settings(cls) -> EvaluationService:
         return cls(router=LLMRouter.from_settings(settings))
 
     def preview_route(self, mode: EvaluationMode) -> LLMRoutePreview:
@@ -97,7 +97,9 @@ class EvaluationService:
                 route_id=exc.telemetry.get("selected_route_id"),
                 status="failed",
             )
-            raise EvaluationServiceError(f"LLM evaluation failed: {exc}", telemetry=exc.telemetry) from exc
+            raise EvaluationServiceError(
+                f"LLM evaluation failed: {exc}", telemetry=exc.telemetry
+            ) from exc
 
         try:
             validated_result = EvaluationResult.model_validate(generation.parsed_json)
@@ -150,7 +152,9 @@ class EvaluationService:
 
         return EvaluationResponse(
             result=final_result,
-            provider_id=str(generation.metadata.get("provider_id") or generation.metadata["provider"]),
+            provider_id=str(
+                generation.metadata.get("provider_id") or generation.metadata["provider"]
+            ),
             provider=generation.metadata["provider"],
             model=generation.metadata["model"],
             tokens_in=int(generation.metadata["tokens_in"]),

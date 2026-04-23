@@ -63,9 +63,12 @@ class BaseEvaluator(ABC):
         sections = [
             f"Identity:\n{self.identity}",
             f"Mission:\n{self.mission}",
-            "Critical rules:\n" + "\n".join(f"{index + 1}. {item}" for index, item in enumerate(self.critical_rules)),
+            "Critical rules:\n"
+            + "\n".join(f"{index + 1}. {item}" for index, item in enumerate(self.critical_rules)),
             "Evaluation workflow:\n"
-            + "\n".join(f"{index + 1}. {item}" for index, item in enumerate(self.evaluation_workflow)),
+            + "\n".join(
+                f"{index + 1}. {item}" for index, item in enumerate(self.evaluation_workflow)
+            ),
             "Domain rubric:\n" + "\n".join(f"- {item}" for item in self.domain_rubric),
             "Output contract:\n" + "\n".join(f"- {item}" for item in self.output_requirements),
             "Success criteria:\n" + "\n".join(f"- {item}" for item in self.success_criteria),

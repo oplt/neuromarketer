@@ -43,7 +43,7 @@ class AnalysisScoringService:
         self.prompt_builder = AnalysisScoringPromptBuilder()
 
     @classmethod
-    def from_settings(cls) -> "AnalysisScoringService":
+    def from_settings(cls) -> AnalysisScoringService:
         return cls(router=LLMRouter.from_settings(settings))
 
     def preview_route(self) -> LLMRoutePreview:
@@ -127,7 +127,9 @@ class AnalysisScoringService:
 
         return AnalysisScoringResponse(
             result=validated,
-            provider_id=str(generation.metadata.get("provider_id") or generation.metadata["provider"]),
+            provider_id=str(
+                generation.metadata.get("provider_id") or generation.metadata["provider"]
+            ),
             provider=generation.metadata["provider"],
             model=generation.metadata["model"],
             tokens_in=int(generation.metadata["tokens_in"]),

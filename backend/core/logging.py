@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sys
 import json
 import logging
+import sys
 from logging.config import dictConfig
 from pathlib import Path
 from typing import Any
@@ -189,7 +189,9 @@ def configure_logging(force: bool = False) -> None:
     if resolved_log_format == "json":
         console_renderer = structlog.processors.JSONRenderer(serializer=json.dumps, sort_keys=False)
     else:
-        console_renderer = structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty() or sys.stderr.isatty())
+        console_renderer = structlog.dev.ConsoleRenderer(
+            colors=sys.stdout.isatty() or sys.stderr.isatty()
+        )
     json_renderer = structlog.processors.JSONRenderer(serializer=json.dumps, sort_keys=False)
     console_formatter = "json" if resolved_log_format == "json" else "pretty"
     handlers, root_handlers = _build_handlers(console_formatter=console_formatter)
@@ -224,12 +226,28 @@ def configure_logging(force: bool = False) -> None:
                 "level": settings.log_level.upper(),
             },
             "loggers": {
-                "uvicorn.error": {"handlers": [], "level": settings.log_level.upper(), "propagate": True},
+                "uvicorn.error": {
+                    "handlers": [],
+                    "level": settings.log_level.upper(),
+                    "propagate": True,
+                },
                 "uvicorn.access": {"handlers": [], "level": "WARNING", "propagate": False},
                 "celery": {"handlers": [], "level": settings.log_level.upper(), "propagate": True},
-                "celery.app.trace": {"handlers": [], "level": settings.log_level.upper(), "propagate": True},
-                "celery.redirected": {"handlers": [], "level": settings.log_level.upper(), "propagate": True},
-                "celery.task": {"handlers": [], "level": settings.log_level.upper(), "propagate": True},
+                "celery.app.trace": {
+                    "handlers": [],
+                    "level": settings.log_level.upper(),
+                    "propagate": True,
+                },
+                "celery.redirected": {
+                    "handlers": [],
+                    "level": settings.log_level.upper(),
+                    "propagate": True,
+                },
+                "celery.task": {
+                    "handlers": [],
+                    "level": settings.log_level.upper(),
+                    "propagate": True,
+                },
             },
         }
     )

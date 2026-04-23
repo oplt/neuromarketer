@@ -40,7 +40,9 @@ async def predict(
         hydrated_job = await service.get_job(job.id)
         return PredictResponse(
             job=hydrated_job,
-            prediction_result=hydrated_job.prediction if hydrated_job.status.value == "succeeded" else None,
+            prediction_result=hydrated_job.prediction
+            if hydrated_job.status.value == "succeeded"
+            else None,
         )
 
 
@@ -51,7 +53,9 @@ async def get_prediction_job(
 ) -> PredictResponse:
     with bound_log_context(job_id=str(job_id)):
         job = await PredictionApplicationService(db).get_job(job_id)
-        return PredictResponse(job=job, prediction_result=job.prediction if job.status.value == "succeeded" else None)
+        return PredictResponse(
+            job=job, prediction_result=job.prediction if job.status.value == "succeeded" else None
+        )
 
 
 @router.post("/compare", response_model=CompareResponse)
@@ -77,7 +81,9 @@ async def compare_creatives(
                     scores_json=item.scores_json,
                     rationale=item.rationale,
                 )
-                for item in sorted(result.item_results, key=lambda candidate: candidate.overall_rank)
+                for item in sorted(
+                    result.item_results, key=lambda candidate: candidate.overall_rank
+                )
             ],
         )
 
@@ -88,7 +94,9 @@ async def optimize_prediction(
     db: AsyncSession = Depends(get_db),
 ) -> OptimizeResponse:
     with bound_log_context(prediction_result_id=str(payload.prediction_result_id)):
-        prediction = await PredictionApplicationService(db).get_prediction_result(payload.prediction_result_id)
+        prediction = await PredictionApplicationService(db).get_prediction_result(
+            payload.prediction_result_id
+        )
         suggestions = OptimizationApplicationService().optimize(
             prediction=prediction,
             max_suggestions=payload.max_suggestions,

@@ -40,7 +40,9 @@ class AssetLoader:
                 loaded_asset = self._load_from_s3(storage_uri=storage_uri, mime_type=mime_type)
             elif storage_uri.startswith("file://"):
                 path = storage_uri.replace("file://", "", 1)
-                loaded_asset = self._load_from_local_path(local_path=path, storage_uri=storage_uri, mime_type=mime_type)
+                loaded_asset = self._load_from_local_path(
+                    local_path=path, storage_uri=storage_uri, mime_type=mime_type
+                )
             elif storage_uri.startswith("/"):
                 loaded_asset = self._load_from_local_path(
                     local_path=storage_uri,
@@ -83,7 +85,9 @@ class AssetLoader:
         cached_path = self._cache_dir / f"{uri_hash}{suffix}"
 
         if cached_path.exists():
-            log_event(logger, "asset_cache_hit", storage_uri=storage_uri, local_path=str(cached_path))
+            log_event(
+                logger, "asset_cache_hit", storage_uri=storage_uri, local_path=str(cached_path)
+            )
             return LoadedAsset(
                 local_path=str(cached_path),
                 storage_uri=storage_uri,

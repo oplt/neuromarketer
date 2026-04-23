@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,7 +20,6 @@ from backend.schemas.settings import (
 )
 from backend.services.env_settings_registry import (
     ENV_SETTING_GROUPS,
-    GROUPS_BY_ID,
     build_setting_label,
     classify_env_setting,
     infer_value_type,
@@ -105,7 +103,9 @@ class WorkspaceSettingsService:
     ) -> SettingsUpdateResponse:
         env_entries = self._parse_env_entries(self.env_file_path)
         env_keys = {entry.key for entry in env_entries}
-        requested_updates = {entry.key.strip(): entry.value for entry in payload.entries if entry.key.strip()}
+        requested_updates = {
+            entry.key.strip(): entry.value for entry in payload.entries if entry.key.strip()
+        }
         unsupported_keys = sorted(key for key in requested_updates if key not in env_keys)
         if unsupported_keys:
             raise ValidationAppError(
@@ -116,7 +116,7 @@ class WorkspaceSettingsService:
 
         persisted_rows = await self._load_persisted_settings(organization_id=organization_id)
         persisted_by_key = {row.key: row for row in persisted_rows}
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         for key, value in requested_updates.items():
             row = persisted_by_key.get(key)
@@ -171,9 +171,13 @@ class WorkspaceSettingsService:
             entries.append(ParsedEnvEntry(key=key.strip(), value=raw_value))
         return entries
 
-    def _write_env_entries(self, env_file_path: Path, *, requested_updates: dict[str, str | None]) -> None:
+    def _write_env_entries(
+        self, env_file_path: Path, *, requested_updates: dict[str, str | None]
+    ) -> None:
         env_file_path.parent.mkdir(parents=True, exist_ok=True)
-        existing_lines = env_file_path.read_text(encoding="utf-8").splitlines() if env_file_path.exists() else []
+        existing_lines = (
+            env_file_path.read_text(encoding="utf-8").splitlines() if env_file_path.exists() else []
+        )
         remaining_updates = dict(requested_updates)
         next_lines: list[str] = []
 
@@ -186,7 +190,9 @@ class WorkspaceSettingsService:
             key, _ = raw_line.split("=", 1)
             normalized_key = key.strip()
             if normalized_key in remaining_updates:
-                next_lines.append(self._format_env_line(normalized_key, remaining_updates.pop(normalized_key)))
+                next_lines.append(
+                    self._format_env_line(normalized_key, remaining_updates.pop(normalized_key))
+                )
             else:
                 next_lines.append(raw_line)
 

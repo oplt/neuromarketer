@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-
 CollaborationEntityTypeValue = Literal["analysis_job", "analysis_comparison"]
 ReviewStatusValue = Literal["draft", "in_review", "changes_requested", "approved"]
 

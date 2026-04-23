@@ -36,7 +36,9 @@ class TimelineMetricPoint(StrictSchemaModel):
 
 
 class ScoringSuggestion(StrictSchemaModel):
-    suggestion_type: Literal["copy", "layout", "color", "cta", "framing", "pacing", "thumbnail", "branding"]
+    suggestion_type: Literal[
+        "copy", "layout", "color", "cta", "framing", "pacing", "thumbnail", "branding"
+    ]
     title: str = Field(min_length=1, max_length=180)
     rationale: str = Field(min_length=1, max_length=1_000)
     proposed_change_json: dict[str, Any] = Field(default_factory=dict)
@@ -54,11 +56,7 @@ class ScoringSuggestion(StrictSchemaModel):
             "cognitive_load",
             "conversion_proxy",
         }
-        return {
-            key: float(metric_value)
-            for key, metric_value in value.items()
-            if key in allowed
-        }
+        return {key: float(metric_value) for key, metric_value in value.items() if key in allowed}
 
 
 class AnalysisScoringResult(StrictSchemaModel):

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -102,7 +102,7 @@ class LLMEvaluationRepository:
         if record is None:
             return None
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         is_stale_processing = (
             record.status == EvaluationStatus.PROCESSING.value
             and record.updated_at < now - timedelta(seconds=stale_after_seconds)
@@ -137,7 +137,9 @@ class LLMEvaluationRepository:
         record.metadata_json = metadata_json or {}
         await self.session.flush()
 
-    async def mark_failed(self, *, record: LLMEvaluationRecord, error_message: str, metadata_json: dict | None = None) -> None:
+    async def mark_failed(
+        self, *, record: LLMEvaluationRecord, error_message: str, metadata_json: dict | None = None
+    ) -> None:
         record.status = EvaluationStatus.FAILED.value
         record.error_message = error_message
         if metadata_json is not None:

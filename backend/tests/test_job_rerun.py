@@ -1,9 +1,10 @@
 """Tests for the job rerun / reset logic in InferenceRepository and PredictionApplicationService."""
+
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from backend.db.models import JobStatus
@@ -14,8 +15,8 @@ class _FakeJob:
         self.id = uuid4()
         self.status = status
         self.error_message = "previous error"
-        self.started_at = datetime.now(timezone.utc)
-        self.completed_at = datetime.now(timezone.utc)
+        self.started_at = datetime.now(UTC)
+        self.completed_at = datetime.now(UTC)
         self.created_by_user_id = None
         self.runtime_params = {}
 
@@ -83,7 +84,9 @@ class TestPredictionServiceRerun(unittest.IsolatedAsyncioTestCase):
         reset_job = _FakeJob(JobStatus.QUEUED)
 
         with patch.object(svc.inference, "get_job_with_prediction", side_effect=[job, reset_job]):
-            with patch.object(svc.inference, "reset_job_for_rerun", new_callable=AsyncMock) as mock_reset:
+            with patch.object(
+                svc.inference, "reset_job_for_rerun", new_callable=AsyncMock
+            ) as mock_reset:
                 result = await svc.rerun_job(job_id=job.id, user_id=uuid4())
                 mock_reset.assert_awaited_once_with(job)
                 self.assertEqual(result.status, JobStatus.QUEUED)

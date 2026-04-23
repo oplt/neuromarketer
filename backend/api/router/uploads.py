@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.rate_limit import limiter
-from backend.core.log_context import bound_log_context
 from backend.application.services.uploads import UploadApplicationService
+from backend.core.log_context import bound_log_context
 from backend.db.repositories.uploads import UploadRepository
 from backend.db.session import get_db
 from backend.schemas.uploads import (
@@ -32,7 +32,9 @@ async def init_upload(
     with bound_log_context(
         project_id=str(payload.project_id),
         creative_id=str(payload.creative_id) if payload.creative_id else None,
-        creative_version_id=str(payload.creative_version_id) if payload.creative_version_id else None,
+        creative_version_id=str(payload.creative_version_id)
+        if payload.creative_version_id
+        else None,
     ):
         service = UploadApplicationService(db)
         upload_session = await service.create_upload_session(payload)
@@ -68,7 +70,9 @@ async def direct_upload(
     with bound_log_context(
         project_id=str(resolved_project_id),
         creative_id=str(resolved_creative_id) if resolved_creative_id else None,
-        creative_version_id=str(resolved_creative_version_id) if resolved_creative_version_id else None,
+        creative_version_id=str(resolved_creative_version_id)
+        if resolved_creative_version_id
+        else None,
     ):
         service = UploadApplicationService(db)
         result = await service.handle_direct_upload(

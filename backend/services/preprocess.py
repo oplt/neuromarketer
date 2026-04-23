@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
-import os
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 
 from backend.services.document_text_extractor import is_supported_text_document
 from backend.services.tribe_runtime import TribeRuntime
@@ -51,11 +48,11 @@ class PreprocessService:
         return "binary"
 
     async def preprocess_upload(
-            self,
-            *,
-            filename: str | None,
-            mime_type: str | None,
-            file_size_bytes: int | None,
+        self,
+        *,
+        filename: str | None,
+        mime_type: str | None,
+        file_size_bytes: int | None,
     ) -> PreprocessResult:
         modality = self.detect_modality(filename=filename, mime_type=mime_type)
 

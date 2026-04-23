@@ -10,8 +10,8 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import NotFoundAppError, ValidationAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import (
     duration_ms,
     get_logger,
@@ -54,7 +54,9 @@ class UploadApplicationService:
         with bound_log_context(
             project_id=str(payload.project_id),
             creative_id=str(payload.creative_id) if payload.creative_id else None,
-            creative_version_id=str(payload.creative_version_id) if payload.creative_version_id else None,
+            creative_version_id=str(payload.creative_version_id)
+            if payload.creative_version_id
+            else None,
         ):
             await self._validate_relationships(
                 project_id=payload.project_id,
@@ -63,7 +65,10 @@ class UploadApplicationService:
             )
             if not self.storage.is_allowed_mime_type(payload.mime_type):
                 raise ValidationAppError(f"Unsupported mime type: {payload.mime_type or 'unknown'}")
-            if payload.expected_size_bytes and payload.expected_size_bytes > settings.upload_max_size_bytes:
+            if (
+                payload.expected_size_bytes
+                and payload.expected_size_bytes > settings.upload_max_size_bytes
+            ):
                 raise ValidationAppError(
                     f"Upload exceeds max size of {settings.upload_max_size_bytes} bytes.",
                 )
@@ -194,7 +199,9 @@ class UploadApplicationService:
                         sha256=sha256_prefix(uploaded_object.sha256),
                         duration_ms=duration_ms(upload_started_at, upload_finished_at),
                         status="uploaded",
-                        **summarize_storage_reference(uploaded_object.bucket_name, uploaded_object.storage_key),
+                        **summarize_storage_reference(
+                            uploaded_object.bucket_name, uploaded_object.storage_key
+                        ),
                     )
 
                     if uploaded_object.file_size_bytes > settings.upload_max_size_bytes:

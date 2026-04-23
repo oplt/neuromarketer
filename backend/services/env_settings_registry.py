@@ -11,13 +11,19 @@ class EnvSettingGroup:
 
 
 ENV_SETTING_GROUPS: tuple[EnvSettingGroup, ...] = (
-    EnvSettingGroup("application", "Application", "Core service identity, logging, and runtime flags."),
+    EnvSettingGroup(
+        "application", "Application", "Core service identity, logging, and runtime flags."
+    ),
     EnvSettingGroup("database", "Database", "Database connectivity and persistence settings."),
-    EnvSettingGroup("security", "Security", "Session, JWT, and secret material used by the backend."),
+    EnvSettingGroup(
+        "security", "Security", "Session, JWT, and secret material used by the backend."
+    ),
     EnvSettingGroup("queue", "Queue", "Celery, Redis, and background job timing configuration."),
     EnvSettingGroup("storage", "Storage", "Object storage, upload, and CDN-related settings."),
     EnvSettingGroup("analysis", "Analysis", "Upload validation and analysis-surface constraints."),
-    EnvSettingGroup("tribe", "TRIBE", "TRIBE runtime, checkpoint, and feature extraction controls."),
+    EnvSettingGroup(
+        "tribe", "TRIBE", "TRIBE runtime, checkpoint, and feature extraction controls."
+    ),
     EnvSettingGroup("llm", "LLM", "Model routing, provider, and evaluation limits."),
     EnvSettingGroup("cloudflare", "Cloudflare", "Cloudflare and R2 connectivity values."),
     EnvSettingGroup("misc", "Misc", "Values that do not fit a more specific control group."),
@@ -25,7 +31,13 @@ ENV_SETTING_GROUPS: tuple[EnvSettingGroup, ...] = (
 
 GROUPS_BY_ID = {group.id: group for group in ENV_SETTING_GROUPS}
 
-BOOLEAN_SUFFIXES = ("enabled", "debug", "preload_on_worker_startup", "validate_binaries_on_worker_startup", "think")
+BOOLEAN_SUFFIXES = (
+    "enabled",
+    "debug",
+    "preload_on_worker_startup",
+    "validate_binaries_on_worker_startup",
+    "think",
+)
 INTEGER_SUFFIXES = (
     "minutes",
     "seconds",
@@ -48,7 +60,9 @@ def classify_env_setting(key: str) -> str:
         return "security"
     if normalized.startswith("CELERY_"):
         return "queue"
-    if normalized.startswith(("AWS_", "S3_", "R2_", "CLOUDFLARE_R2_", "LOCAL_STORAGE_", "UPLOAD_PRESIGN_")):
+    if normalized.startswith(
+        ("AWS_", "S3_", "R2_", "CLOUDFLARE_R2_", "LOCAL_STORAGE_", "UPLOAD_PRESIGN_")
+    ):
         return "storage"
     if normalized.startswith(("UPLOAD_MAX_", "ALLOWED_UPLOAD_", "ANALYSIS_")):
         return "analysis"

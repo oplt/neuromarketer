@@ -386,7 +386,9 @@ class AnalysisCalibrationSummaryRead(BaseModel):
     mean_signed_error: float | None = None
     over_prediction_rate: float | None = None
     under_prediction_rate: float | None = None
-    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = "insufficient_data"
+    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = (
+        "insufficient_data"
+    )
 
 
 class AnalysisCalibrationResponse(BaseModel):
@@ -421,7 +423,9 @@ class AnalysisCalibrationMetricSummaryRead(BaseModel):
     mean_signed_error: float | None = None
     over_prediction_rate: float | None = None
     under_prediction_rate: float | None = None
-    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = "insufficient_data"
+    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = (
+        "insufficient_data"
+    )
     trend_points: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
     over_predictions: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
     under_predictions: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
@@ -454,7 +458,9 @@ class AnalysisCalibrationDashboardSummaryRead(BaseModel):
     mean_signed_error: float | None = None
     over_prediction_rate: float | None = None
     under_prediction_rate: float | None = None
-    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = "insufficient_data"
+    drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = (
+        "insufficient_data"
+    )
 
 
 class AnalysisCalibrationDashboardResponse(BaseModel):

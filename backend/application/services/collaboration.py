@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -34,7 +34,10 @@ class CollaborationApplicationService:
 
     async def list_workspace_members(self, *, organization_id: UUID) -> WorkspaceMemberListResponse:
         members = await self._load_member_map(organization_id=organization_id)
-        items = sorted(members.values(), key=lambda member: ((member.full_name or "").lower(), member.email.lower()))
+        items = sorted(
+            members.values(),
+            key=lambda member: ((member.full_name or "").lower(), member.email.lower()),
+        )
         return WorkspaceMemberListResponse(items=items)
 
     async def get_review(
@@ -45,8 +48,12 @@ class CollaborationApplicationService:
         entity_type: CollaborationEntityType,
         entity_id: UUID,
     ) -> CollaborationReviewRead:
-        await self._ensure_entity_exists(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
-        review = await self._load_review(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
+        await self._ensure_entity_exists(
+            project_id=project_id, entity_type=entity_type, entity_id=entity_id
+        )
+        review = await self._load_review(
+            project_id=project_id, entity_type=entity_type, entity_id=entity_id
+        )
         members = await self._load_member_map(
             organization_id=organization_id,
             user_ids=self._collect_review_user_ids(review),
@@ -68,7 +75,9 @@ class CollaborationApplicationService:
         entity_id: UUID,
         payload: CollaborationReviewUpdateRequest,
     ) -> CollaborationReviewRead:
-        await self._ensure_entity_exists(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
+        await self._ensure_entity_exists(
+            project_id=project_id, entity_type=entity_type, entity_id=entity_id
+        )
         review = await self._get_or_create_review(
             user_id=user_id,
             project_id=project_id,
@@ -92,7 +101,7 @@ class CollaborationApplicationService:
             review.status = next_status
             if next_status == ReviewStatus.APPROVED:
                 review.approved_by_user_id = user_id
-                review.approved_at = datetime.now(timezone.utc)
+                review.approved_at = datetime.now(UTC)
             else:
                 review.approved_by_user_id = None
                 review.approved_at = None
@@ -115,7 +124,9 @@ class CollaborationApplicationService:
         entity_id: UUID,
         payload: CollaborationCommentCreateRequest,
     ) -> CollaborationReviewRead:
-        await self._ensure_entity_exists(project_id=project_id, entity_type=entity_type, entity_id=entity_id)
+        await self._ensure_entity_exists(
+            project_id=project_id, entity_type=entity_type, entity_id=entity_id
+        )
         review = await self._get_or_create_review(
             user_id=user_id,
             project_id=project_id,
@@ -178,7 +189,9 @@ class CollaborationApplicationService:
             raise NotFoundAppError("Comparison review target not found.")
         comparison_context = row.comparison_context or {}
         if str(comparison_context.get("analysis_surface") or "") != "analysis_compare_workspace":
-            raise ValidationAppError("Only analysis compare workspace items support collaboration here.")
+            raise ValidationAppError(
+                "Only analysis compare workspace items support collaboration here."
+            )
 
     async def _load_review(
         self,
@@ -312,8 +325,12 @@ class CollaborationApplicationService:
             status=review.status.value,
             review_summary=review.review_summary,
             created_by=members.get(review.created_by_user_id),
-            assignee=members.get(review.assignee_user_id) if review.assignee_user_id is not None else None,
-            approved_by=members.get(review.approved_by_user_id) if review.approved_by_user_id is not None else None,
+            assignee=members.get(review.assignee_user_id)
+            if review.assignee_user_id is not None
+            else None,
+            approved_by=members.get(review.approved_by_user_id)
+            if review.approved_by_user_id is not None
+            else None,
             approved_at=review.approved_at,
             created_at=review.created_at,
             updated_at=review.updated_at,

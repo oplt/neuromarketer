@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
-from backend.core.log_context import bound_log_context
 from backend.core.exceptions import NotFoundAppError
+from backend.core.log_context import bound_log_context
 from backend.core.logging import duration_ms, get_logger, log_event
 from backend.core.metrics import metrics
 from backend.db.repositories import CreativeRepository, InferenceRepository
+from backend.services.analysis_goal_taxonomy import (
+    normalize_analysis_channel,
+    normalize_goal_template,
+)
 from backend.services.analysis_job_events import publish_analysis_job_event
-from backend.services.analysis_goal_taxonomy import normalize_analysis_channel, normalize_goal_template
 from backend.services.analysis_postprocessor import AnalysisPostprocessor
 from backend.services.scoring import NeuroScoringService
 from backend.services.tribe_inference_service import TribeInferenceService
@@ -53,7 +56,9 @@ class AnalysisJobProcessor:
     ) -> dict[str, Any]:
         runtime_params = dict(job.runtime_params or {})
         current_progress = dict(runtime_params.get("analysis_progress") or {})
-        current_diagnostics = {} if replace_diagnostics else dict(current_progress.get("diagnostics") or {})
+        current_diagnostics = (
+            {} if replace_diagnostics else dict(current_progress.get("diagnostics") or {})
+        )
         merged_diagnostics = {
             **current_diagnostics,
             **{key: value for key, value in (diagnostics or {}).items() if value is not None},
@@ -63,7 +68,7 @@ class AnalysisJobProcessor:
             "stage": stage,
             "stage_label": stage_label,
             "diagnostics": merged_diagnostics,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
         }
         if is_partial is not None:
             next_progress["is_partial"] = is_partial
@@ -139,7 +144,7 @@ class AnalysisJobProcessor:
     def _elapsed_since_job_started_ms(self, job) -> int | None:
         if job.started_at is None:
             return None
-        return max(0, int((datetime.now(timezone.utc) - job.started_at).total_seconds() * 1000))
+        return max(0, int((datetime.now(UTC) - job.started_at).total_seconds() * 1000))
 
     def _runtime_output_from_prediction(self, prediction) -> Any:
         return self.tribe_inference.runtime_output_from_prediction(prediction)
@@ -245,14 +250,19 @@ class AnalysisJobProcessor:
             scene_payload = self.postprocessor.build_scene_extraction_payload(
                 runtime_output=execution.runtime_output,
                 modality=execution.modality,
-                objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
+                objective=str(objective).strip()
+                if isinstance(objective, str) and objective.strip()
+                else None,
                 goal_template=normalize_goal_template(campaign_context.get("goal_template")),
                 channel=normalize_analysis_channel(campaign_context.get("channel")),
-                audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
+                audience_segment=str(campaign_context.get("audience_segment") or "").strip()
+                or None,
                 source_label=execution.source_label,
             )
             scene_extraction_finished_at = time.perf_counter()
-            first_result_time_ms = (queue_wait_ms or 0) + duration_ms(total_started_at, scene_extraction_finished_at)
+            first_result_time_ms = (queue_wait_ms or 0) + duration_ms(
+                total_started_at, scene_extraction_finished_at
+            )
             scene_extraction_snapshot = self.postprocessor.build_result_payload(
                 job_id=job.id,
                 dashboard_payload=scene_payload,
@@ -263,7 +273,9 @@ class AnalysisJobProcessor:
                 stage_label="Scene extraction is complete. Scene windows and frame scaffolding are ready while scoring continues.",
                 diagnostics={
                     "queue_wait_ms": queue_wait_ms,
-                    "processing_duration_ms": duration_ms(total_started_at, scene_extraction_finished_at),
+                    "processing_duration_ms": duration_ms(
+                        total_started_at, scene_extraction_finished_at
+                    ),
                     "time_to_first_result_ms": first_result_time_ms,
                 },
                 partial_result=scene_extraction_snapshot,
@@ -314,7 +326,9 @@ class AnalysisJobProcessor:
             labels={"status": "acquired" if job is not None else "skipped", "phase": "scoring"},
         )
         if job is None:
-            log_event(logger, "prediction_scoring_job_skipped", job_id=str(job_id), status="skipped")
+            log_event(
+                logger, "prediction_scoring_job_skipped", job_id=str(job_id), status="skipped"
+            )
             return
 
         with bound_log_context(
@@ -335,9 +349,13 @@ class AnalysisJobProcessor:
             campaign_context = (job.request_payload or {}).get("campaign_context") or {}
             objective = campaign_context.get("objective")
             queue_wait_ms = self._current_progress_diagnostics(job).get("queue_wait_ms")
-            first_result_time_ms = self._current_progress_diagnostics(job).get("time_to_first_result_ms")
+            first_result_time_ms = self._current_progress_diagnostics(job).get(
+                "time_to_first_result_ms"
+            )
             runtime_output = self._runtime_output_from_prediction(prediction)
-            source_label = self.tribe_inference.resolve_source_label(creative_version=creative_version)
+            source_label = self.tribe_inference.resolve_source_label(
+                creative_version=creative_version
+            )
 
             await self._record_progress(
                 job=job,
@@ -378,10 +396,13 @@ class AnalysisJobProcessor:
                 runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
                 modality=modality,
-                objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
+                objective=str(objective).strip()
+                if isinstance(objective, str) and objective.strip()
+                else None,
                 goal_template=normalize_goal_template(campaign_context.get("goal_template")),
                 channel=normalize_analysis_channel(campaign_context.get("channel")),
-                audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
+                audience_segment=str(campaign_context.get("audience_segment") or "").strip()
+                or None,
                 source_label=source_label,
                 include_recommendations=False,
             )
@@ -392,7 +413,8 @@ class AnalysisJobProcessor:
                 job_id=str(job.id),
                 modality=modality,
                 time_to_first_result_ms=first_result_time_ms,
-                time_to_first_scored_result_ms=(queue_wait_ms or 0) + (self._elapsed_since_job_started_ms(job) or 0),
+                time_to_first_scored_result_ms=(queue_wait_ms or 0)
+                + (self._elapsed_since_job_started_ms(job) or 0),
                 duration_ms=duration_ms(preview_started_at, preview_finished_at),
                 timeline_points=len(preview_payload.timeline_json),
                 segment_rows=len(preview_payload.segments_json),
@@ -433,10 +455,13 @@ class AnalysisJobProcessor:
                 runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
                 modality=modality,
-                objective=str(objective).strip() if isinstance(objective, str) and objective.strip() else None,
+                objective=str(objective).strip()
+                if isinstance(objective, str) and objective.strip()
+                else None,
                 goal_template=normalize_goal_template(campaign_context.get("goal_template")),
                 channel=normalize_analysis_channel(campaign_context.get("channel")),
-                audience_segment=str(campaign_context.get("audience_segment") or "").strip() or None,
+                audience_segment=str(campaign_context.get("audience_segment") or "").strip()
+                or None,
                 source_label=source_label,
             )
             postprocess_finished_at = time.perf_counter()
@@ -448,7 +473,9 @@ class AnalysisJobProcessor:
                     "queue_wait_ms": queue_wait_ms,
                     "processing_duration_ms": self._elapsed_since_job_started_ms(job),
                     "time_to_first_result_ms": first_result_time_ms,
-                    "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
+                    "postprocess_duration_ms": duration_ms(
+                        postprocess_started_at, postprocess_finished_at
+                    ),
                 },
                 partial_result=self.postprocessor.build_result_payload(
                     job_id=job.id,
@@ -504,7 +531,9 @@ class AnalysisJobProcessor:
                 prediction_result_id=str(prediction_result.id),
                 modality=modality,
                 duration_ms=total_processing_duration_ms,
-                postprocess_duration_ms=duration_ms(postprocess_started_at, postprocess_finished_at),
+                postprocess_duration_ms=duration_ms(
+                    postprocess_started_at, postprocess_finished_at
+                ),
                 result_delivery_ms=(queue_wait_ms or 0) + total_processing_duration_ms,
                 status="succeeded",
             )
@@ -518,7 +547,9 @@ class AnalysisJobProcessor:
                     "processing_duration_ms": total_processing_duration_ms,
                     "time_to_first_result_ms": first_result_time_ms,
                     "result_delivery_ms": (queue_wait_ms or 0) + total_processing_duration_ms,
-                    "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
+                    "postprocess_duration_ms": duration_ms(
+                        postprocess_started_at, postprocess_finished_at
+                    ),
                 },
                 is_partial=False,
             )
@@ -534,7 +565,9 @@ class AnalysisJobProcessor:
                         "processing_duration_ms": total_processing_duration_ms,
                         "time_to_first_result_ms": first_result_time_ms,
                         "result_delivery_ms": (queue_wait_ms or 0) + total_processing_duration_ms,
-                        "postprocess_duration_ms": duration_ms(postprocess_started_at, postprocess_finished_at),
+                        "postprocess_duration_ms": duration_ms(
+                            postprocess_started_at, postprocess_finished_at
+                        ),
                     },
                 },
             )
