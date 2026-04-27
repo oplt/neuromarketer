@@ -1,5 +1,6 @@
 import AutoAwesomeRounded from '@mui/icons-material/AutoAwesomeRounded'
 import CachedRounded from '@mui/icons-material/CachedRounded'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
 import LocalLibraryRounded from '@mui/icons-material/LocalLibraryRounded'
 import MilitaryTechRounded from '@mui/icons-material/MilitaryTechRounded'
 import SchoolRounded from '@mui/icons-material/SchoolRounded'
@@ -15,9 +16,10 @@ import {
   Paper,
   Skeleton,
   Stack,
+  Tooltip,
   Typography,
 } from '@mui/material'
-import { startTransition, useEffect, useEffectEvent, useMemo, useState } from 'react'
+import { memo, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { apiRequest } from '../../lib/api'
 
@@ -136,6 +138,8 @@ type AnalysisEvaluationSectionProps = {
   onProgressSnapshot?: (snapshot: AnalysisEvaluationProgressSnapshot | null) => void
 }
 
+const FALLBACK_POLL_MS = 6_000
+
 const modeDefinitions: Array<{
   mode: AnalysisEvaluationMode
   label: string
@@ -185,23 +189,30 @@ function AnalysisEvaluationSection({
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [requestError, setRequestError] = useState<string | null>(null)
 
-  const applyResponse = (response: AnalysisEvaluationListResponse) => {
+  const abortRef = useRef<AbortController | null>(null)
+  const isMountedRef = useRef(true)
+
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      abortRef.current?.abort()
+    }
+  }, [])
+
+  const applyResponse = useCallback((response: AnalysisEvaluationListResponse) => {
+    if (!isMountedRef.current) {
+      return
+    }
     startTransition(() => {
-      setRecordsByMode(() => {
-        const next: Record<string, AnalysisEvaluationRecord> = {}
-        response.items.forEach((item) => {
-          next[item.mode] = item
-        })
-        return next
+      const next: Record<string, AnalysisEvaluationRecord> = {}
+      response.items.forEach((item) => {
+        next[item.mode] = item
       })
-      setSelectedModes((current) => {
-        if (current.length > 0) {
-          return current
-        }
-        return response.items.map((item) => item.mode)
-      })
+      setRecordsByMode(next)
+      setSelectedModes((current) => (current.length > 0 ? current : response.items.map((item) => item.mode)))
     })
-  }
+  }, [])
 
   useEffect(() => {
     startTransition(() => {
@@ -210,7 +221,7 @@ function AnalysisEvaluationSection({
     })
   }, [jobId])
 
-  const loadEvaluations = useEffectEvent(async () => {
+  const loadEvaluations = useCallback(async () => {
     if (!sessionToken || !jobId || !analysisCompleted) {
       startTransition(() => {
         setRecordsByMode({})
@@ -219,72 +230,105 @@ function AnalysisEvaluationSection({
       return
     }
 
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+
     setIsLoading(true)
     try {
       const response = await apiRequest<AnalysisEvaluationListResponse>(
         `/api/v1/analysis/jobs/${jobId}/evaluations`,
-        { sessionToken },
+        { sessionToken, signal: controller.signal },
       )
+      if (controller.signal.aborted || !isMountedRef.current) {
+        return
+      }
       applyResponse(response)
       setRequestError(null)
     } catch (error) {
+      if (controller.signal.aborted || !isMountedRef.current) {
+        return
+      }
       setRequestError(error instanceof Error ? error.message : 'Unable to load LLM evaluations.')
     } finally {
-      setIsLoading(false)
+      if (isMountedRef.current && !controller.signal.aborted) {
+        setIsLoading(false)
+      }
     }
-  })
+  }, [analysisCompleted, applyResponse, jobId, sessionToken])
 
-  const requestEvaluations = async (forceRefresh: boolean) => {
-    if (!sessionToken || !jobId || selectedModes.length === 0) {
-      return
-    }
+  const requestEvaluations = useCallback(
+    async (forceRefresh: boolean) => {
+      if (!sessionToken || !jobId || selectedModes.length === 0) {
+        return
+      }
 
-    setIsSubmitting(true)
-    try {
-      const response = await apiRequest<AnalysisEvaluationListResponse>(
-        `/api/v1/analysis/jobs/${jobId}/evaluate`,
-        {
-          method: 'POST',
-          sessionToken,
-          body: {
-            modes: selectedModes,
-            force_refresh: forceRefresh,
+      setIsSubmitting(true)
+      try {
+        const response = await apiRequest<AnalysisEvaluationListResponse>(
+          `/api/v1/analysis/jobs/${jobId}/evaluate`,
+          {
+            method: 'POST',
+            sessionToken,
+            body: {
+              modes: selectedModes,
+              force_refresh: forceRefresh,
+            },
           },
-        },
-      )
-      applyResponse(response)
-      setRequestError(null)
-    } catch (error) {
-      setRequestError(error instanceof Error ? error.message : 'Unable to request LLM evaluations.')
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
+        )
+        if (!isMountedRef.current) {
+          return
+        }
+        applyResponse(response)
+        setRequestError(null)
+      } catch (error) {
+        if (!isMountedRef.current) {
+          return
+        }
+        setRequestError(error instanceof Error ? error.message : 'Unable to request LLM evaluations.')
+      } finally {
+        if (isMountedRef.current) {
+          setIsSubmitting(false)
+        }
+      }
+    },
+    [applyResponse, jobId, selectedModes, sessionToken],
+  )
 
   useEffect(() => {
     void loadEvaluations()
-  }, [analysisCompleted, jobId, sessionToken])
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [loadEvaluations])
+
+  const hasActiveJob = Boolean(jobId && sessionToken)
+  const hasInflightRecord = useMemo(() => {
+    if (!jobId) {
+      return false
+    }
+    return Object.values(recordsByMode).some(
+      (record) => record.job_id === jobId && (record.status === 'queued' || record.status === 'processing'),
+    )
+  }, [jobId, recordsByMode])
 
   useEffect(() => {
-    if (!sessionToken || !jobId) {
-      return
-    }
-    const activeRecords = Object.values(recordsByMode).filter((record) => record.job_id === jobId)
-    if (!activeRecords.some((record) => record.status === 'queued' || record.status === 'processing')) {
+    if (!hasActiveJob || !hasInflightRecord) {
       return
     }
     const intervalId = window.setInterval(() => {
       void loadEvaluations()
-    }, 3_500)
+    }, FALLBACK_POLL_MS)
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [jobId, recordsByMode, sessionToken])
+  }, [hasActiveJob, hasInflightRecord, loadEvaluations])
 
   const selectedRecords = useMemo(
     () => selectedModes.map((mode) => recordsByMode[mode]).filter(Boolean),
     [recordsByMode, selectedModes],
   )
+
   const activeProgressSnapshot = useMemo<AnalysisEvaluationProgressSnapshot | null>(() => {
     if (!jobId) {
       return null
@@ -320,82 +364,88 @@ function AnalysisEvaluationSection({
       stageLabel: progress?.stage_label ?? defaultEvaluationStageLabel(activeRecord.mode, activeRecord.status),
     }
   }, [jobId, recordsByMode])
-  const hasExistingSelection = selectedModes.some((mode) => Boolean(recordsByMode[mode]))
+
+  const hasExistingSelection = useMemo(
+    () => selectedModes.some((mode) => Boolean(recordsByMode[mode])),
+    [recordsByMode, selectedModes],
+  )
 
   useEffect(() => {
-    if (!onProgressSnapshot) {
-      return
-    }
-    onProgressSnapshot(activeProgressSnapshot)
+    onProgressSnapshot?.(activeProgressSnapshot)
   }, [activeProgressSnapshot, onProgressSnapshot])
+
+  const handleToggleMode = useCallback((mode: AnalysisEvaluationMode) => {
+    setSelectedModes((current) => toggleMode(current, mode))
+  }, [])
+
+  const handleGenerate = useCallback(() => {
+    void requestEvaluations(false)
+  }, [requestEvaluations])
+
+  const handleRefresh = useCallback(() => {
+    void requestEvaluations(true)
+  }, [requestEvaluations])
 
   return (
     <Stack spacing={3}>
       <Paper className="dashboard-card" elevation={0}>
         <Stack spacing={2.5}>
-          <Stack alignItems={{ md: 'center' }} direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
-            <Box>
-              <Stack alignItems="center" direction="row" spacing={1}>
-                <Chip color="primary" icon={<AutoAwesomeRounded />} label="LLM evaluation" size="small" />
-                <Typography variant="h6">Interpret the completed analysis through domain lenses.</Typography>
-              </Stack>
-              <Typography color="text.secondary" sx={{ mt: 1 }} variant="body2">
-                The model reads the structured analysis output, not the raw media, and produces domain-specific critique,
-                risk flags, and recommendations for educational, defence, marketing, or social media review.
-              </Typography>
-            </Box>
+          <Stack
+            alignItems={{ md: 'center' }}
+            direction={{ xs: 'column', md: 'row' }}
+            justifyContent="space-between"
+            spacing={2}
+          >
+            <Stack alignItems="center" direction="row" spacing={1}>
+              <Chip color="primary" icon={<AutoAwesomeRounded />} label="LLM evaluation" size="small" />
+              <Typography variant="h6">Domain-aware critique</Typography>
+              <Tooltip
+                arrow
+                placement="top"
+                title="Reads the structured analysis output and produces a domain-specific critique with risk flags and recommendations. The model does not re-read the raw media."
+              >
+                <InfoOutlinedIcon
+                  aria-label="How LLM evaluation works"
+                  fontSize="small"
+                  sx={{ color: 'text.secondary', cursor: 'help' }}
+                  tabIndex={0}
+                />
+              </Tooltip>
+            </Stack>
             <Stack alignItems={{ xs: 'stretch', sm: 'center' }} direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
               <Button
                 disabled={!analysisCompleted || selectedModes.length === 0 || isSubmitting}
-                onClick={() => void requestEvaluations(false)}
+                onClick={handleGenerate}
                 startIcon={<LocalLibraryRounded />}
                 variant="contained"
               >
                 {isSubmitting ? 'Submitting…' : 'Generate evaluation'}
               </Button>
-              <Button
-                disabled={!analysisCompleted || selectedModes.length === 0 || !hasExistingSelection || isSubmitting}
-                onClick={() => void requestEvaluations(true)}
-                startIcon={<CachedRounded />}
-                variant="outlined"
-              >
-                Refresh selected
-              </Button>
+              <Tooltip arrow title={hasExistingSelection ? 'Re-run cached evaluations.' : 'No cached evaluation to refresh.'}>
+                <span>
+                  <Button
+                    aria-label="Refresh selected evaluations"
+                    disabled={!analysisCompleted || selectedModes.length === 0 || !hasExistingSelection || isSubmitting}
+                    onClick={handleRefresh}
+                    startIcon={<CachedRounded />}
+                    variant="outlined"
+                  >
+                    Refresh selected
+                  </Button>
+                </span>
+              </Tooltip>
             </Stack>
           </Stack>
 
           <Box className="analysis-evaluation-mode-grid" data-testid="evaluation-mode-selector">
-            {modeDefinitions.map((definition) => {
-              const Icon = definition.icon
-              const isSelected = selectedModes.includes(definition.mode)
-              return (
-                <Button
-                  color="inherit"
-                  key={definition.mode}
-                  onClick={() => setSelectedModes((current) => toggleMode(current, definition.mode))}
-                  sx={{
-                    justifyContent: 'flex-start',
-                    borderRadius: '20px',
-                    border: `1px solid ${isSelected ? definition.tone : 'rgba(24, 34, 48, 0.08)'}`,
-                    bgcolor: isSelected ? `${definition.tone}12` : 'rgba(248, 250, 252, 0.72)',
-                    color: isSelected ? definition.tone : 'text.primary',
-                    px: 2,
-                    py: 1.5,
-                  }}
-                  variant="text"
-                >
-                  <Stack direction="row" spacing={1.25} sx={{ textAlign: 'left' }}>
-                    <Icon fontSize="small" />
-                    <Box>
-                      <Typography variant="subtitle2">{definition.label}</Typography>
-                      <Typography color="inherit" sx={{ opacity: 0.78 }} variant="body2">
-                        {definition.description}
-                      </Typography>
-                    </Box>
-                  </Stack>
-                </Button>
-              )
-            })}
+            {modeDefinitions.map((definition) => (
+              <ModeChipButton
+                key={definition.mode}
+                definition={definition}
+                isSelected={selectedModes.includes(definition.mode)}
+                onToggle={handleToggleMode}
+              />
+            ))}
           </Box>
 
           {!analysisCompleted ? (
@@ -411,7 +461,7 @@ function AnalysisEvaluationSection({
         <Paper className="dashboard-card" elevation={0}>
           <Box className="analysis-empty-state">
             <Typography color="text.secondary" variant="body2">
-              Select one or more evaluation modes to compare how the same analysis result reads across different domains.
+              Select one or more modes to compare how the same analysis reads across different domains.
             </Typography>
           </Box>
         </Paper>
@@ -432,10 +482,21 @@ function AnalysisEvaluationSection({
       {selectedRecords.length > 1 ? (
         <Paper className="dashboard-card" elevation={0}>
           <Stack spacing={1.5}>
-            <Typography variant="h6">Comparison snapshot</Typography>
-            <Typography color="text.secondary" variant="body2">
-              Side-by-side scores make it easier to spot where the same content is strong for one objective but weak for another.
-            </Typography>
+            <Stack alignItems="center" direction="row" spacing={0.75}>
+              <Typography variant="h6">Comparison snapshot</Typography>
+              <Tooltip
+                arrow
+                placement="top"
+                title="Side-by-side fit-for-purpose scores. Helpful when one piece of content lands well for one objective but weakly for another."
+              >
+                <InfoOutlinedIcon
+                  aria-label="Comparison snapshot help"
+                  fontSize="small"
+                  sx={{ color: 'text.secondary', cursor: 'help' }}
+                  tabIndex={0}
+                />
+              </Tooltip>
+            </Stack>
             <Box className="analysis-evaluation-summary-row">
               {selectedRecords.map((record) => (
                 <Box className="analysis-evaluation-summary-card" key={`summary-${record.mode}`}>
@@ -460,16 +521,56 @@ function AnalysisEvaluationSection({
   )
 }
 
-function EvaluationModeCard({
+const ModeChipButton = memo(function ModeChipButton({
+  definition,
+  isSelected,
+  onToggle,
+}: {
+  definition: (typeof modeDefinitions)[number]
+  isSelected: boolean
+  onToggle: (mode: AnalysisEvaluationMode) => void
+}) {
+  const Icon = definition.icon
+  return (
+    <Tooltip arrow placement="top" title={definition.description}>
+      <Button
+        aria-label={`${definition.label} evaluation mode`}
+        aria-pressed={isSelected}
+        color="inherit"
+        onClick={() => onToggle(definition.mode)}
+        sx={{
+          justifyContent: 'flex-start',
+          borderRadius: '20px',
+          border: `1px solid ${isSelected ? definition.tone : 'rgba(24, 34, 48, 0.08)'}`,
+          bgcolor: isSelected ? `${definition.tone}12` : 'rgba(248, 250, 252, 0.72)',
+          color: isSelected ? definition.tone : 'text.primary',
+          px: 2,
+          py: 1.25,
+        }}
+        variant="text"
+      >
+        <Stack alignItems="center" direction="row" spacing={1.25}>
+          <Icon fontSize="small" />
+          <Typography variant="subtitle2">{definition.label}</Typography>
+        </Stack>
+      </Button>
+    </Tooltip>
+  )
+})
+
+const EvaluationModeCard = memo(function EvaluationModeCard({
   mode,
   record,
 }: {
   mode: AnalysisEvaluationMode
   record: AnalysisEvaluationRecord | null
 }) {
-  const definition = modeDefinitions.find((item) => item.mode === mode) ?? modeDefinitions[0]
+  const definition = useMemo(
+    () => modeDefinitions.find((item) => item.mode === mode) ?? modeDefinitions[0],
+    [mode],
+  )
   const evaluation = record?.evaluation_json ?? null
-  const domainSections = evaluation ? buildDomainSections(evaluation) : []
+  const domainSections = useMemo(() => (evaluation ? buildDomainSections(evaluation) : []), [evaluation])
   const progress = record?.metadata_json?.progress ?? null
   const isLoading = record?.status === 'queued' || record?.status === 'processing'
   const loadingStage =
@@ -480,13 +581,23 @@ function EvaluationModeCard({
   return (
     <Paper className="dashboard-card analysis-evaluation-card" data-testid={`evaluation-card-${mode}`} elevation={0}>
       <Stack spacing={2}>
-        <Stack alignItems={{ md: 'center' }} direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={1.5}>
-          <Box>
+        <Stack
+          alignItems={{ md: 'center' }}
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          spacing={1.5}
+        >
+          <Stack alignItems="center" direction="row" spacing={0.75}>
             <Typography variant="h6">{definition.label}</Typography>
-            <Typography color="text.secondary" variant="body2">
-              {definition.description}
-            </Typography>
-          </Box>
+            <Tooltip arrow placement="top" title={definition.description}>
+              <InfoOutlinedIcon
+                aria-label={`${definition.label} mode description`}
+                fontSize="small"
+                sx={{ color: 'text.secondary', cursor: 'help' }}
+                tabIndex={0}
+              />
+            </Tooltip>
+          </Stack>
           <Chip
             className={`analysis-status-chip is-${record?.status ?? 'idle'}`}
             label={(record?.status ?? 'idle').toUpperCase()}
@@ -507,7 +618,7 @@ function EvaluationModeCard({
         {!record ? (
           <Box className="analysis-empty-state">
             <Typography color="text.secondary" variant="body2">
-              No evaluation has been requested for this mode yet.
+              No evaluation requested yet.
             </Typography>
           </Box>
         ) : null}
@@ -541,12 +652,12 @@ function EvaluationModeCard({
 
             <Stack spacing={1.25}>
               <Typography variant="subtitle2">Strengths</Typography>
-              <ListBlock items={evaluation.strengths} emptyLabel="No strengths were returned." />
+              <ListBlock items={evaluation.strengths} emptyLabel="No strengths returned." />
             </Stack>
 
             <Stack spacing={1.25}>
               <Typography variant="subtitle2">Weaknesses</Typography>
-              <ListBlock items={evaluation.weaknesses} emptyLabel="No weaknesses were returned." />
+              <ListBlock items={evaluation.weaknesses} emptyLabel="No weaknesses returned." />
             </Stack>
 
             {domainSections.map((section) => (
@@ -567,7 +678,7 @@ function EvaluationModeCard({
               {evaluation.risks.length === 0 ? (
                 <Box className="analysis-empty-state">
                   <Typography color="text.secondary" variant="body2">
-                    No explicit risk entries were returned.
+                    No explicit risk entries.
                   </Typography>
                 </Box>
               ) : (
@@ -598,12 +709,15 @@ function EvaluationModeCard({
               {evaluation.recommendations.length === 0 ? (
                 <Box className="analysis-empty-state">
                   <Typography color="text.secondary" variant="body2">
-                    No recommendations were returned.
+                    No recommendations returned.
                   </Typography>
                 </Box>
               ) : (
                 evaluation.recommendations.map((recommendation) => (
-                  <Box className="analysis-evaluation-item" key={`${recommendation.action}-${recommendation.timestamp_start ?? 'na'}`}>
+                  <Box
+                    className="analysis-evaluation-item"
+                    key={`${recommendation.action}-${recommendation.timestamp_start ?? 'na'}`}
+                  >
                     <Stack alignItems="center" direction="row" justifyContent="space-between" spacing={1}>
                       <Typography variant="subtitle2">{recommendation.action}</Typography>
                       <Chip
@@ -635,16 +749,21 @@ function EvaluationModeCard({
               </Box>
             </Stack>
 
-            <Typography color="text.secondary" variant="caption">
-              Model: {evaluation.model_metadata.provider} / {evaluation.model_metadata.model} · tokens in{' '}
-              {evaluation.model_metadata.tokens_in} · tokens out {evaluation.model_metadata.tokens_out}
-            </Typography>
+            <Tooltip
+              arrow
+              placement="top"
+              title={`Tokens in ${evaluation.model_metadata.tokens_in} · tokens out ${evaluation.model_metadata.tokens_out}`}
+            >
+              <Typography color="text.secondary" sx={{ cursor: 'help' }} variant="caption">
+                Model: {evaluation.model_metadata.provider} / {evaluation.model_metadata.model}
+              </Typography>
+            </Tooltip>
           </Stack>
         ) : null}
       </Stack>
     </Paper>
   )
-}
+})
 
 function EvaluationLoadingState({
   mode,
@@ -672,7 +791,12 @@ function EvaluationLoadingState({
       </Stack>
       <Box className="analysis-evaluation-score-grid">
         {Array.from({ length: 5 }).map((_, index) => (
-          <Skeleton key={`${mode}-score-${index}`} height={88} sx={{ borderRadius: '18px', transform: 'none' }} variant="rounded" />
+          <Skeleton
+            key={`${mode}-score-${index}`}
+            height={88}
+            sx={{ borderRadius: '18px', transform: 'none' }}
+            variant="rounded"
+          />
         ))}
       </Box>
       <Stack spacing={1.25}>
@@ -787,7 +911,9 @@ function buildDomainSections(result: AnalysisEvaluationResult): Array<
       maybeTextSection('Pacing feedback', result.pacing_feedback),
       maybeTextSection('Retention feedback', result.retention_feedback),
       maybeTextSection('Accessibility feedback', result.accessibility_feedback),
-    ].filter(Boolean) as Array<{ kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }>
+    ].filter(Boolean) as Array<
+      { kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }
+    >
   }
 
   if (result.mode === 'defence') {
@@ -797,7 +923,9 @@ function buildDomainSections(result: AnalysisEvaluationResult): Array<
       maybeListSection('Ambiguity risks', result.ambiguity_risks || []),
       maybeListSection('Overload risks', result.overload_risks || []),
       maybeListSection('Safety or misuse flags', result.safety_or_misuse_flags || []),
-    ].filter(Boolean) as Array<{ kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }>
+    ].filter(Boolean) as Array<
+      { kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }
+    >
   }
 
   if (result.mode === 'marketing') {
@@ -807,7 +935,9 @@ function buildDomainSections(result: AnalysisEvaluationResult): Array<
       maybeTextSection('Value proposition', result.value_prop_assessment),
       maybeListSection('Conversion friction points', result.conversion_friction_points || []),
       maybeTextSection('Brand alignment', result.brand_alignment_feedback),
-    ].filter(Boolean) as Array<{ kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }>
+    ].filter(Boolean) as Array<
+      { kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }
+    >
   }
 
   return [
@@ -816,7 +946,9 @@ function buildDomainSections(result: AnalysisEvaluationResult): Array<
     maybeTextSection('Retention assessment', result.retention_assessment),
     maybeTextSection('Platform fit', result.platform_fit_feedback),
     maybeTextSection('Shareability', result.shareability_feedback),
-  ].filter(Boolean) as Array<{ kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }>
+  ].filter(Boolean) as Array<
+    { kind: 'text'; label: string; text: string } | { kind: 'list'; label: string; items: string[] }
+  >
 }
 
 function maybeTextSection(label: string, text?: string | null) {
@@ -871,4 +1003,4 @@ function formatDuration(milliseconds: number) {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 }
 
-export default AnalysisEvaluationSection
+export default memo(AnalysisEvaluationSection)

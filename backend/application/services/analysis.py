@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -21,6 +21,7 @@ from backend.core.logging import (
     sha256_prefix,
     summarize_storage_reference,
 )
+from backend.core.metrics import metrics
 from backend.db.models import AssetType, InferenceJob, JobStatus, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
 from backend.schemas.analysis import (
@@ -34,8 +35,11 @@ from backend.schemas.analysis import (
     AnalysisJobListResponse,
     AnalysisJobProgressRead,
     AnalysisJobRead,
+    AnalysisJobResultDetailResponse,
+    AnalysisJobStatusLiteResponse,
     AnalysisJobStatusResponse,
     AnalysisResultRead,
+    AnalysisResultSummaryRead,
     AnalysisUploadCompleteResponse,
     AnalysisUploadCreateRequest,
     AnalysisUploadCreateResponse,
@@ -56,6 +60,9 @@ from backend.services.preprocess import PreprocessService
 from backend.services.storage import ObjectStorageService, UploadedObject
 
 logger = get_logger(__name__)
+ASYNC_TEXT_PROMOTION_MIN_BYTES = int(
+    getattr(settings, "analysis_async_promotion_min_bytes", 2 * 1024 * 1024)
+)
 
 
 class AnalysisApplicationService:
@@ -107,6 +114,32 @@ class AnalysisApplicationService:
             metadata_json=payload.metadata_json,
             status="accepted",
         )
+        metrics.increment(
+            "analysis_client_events_total",
+            labels={
+                "event": payload.event_name,
+                "media_type": payload.media_type,
+            },
+        )
+        if payload.event_name == "analysis_stream_connected":
+            metrics.increment("analysis_stream_connected_total")
+        elif payload.event_name == "analysis_stream_fallback":
+            mode_label = str(payload.metadata_json.get("mode") or "unknown")
+            metrics.increment(
+                "analysis_stream_fallback_total",
+                labels={"mode": mode_label},
+            )
+            reconnect_count_raw = payload.metadata_json.get("reconnect_count")
+            try:
+                reconnect_count = int(reconnect_count_raw)
+            except (TypeError, ValueError):
+                reconnect_count = None
+            if reconnect_count is not None and reconnect_count >= 0:
+                metrics.observe(
+                    "analysis_stream_reconnect_count",
+                    float(reconnect_count),
+                    labels={"mode": mode_label},
+                )
 
     async def list_assets(
         self,
@@ -119,18 +152,9 @@ class AnalysisApplicationService:
         assets = await self.uploads.list_analysis_artifacts(
             project_id=project_id,
             created_by_user_id=user_id,
+            media_type=media_type,
             limit=limit,
         )
-        if media_type is not None:
-            assets = [
-                asset
-                for asset in assets
-                if str(
-                    (asset.metadata_json or {}).get("media_type")
-                    or self._detect_media_type(asset.mime_type)
-                )
-                == media_type
-            ]
         return AnalysisAssetListResponse(items=[self._build_asset_read(asset) for asset in assets])
 
     async def list_jobs(
@@ -144,40 +168,18 @@ class AnalysisApplicationService:
         audience_contains: str | None,
         limit: int,
     ) -> AnalysisJobListResponse:
-        fetch_limit = (
-            max(limit * 10, 50) if goal_template or channel or audience_contains else limit
-        )
         jobs = await self.predictions.inference.list_analysis_jobs_for_user(
             project_id=project_id,
             created_by_user_id=user_id,
             media_type=media_type,
-            limit=fetch_limit,
+            goal_template=goal_template,
+            channel=channel,
+            audience_contains=audience_contains,
+            limit=limit,
         )
-        selected_jobs: list[tuple[InferenceJob, UUID | None]] = []
         asset_ids: list[UUID] = []
-        audience_query = (
-            audience_contains.strip().lower() if audience_contains is not None else None
-        )
-
+        selected_jobs: list[tuple[InferenceJob, UUID | None]] = []
         for job in jobs:
-            campaign_context = (job.request_payload or {}).get("campaign_context") or {}
-            normalized_goal_template = normalize_goal_template(
-                campaign_context.get("goal_template")
-            )
-            normalized_channel = normalize_analysis_channel(campaign_context.get("channel"))
-            normalized_audience_segment = (
-                str(campaign_context.get("audience_segment") or "").strip() or None
-            )
-            if goal_template is not None and normalized_goal_template != goal_template:
-                continue
-            if channel is not None and normalized_channel != channel:
-                continue
-            if audience_query is not None and (
-                not audience_query
-                or audience_query not in str(normalized_audience_segment or "").lower()
-            ):
-                continue
-
             asset_id: UUID | None = None
             raw_asset_id = (job.runtime_params or {}).get("asset_id")
             if raw_asset_id:
@@ -188,9 +190,6 @@ class AnalysisApplicationService:
                     asset_id = None
 
             selected_jobs.append((job, asset_id))
-            if len(selected_jobs) >= limit:
-                break
-
         assets_by_id = await self.uploads.get_analysis_artifacts_by_ids(
             artifact_ids=asset_ids,
             project_id=project_id,
@@ -538,11 +537,15 @@ class AnalysisApplicationService:
         upload_etag: str | None,
         upload_source: str,
     ) -> AnalysisUploadCompleteResponse:
+        should_defer_promotion = (
+            preprocess_result.modality == "text"
+            and int(resolved_file_size_bytes or 0) >= ASYNC_TEXT_PROMOTION_MIN_BYTES
+        )
         raw_text: str | None = None
         extracted_metadata = {
             **preprocess_result.extracted_metadata,
         }
-        if preprocess_result.modality == "text":
+        if preprocess_result.modality == "text" and not should_defer_promotion:
             raw_text, text_metadata = await self._extract_asset_text(
                 asset=asset,
                 resolved_mime_type=resolved_mime_type or asset.mime_type,
@@ -557,6 +560,9 @@ class AnalysisApplicationService:
             "extracted_metadata": extracted_metadata,
             "modality": preprocess_result.modality,
         }
+        if should_defer_promotion:
+            merged_metadata["promotion_status"] = "queued"
+            merged_metadata["promotion_queued_at"] = datetime.now(UTC).isoformat()
         await self.uploads.mark_artifact_stored(
             asset,
             creative_version_id=None,
@@ -565,6 +571,23 @@ class AnalysisApplicationService:
             sha256=sha256,
             metadata_json=merged_metadata,
         )
+        if should_defer_promotion:
+            upload_session.creative_version_id = None
+            await self.uploads.mark_stored(upload_session, asset.id)
+            await self.session.commit()
+            await self.session.refresh(upload_session)
+            await self.session.refresh(asset)
+            from backend.tasks import dispatch_analysis_asset_promotion
+
+            await dispatch_analysis_asset_promotion(
+                upload_session_id=upload_session.id,
+                asset_id=asset.id,
+                user_id=user_id,
+            )
+            return AnalysisUploadCompleteResponse(
+                upload_session=self._build_upload_session_read(upload_session),
+                asset=self._build_asset_read(asset),
+            )
         try:
             creative_version = await self.creatives.create_version_from_artifact(
                 asset, raw_text=raw_text
@@ -621,6 +644,53 @@ class AnalysisApplicationService:
             upload_session=self._build_upload_session_read(upload_session),
             asset=self._build_asset_read(asset),
         )
+
+    async def promote_pending_asset(
+        self,
+        *,
+        upload_session_id: UUID,
+        asset_id: UUID,
+        user_id: UUID,
+    ) -> None:
+        upload_session = await self.uploads.get_upload_session(upload_session_id)
+        asset = await self.uploads.get_stored_artifact(asset_id)
+        if upload_session is None or asset is None:
+            return
+        if upload_session.created_by_user_id != user_id or asset.created_by_user_id != user_id:
+            return
+        if asset.creative_version_id is not None:
+            return
+        metadata_json = dict(asset.metadata_json or {})
+        metadata_json["promotion_status"] = "processing"
+        await self.uploads.mark_artifact_stored(
+            asset,
+            creative_version_id=None,
+            mime_type=asset.mime_type,
+            file_size_bytes=asset.file_size_bytes,
+            sha256=asset.sha256,
+            metadata_json=metadata_json,
+        )
+        await self.session.commit()
+        raw_text, text_metadata = await self._extract_asset_text(
+            asset=asset, resolved_mime_type=asset.mime_type
+        )
+        metadata_json = dict(asset.metadata_json or {})
+        metadata_json.setdefault("extracted_metadata", {})
+        metadata_json["extracted_metadata"].update(text_metadata)
+        creative_version = await self.creatives.create_version_from_artifact(
+            asset, raw_text=raw_text
+        )
+        await self.uploads.mark_artifact_stored(
+            asset,
+            creative_version_id=creative_version.id,
+            mime_type=asset.mime_type,
+            file_size_bytes=asset.file_size_bytes,
+            sha256=asset.sha256,
+            metadata_json={**metadata_json, "promotion_status": "completed"},
+        )
+        upload_session.creative_version_id = creative_version.id
+        await self.uploads.mark_stored(upload_session, asset.id)
+        await self.session.commit()
 
     async def _extract_asset_text(
         self,
@@ -716,7 +786,7 @@ class AnalysisApplicationService:
         goal_template: str | None,
         channel: str | None,
         audience_segment: str | None,
-    ) -> AnalysisJobStatusResponse:
+    ) -> AnalysisJobStatusLiteResponse:
         asset = await self.uploads.get_stored_artifact(asset_id)
         if asset is None or asset.created_by_user_id != user_id or asset.project_id != project_id:
             raise NotFoundAppError("Asset not found.")
@@ -754,7 +824,10 @@ class AnalysisApplicationService:
                     "media_type": media_type,
                     "analysis_progress": {
                         "stage": "queued",
-                        "stage_label": "Upload finalized. The analysis job is queued and waiting for worker capacity.",
+                        "stage_label": (
+                            "Upload finalized. The analysis job is queued and waiting for worker "
+                            "capacity."
+                        ),
                         "diagnostics": {},
                         "is_partial": False,
                     },
@@ -775,17 +848,36 @@ class AnalysisApplicationService:
             has_objective=normalized_objective is not None,
             status=job.status.value,
         )
-        return await self._build_job_status_response(job)
+        return await self._build_job_status_lite_response(job)
 
     async def get_analysis_job(
         self,
         *,
         user_id: UUID,
         job_id: UUID,
-    ) -> AnalysisJobStatusResponse:
+    ) -> AnalysisJobStatusLiteResponse:
         job = await self.predictions.get_job(job_id)
         self._ensure_job_ownership(job, user_id=user_id)
-        return await self._build_job_status_response(job)
+        return await self._build_job_status_lite_response(job)
+
+    async def get_analysis_job_detail(
+        self,
+        *,
+        user_id: UUID,
+        job_id: UUID,
+    ) -> AnalysisJobResultDetailResponse:
+        job = await self.predictions.get_job(job_id)
+        self._ensure_job_ownership(job, user_id=user_id)
+        result = self._build_result(job)
+        if result is None:
+            raise ConflictAppError("Analysis results are not ready yet.")
+        asset = await self._load_job_asset(job)
+        return AnalysisJobResultDetailResponse(
+            job=self._build_job_read(job),
+            asset=self._build_asset_read(asset) if asset is not None else None,
+            progress=self._build_job_progress(job),
+            result=result,
+        )
 
     async def get_analysis_result(
         self,
@@ -817,6 +909,24 @@ class AnalysisApplicationService:
             storage_key=asset.storage_key,
         )
         return self._build_asset_read(asset), body, content_type or asset.mime_type
+
+    async def get_asset_download_url(
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+        asset_id: UUID,
+    ) -> tuple[AnalysisAssetRead, str]:
+        asset = await self.uploads.get_stored_artifact(asset_id)
+        if asset is None or asset.created_by_user_id != user_id or asset.project_id != project_id:
+            raise NotFoundAppError("Asset not found.")
+        download_url = self._storage().generate_presigned_get_url(
+            bucket_name=asset.bucket_name,
+            storage_key=asset.storage_key,
+        )
+        if not download_url:
+            raise ValidationAppError("Could not generate download URL.")
+        return self._build_asset_read(asset), download_url
 
     def _validate_payload(self, payload: AnalysisUploadCreateRequest) -> None:
         if payload.size_bytes > settings.upload_max_size_bytes:
@@ -892,6 +1002,19 @@ class AnalysisApplicationService:
             result=self._build_result(job),
             asset=self._build_asset_read(asset) if asset is not None else None,
             progress=self._build_job_progress(job),
+        )
+
+    async def _build_job_status_lite_response(
+        self, job: InferenceJob
+    ) -> AnalysisJobStatusLiteResponse:
+        asset = await self._load_job_asset(job)
+        result = self._build_result(job)
+        return AnalysisJobStatusLiteResponse(
+            job=self._build_job_read(job),
+            asset=self._build_asset_read(asset) if asset is not None else None,
+            progress=self._build_job_progress(job),
+            has_result=result is not None,
+            result_summary=self._build_result_summary(result),
         )
 
     async def _load_job_asset(self, job: InferenceJob):
@@ -997,24 +1120,72 @@ class AnalysisApplicationService:
 
     def _build_result(self, job: InferenceJob) -> AnalysisResultRead | None:
         record = job.__dict__.get("analysis_result_record")
-        if record is None:
+        if record is not None:
+            return AnalysisResultRead(
+                job_id=job.id,
+                summary_json=record.summary_json or {},
+                metrics_json=record.metrics_json or [],
+                timeline_json=record.timeline_json or [],
+                segments_json=record.segments_json or [],
+                visualizations_json=record.visualizations_json
+                or {
+                    "visualization_mode": "frame_grid_fallback",
+                    "heatmap_frames": [],
+                    "high_attention_intervals": [],
+                    "low_attention_intervals": [],
+                },
+                recommendations_json=record.recommendations_json or [],
+                created_at=record.created_at,
+            )
+
+        runtime_params = job.runtime_params if isinstance(job.runtime_params, dict) else {}
+        partial_result = runtime_params.get("analysis_partial_result")
+        if not isinstance(partial_result, dict):
             return None
 
-        return AnalysisResultRead(
-            job_id=job.id,
-            summary_json=record.summary_json or {},
-            metrics_json=record.metrics_json or [],
-            timeline_json=record.timeline_json or [],
-            segments_json=record.segments_json or [],
-            visualizations_json=record.visualizations_json
-            or {
-                "visualization_mode": "frame_grid_fallback",
-                "heatmap_frames": [],
-                "high_attention_intervals": [],
-                "low_attention_intervals": [],
-            },
-            recommendations_json=record.recommendations_json or [],
-            created_at=record.created_at,
+        created_at = job.created_at
+        created_at_raw = partial_result.get("created_at")
+        if isinstance(created_at_raw, str):
+            try:
+                created_at = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
+            except ValueError:
+                created_at = job.created_at
+
+        try:
+            return AnalysisResultRead(
+                job_id=UUID(str(partial_result.get("job_id") or job.id)),
+                summary_json=partial_result.get("summary_json") or {},
+                metrics_json=partial_result.get("metrics_json") or [],
+                timeline_json=partial_result.get("timeline_json") or [],
+                segments_json=partial_result.get("segments_json") or [],
+                visualizations_json=partial_result.get("visualizations_json")
+                or {
+                    "visualization_mode": "frame_grid_fallback",
+                    "heatmap_frames": [],
+                    "high_attention_intervals": [],
+                    "low_attention_intervals": [],
+                },
+                recommendations_json=partial_result.get("recommendations_json") or [],
+                created_at=created_at,
+            )
+        except Exception:
+            return None
+
+    def _build_result_summary(
+        self, result: AnalysisResultRead | None
+    ) -> AnalysisResultSummaryRead | None:
+        if result is None:
+            return None
+        summary = result.summary_json
+        return AnalysisResultSummaryRead(
+            modality=summary.modality,
+            overall_attention_score=summary.overall_attention_score,
+            hook_score_first_3_seconds=summary.hook_score_first_3_seconds,
+            sustained_engagement_score=summary.sustained_engagement_score,
+            memory_proxy_score=summary.memory_proxy_score,
+            cognitive_load_proxy=summary.cognitive_load_proxy,
+            confidence=summary.confidence,
+            completeness=summary.completeness,
         )
 
     def _coerce_non_negative_int(self, value: Any) -> int | None:

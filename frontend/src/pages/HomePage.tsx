@@ -1,7 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import type { AuthSession } from '../lib/session'
-import './home-page.css'
-
 type AuthField = {
   id: string
   name: string
@@ -121,23 +119,10 @@ const signUpFields: AuthField[] = [
   },
 ]
 
-const proofPoints = [
-  { value: '5', label: 'Decision scores before launch' },
-  { value: '1 feed', label: 'Creative review system for teams' },
-  { value: '<24h', label: 'From upload to recommendation loop' },
-]
-
-const workflow = [
-  'Upload a video, image, audio, or text asset',
-  'Promote winning artifacts into creative versions',
-  'Generate attention, emotion, memory, load, and conversion-proxy outputs',
-  'Move straight into compare and optimize without another tool handoff',
-]
-
-const dashboardNotes = [
-  'Current account health, launch status, and job queue in one view',
-  'Simple left navigation focused on Home, Account, and Profile',
-  'Built to feel closer to a clean Mantis-style admin shell than a marketing splash page',
+const productHighlights = [
+  'Score creative on attention, memory, and conversion proxies before launch',
+  'Compare versions side-by-side and pick a winner with confidence',
+  'Generate prioritized recommendations your marketing team can ship',
 ]
 
 function HomePage({ onSignedIn }: HomePageProps) {
@@ -158,6 +143,7 @@ function HomePage({ onSignedIn }: HomePageProps) {
   const [mfaChallenge, setMfaChallenge] = useState<MfaChallengeState | null>(null)
   const [mfaCode, setMfaCode] = useState('')
   const [mfaRecoveryCode, setMfaRecoveryCode] = useState('')
+  const [showHowItWorks, setShowHowItWorks] = useState(false)
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -396,50 +382,29 @@ function HomePage({ onSignedIn }: HomePageProps) {
           </div>
 
           <div className="landing-page__copy">
-            <span className="landing-page__eyebrow">Neuromarketing SaaS for pre-launch decisions</span>
-            <h1>Predict what creative will do before spend starts moving.</h1>
-            <p>
-              Wrap multimodal brain-response modeling behind a product teams can actually use:
-              upload assets, score attention and memory, compare versions, and turn outputs into
-              creative direction your marketing org can ship on.
-            </p>
+            <span className="landing-page__eyebrow">Predict creative performance before spend starts</span>
+            <h1>Decide which creative to ship — backed by attention, memory, and conversion signals.</h1>
+            <ul className="landing-page__highlights">
+              {productHighlights.map((highlight) => (
+                <li key={highlight}>{highlight}</li>
+              ))}
+            </ul>
+            <button
+              aria-expanded={showHowItWorks}
+              className="landing-page__more-toggle"
+              onClick={() => setShowHowItWorks((current) => !current)}
+              type="button"
+            >
+              {showHowItWorks ? 'Hide how it works' : 'How it works'}
+            </button>
+            {showHowItWorks ? (
+              <ol className="landing-page__how-it-works">
+                <li>Upload a video, image, audio, or text creative.</li>
+                <li>Run multimodal scoring with a single click.</li>
+                <li>Open compare to rank versions and export recommendations.</li>
+              </ol>
+            ) : null}
           </div>
-
-          <div className="landing-page__proof-grid" aria-label="Product proof points">
-            {proofPoints.map((item) => (
-              <article className="proof-card" key={item.label}>
-                <strong>{item.value}</strong>
-                <span>{item.label}</span>
-              </article>
-            ))}
-          </div>
-
-          <section className="signal-board">
-            <div className="signal-board__header">
-              <span className="signal-board__eyebrow">Platform arc</span>
-              <h2>One system from upload to recommendation.</h2>
-            </div>
-
-            <div className="signal-board__grid">
-              <article className="signal-card signal-card--lead">
-                <span className="signal-card__label">Core workflow</span>
-                <ol className="signal-list signal-list--ordered">
-                  {workflow.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ol>
-              </article>
-
-              <article className="signal-card">
-                <span className="signal-card__label">Dashboard direction</span>
-                <ul className="signal-list">
-                  {dashboardNotes.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </article>
-            </div>
-          </section>
         </section>
 
         <aside className="landing-page__auth-column">
@@ -510,7 +475,7 @@ function HomePage({ onSignedIn }: HomePageProps) {
                 <div className="codepen-auth__overlay">
                   <div className="codepen-auth__overlay-panel codepen-auth__overlay-left">
                     <h1>Already have an account?</h1>
-                    <p>Login to access your dashboard and experience the power of the web.</p>
+                    <p>Sign in to open your workspace.</p>
                     <button
                       className="codepen-auth__ghost-button"
                       onClick={() => setIsSignUpActive(false)}
@@ -521,8 +486,8 @@ function HomePage({ onSignedIn }: HomePageProps) {
                   </div>
 
                   <div className="codepen-auth__overlay-panel codepen-auth__overlay-right">
-                    <h1>Don&apos;t have an account?</h1>
-                    <p>Create an account and let&apos;s begin a new journey.</p>
+                    <h1>New to NeuroMarketer?</h1>
+                    <p>Create an account and start scoring creative in minutes.</p>
                     <button
                       className="codepen-auth__ghost-button"
                       onClick={() => setIsSignUpActive(true)}

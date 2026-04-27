@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
+from backend.api.dependencies import AuthenticatedSessionContext, require_authenticated_session
 from backend.application.services.account_admin import AccountAdminApplicationService
 from backend.application.services.auth_service import AuthApplicationService
 from backend.db.session import get_db
@@ -41,7 +41,7 @@ router = APIRouter(prefix="/account", tags=["account"])
 @router.get("/control-center", response_model=AccountControlCenterRead)
 async def get_account_control_center(
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountControlCenterRead:
     return await AccountAdminApplicationService(db).get_control_center(
         organization_id=auth.organization.id,
@@ -52,7 +52,7 @@ async def get_account_control_center(
 @router.get("/security/overview", response_model=AccountSecurityOverviewRead)
 async def get_account_security_overview(
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountSecurityOverviewRead:
     return await AuthApplicationService(db).get_security_overview(
         organization_id=auth.organization.id,
@@ -65,7 +65,7 @@ async def get_account_security_overview(
 async def create_api_key(
     payload: ApiKeyCreateRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> ApiKeyCreateResponse:
     return await AccountAdminApplicationService(db).create_api_key(
         organization_id=auth.organization.id,
@@ -78,7 +78,7 @@ async def create_api_key(
 async def revoke_api_key(
     api_key_id: UUID,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountApiKeyRead:
     return await AccountAdminApplicationService(db).revoke_api_key(
         organization_id=auth.organization.id,
@@ -91,7 +91,7 @@ async def revoke_api_key(
 async def rotate_api_key(
     api_key_id: UUID,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> ApiKeyRotateResponse:
     return await AccountAdminApplicationService(db).rotate_api_key(
         organization_id=auth.organization.id,
@@ -104,7 +104,7 @@ async def rotate_api_key(
 async def create_webhook(
     payload: WebhookCreateRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> WebhookSecretResponse:
     return await AccountAdminApplicationService(db).create_webhook(
         organization_id=auth.organization.id,
@@ -118,7 +118,7 @@ async def update_webhook(
     webhook_id: UUID,
     payload: WebhookUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountWebhookRead:
     return await AccountAdminApplicationService(db).update_webhook(
         organization_id=auth.organization.id,
@@ -132,7 +132,7 @@ async def update_webhook(
 async def rotate_webhook_secret(
     webhook_id: UUID,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> WebhookSecretResponse:
     return await AccountAdminApplicationService(db).rotate_webhook_secret(
         organization_id=auth.organization.id,
@@ -146,7 +146,7 @@ async def update_member_role(
     membership_id: UUID,
     payload: MemberRoleUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountMemberRead:
     return await AccountAdminApplicationService(db).update_member_role(
         organization_id=auth.organization.id,
@@ -162,7 +162,7 @@ async def update_member_role(
 async def create_workspace_invite(
     payload: AccountInviteCreateRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountInviteCreateResponse:
     return await AuthApplicationService(db).create_invite(
         organization_id=auth.organization.id,
@@ -175,7 +175,7 @@ async def create_workspace_invite(
 async def revoke_workspace_invite(
     invite_id: UUID,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountInviteRead:
     return await AuthApplicationService(db).revoke_invite(
         organization_id=auth.organization.id,
@@ -188,7 +188,7 @@ async def revoke_workspace_invite(
 async def revoke_account_session(
     session_id: UUID,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountUserSessionRead:
     return await AuthApplicationService(db).revoke_session(
         organization_id=auth.organization.id,
@@ -202,7 +202,7 @@ async def revoke_account_session(
 )
 async def start_mfa_setup(
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountMfaSetupStartResponse:
     return await AuthApplicationService(db).start_mfa_setup(
         organization_id=auth.organization.id,
@@ -215,7 +215,7 @@ async def start_mfa_setup(
 async def confirm_mfa_setup(
     payload: AccountMfaConfirmRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountMfaRecoveryCodesResponse:
     return await AuthApplicationService(db).confirm_mfa_setup(
         organization_id=auth.organization.id,
@@ -228,7 +228,7 @@ async def confirm_mfa_setup(
 async def disable_mfa(
     payload: AccountMfaDisableRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountMfaStatusRead:
     return await AuthApplicationService(db).disable_mfa(
         organization_id=auth.organization.id,
@@ -241,7 +241,7 @@ async def disable_mfa(
 async def regenerate_mfa_recovery_codes(
     payload: AccountMfaDisableRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountMfaRecoveryCodesResponse:
     return await AuthApplicationService(db).regenerate_mfa_recovery_codes(
         organization_id=auth.organization.id,
@@ -254,7 +254,7 @@ async def regenerate_mfa_recovery_codes(
 async def upsert_sso_config(
     payload: AccountSsoConfigUpsertRequest,
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> AccountSsoConfigRead:
     return await AuthApplicationService(db).upsert_sso_config(
         organization_id=auth.organization.id,

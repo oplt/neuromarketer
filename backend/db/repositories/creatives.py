@@ -40,6 +40,12 @@ class CreativeRepository:
         return result.scalar_one_or_none()
 
     async def next_version_number(self, creative_id: UUID) -> int:
+        # Lock parent Creative row to serialize concurrent version inserts for
+        # the same creative. Aggregate over child rows is not lockable on its
+        # own; locking the parent gives an atomic gate per creative_id.
+        await self.session.execute(
+            select(Creative.id).where(Creative.id == creative_id).with_for_update()
+        )
         result = await self.session.execute(
             select(func.max(CreativeVersion.version_number)).where(
                 CreativeVersion.creative_id == creative_id

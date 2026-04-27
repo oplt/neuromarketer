@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from backend.schemas.base import APIBaseSchema
 from backend.services.analysis_goal_taxonomy import AnalysisChannel, GoalTemplate
 
 MediaType = Literal["video", "audio", "text"]
@@ -56,7 +57,7 @@ class AnalysisGoalPresetsResponse(BaseModel):
     suggestions: list[AnalysisGoalSuggestionRead] = Field(default_factory=list)
 
 
-class AnalysisClientEventRequest(BaseModel):
+class AnalysisClientEventRequest(APIBaseSchema):
     event_name: Literal[
         "upload_started",
         "upload_completed",
@@ -82,7 +83,7 @@ class AnalysisClientEventRequest(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
-class AnalysisComparisonCreateRequest(BaseModel):
+class AnalysisComparisonCreateRequest(APIBaseSchema):
     name: str | None = Field(default=None, max_length=255)
     analysis_job_ids: list[UUID] = Field(min_length=2, max_length=5)
     baseline_job_id: UUID | None = None
@@ -131,7 +132,7 @@ class AnalysisUploadSessionRead(BaseModel):
     created_at: datetime
 
 
-class AnalysisUploadCreateRequest(BaseModel):
+class AnalysisUploadCreateRequest(APIBaseSchema):
     media_type: MediaType
     original_filename: str = Field(min_length=1, max_length=512)
     mime_type: str = Field(min_length=1, max_length=120)
@@ -145,7 +146,7 @@ class AnalysisUploadCreateResponse(BaseModel):
     upload_headers: dict[str, str] = Field(default_factory=dict)
 
 
-class AnalysisUploadCompleteRequest(BaseModel):
+class AnalysisUploadCompleteRequest(APIBaseSchema):
     upload_token: str = Field(min_length=1, max_length=120)
 
 
@@ -154,7 +155,7 @@ class AnalysisUploadCompleteResponse(BaseModel):
     asset: AnalysisAssetRead
 
 
-class AnalysisJobCreateRequest(BaseModel):
+class AnalysisJobCreateRequest(APIBaseSchema):
     asset_id: UUID
     objective: str | None = Field(default=None, max_length=2_000)
     goal_template: GoalTemplate | None = None
@@ -247,9 +248,9 @@ class AnalysisHeatmapFrameRead(BaseModel):
 
 class AnalysisVisualizationsPayload(BaseModel):
     visualization_mode: str
-    heatmap_frames: list[AnalysisHeatmapFrameRead] = Field(default_factory=list)
-    high_attention_intervals: list[AnalysisIntervalRead] = Field(default_factory=list)
-    low_attention_intervals: list[AnalysisIntervalRead] = Field(default_factory=list)
+    heatmap_frames: list[AnalysisHeatmapFrameRead] = Field(default_factory=list, max_length=300)
+    high_attention_intervals: list[AnalysisIntervalRead] = Field(default_factory=list, max_length=200)
+    low_attention_intervals: list[AnalysisIntervalRead] = Field(default_factory=list, max_length=200)
 
 
 class AnalysisRecommendationRead(BaseModel):
@@ -263,11 +264,13 @@ class AnalysisRecommendationRead(BaseModel):
 class AnalysisResultRead(BaseModel):
     job_id: UUID
     summary_json: AnalysisSummaryPayload
-    metrics_json: list[AnalysisMetricRowRead]
-    timeline_json: list[AnalysisTimelinePointRead]
-    segments_json: list[AnalysisSegmentRowRead]
+    metrics_json: list[AnalysisMetricRowRead] = Field(default_factory=list, max_length=100)
+    timeline_json: list[AnalysisTimelinePointRead] = Field(default_factory=list, max_length=2_000)
+    segments_json: list[AnalysisSegmentRowRead] = Field(default_factory=list, max_length=500)
     visualizations_json: AnalysisVisualizationsPayload
-    recommendations_json: list[AnalysisRecommendationRead]
+    recommendations_json: list[AnalysisRecommendationRead] = Field(
+        default_factory=list, max_length=50
+    )
     created_at: datetime
 
 
@@ -290,6 +293,32 @@ class AnalysisJobStatusResponse(BaseModel):
     job: AnalysisJobRead
     result: AnalysisResultRead | None = None
     asset: AnalysisAssetRead | None = None
+    progress: AnalysisJobProgressRead | None = None
+
+
+class AnalysisResultSummaryRead(BaseModel):
+    modality: MediaType
+    overall_attention_score: float
+    hook_score_first_3_seconds: float
+    sustained_engagement_score: float
+    memory_proxy_score: float
+    cognitive_load_proxy: float
+    confidence: float | None = None
+    completeness: float | None = None
+
+
+class AnalysisJobStatusLiteResponse(BaseModel):
+    job: AnalysisJobRead
+    asset: AnalysisAssetRead | None = None
+    progress: AnalysisJobProgressRead | None = None
+    has_result: bool = False
+    result_summary: AnalysisResultSummaryRead | None = None
+
+
+class AnalysisJobResultDetailResponse(BaseModel):
+    job: AnalysisJobRead
+    asset: AnalysisAssetRead | None = None
+    result: AnalysisResultRead
     progress: AnalysisJobProgressRead | None = None
 
 
@@ -328,6 +357,10 @@ class AnalysisComparisonRead(BaseModel):
     summary_json: dict[str, Any] = Field(default_factory=dict)
     comparison_context: dict[str, Any] = Field(default_factory=dict)
     items: list[AnalysisComparisonItemRead] = Field(default_factory=list)
+
+
+class AnalysisComparisonDetailResponse(BaseModel):
+    comparison: AnalysisComparisonRead
 
 
 class AnalysisBenchmarkMetricRead(BaseModel):
@@ -394,7 +427,7 @@ class AnalysisCalibrationSummaryRead(BaseModel):
 class AnalysisCalibrationResponse(BaseModel):
     job_id: UUID
     summary: AnalysisCalibrationSummaryRead
-    observations: list[AnalysisCalibrationObservationRead] = Field(default_factory=list)
+    observations: list[AnalysisCalibrationObservationRead] = Field(default_factory=list, max_length=500)
 
 
 class AnalysisCalibrationTrendPointRead(BaseModel):
@@ -426,9 +459,13 @@ class AnalysisCalibrationMetricSummaryRead(BaseModel):
     drift_status: Literal["aligned", "over_predicting", "under_predicting", "insufficient_data"] = (
         "insufficient_data"
     )
-    trend_points: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
-    over_predictions: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
-    under_predictions: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list)
+    trend_points: list[AnalysisCalibrationTrendPointRead] = Field(default_factory=list, max_length=500)
+    over_predictions: list[AnalysisCalibrationTrendPointRead] = Field(
+        default_factory=list, max_length=500
+    )
+    under_predictions: list[AnalysisCalibrationTrendPointRead] = Field(
+        default_factory=list, max_length=500
+    )
 
 
 class AnalysisOutcomeImportHistoryRead(BaseModel):
@@ -466,8 +503,8 @@ class AnalysisCalibrationDashboardSummaryRead(BaseModel):
 class AnalysisCalibrationDashboardResponse(BaseModel):
     project_id: UUID
     summary: AnalysisCalibrationDashboardSummaryRead
-    metrics: list[AnalysisCalibrationMetricSummaryRead] = Field(default_factory=list)
-    recent_imports: list[AnalysisOutcomeImportHistoryRead] = Field(default_factory=list)
+    metrics: list[AnalysisCalibrationMetricSummaryRead] = Field(default_factory=list, max_length=100)
+    recent_imports: list[AnalysisOutcomeImportHistoryRead] = Field(default_factory=list, max_length=100)
 
 
 class AnalysisOutcomeImportResponse(BaseModel):
@@ -509,13 +546,15 @@ class AnalysisGeneratedVariantRead(BaseModel):
     variant_type: AnalysisGeneratedVariantType
     title: str
     summary: str
-    focus_recommendations: list[str] = Field(default_factory=list)
+    focus_recommendations: list[str] = Field(default_factory=list, max_length=20)
     source_suggestion_title: str | None = None
     source_suggestion_type: str | None = None
-    sections: list[AnalysisGeneratedVariantSectionRead] = Field(default_factory=list)
+    sections: list[AnalysisGeneratedVariantSectionRead] = Field(default_factory=list, max_length=20)
     expected_score_lift_json: dict[str, float] = Field(default_factory=dict)
     projected_summary_json: AnalysisSummaryPayload
-    compare_metrics: list[AnalysisGeneratedVariantMetricDeltaRead] = Field(default_factory=list)
+    compare_metrics: list[AnalysisGeneratedVariantMetricDeltaRead] = Field(
+        default_factory=list, max_length=20
+    )
     compare_summary: str
     created_at: datetime
     updated_at: datetime
@@ -523,10 +562,10 @@ class AnalysisGeneratedVariantRead(BaseModel):
 
 class AnalysisGeneratedVariantListResponse(BaseModel):
     job_id: UUID
-    items: list[AnalysisGeneratedVariantRead] = Field(default_factory=list)
+    items: list[AnalysisGeneratedVariantRead] = Field(default_factory=list, max_length=50)
 
 
-class AnalysisGeneratedVariantCreateRequest(BaseModel):
+class AnalysisGeneratedVariantCreateRequest(APIBaseSchema):
     variant_types: list[AnalysisGeneratedVariantType] = Field(
         default_factory=lambda: [
             "hook_rewrite",

@@ -1,14 +1,11 @@
-import { Suspense, lazy } from 'react'
+import { Suspense, lazy, memo, useCallback, useMemo } from 'react'
 import AutoGraphRounded from '@mui/icons-material/AutoGraphRounded'
 import BoltRounded from '@mui/icons-material/BoltRounded'
-import CheckCircleRounded from '@mui/icons-material/CheckCircleRounded'
 import CompareArrowsRounded from '@mui/icons-material/CompareArrowsRounded'
 import HomeRounded from '@mui/icons-material/HomeRounded'
 import LogoutRounded from '@mui/icons-material/LogoutRounded'
 import ManageAccountsRounded from '@mui/icons-material/ManageAccountsRounded'
-import PersonRounded from '@mui/icons-material/PersonRounded'
 import PlayCircleRounded from '@mui/icons-material/PlayCircleRounded'
-import PsychologyRounded from '@mui/icons-material/PsychologyRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import {
   Avatar,
@@ -17,6 +14,7 @@ import {
   Chip,
   LinearProgress,
   List,
+  ListItem,
   ListItemButton,
   ListItemIcon,
   ListItemText,
@@ -25,9 +23,8 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
+import HelpTooltip from '../components/layout/HelpTooltip'
 import type { AuthSession, DashboardTab } from '../lib/session'
-import './dashboard-page.css'
-
 const AccountPage = lazy(() => import('./AccountPage'))
 const AnalysisPage = lazy(() => import('./AnalysisPage'))
 const ComparePage = lazy(() => import('./ComparePage'))
@@ -41,18 +38,23 @@ type DashboardPageProps = {
   onSignOut: () => void
 }
 
-const menuItems = [
-  { id: 'home', label: 'Home', icon: HomeRounded },
-  { id: 'account', label: 'Account', icon: ManageAccountsRounded },
-  { id: 'profile', label: 'Profile', icon: PersonRounded },
-  { id: 'analysis', label: 'Analysis', icon: AutoGraphRounded },
-  { id: 'compare', label: 'Compare', icon: CompareArrowsRounded },
-  { id: 'settings', label: 'Settings', icon: SettingsRounded },
-] as const satisfies ReadonlyArray<{
+type MenuItem = {
   id: DashboardTab
   label: string
   icon: typeof HomeRounded
-}>
+  hidden?: boolean
+}
+
+const primaryMenuItems: ReadonlyArray<MenuItem> = [
+  { id: 'home', label: 'Home', icon: HomeRounded },
+  { id: 'analysis', label: 'Analyze', icon: AutoGraphRounded },
+  { id: 'compare', label: 'Compare', icon: CompareArrowsRounded },
+]
+
+const footerMenuItems: ReadonlyArray<MenuItem> = [
+  { id: 'account', label: 'Account', icon: ManageAccountsRounded },
+  { id: 'settings', label: 'Settings', icon: SettingsRounded },
+]
 
 const homeMetrics = [
   {
@@ -74,18 +76,18 @@ const homeMetrics = [
   {
     label: 'Optimization opportunities',
     value: '11',
-    detail: '4 CTA issues worth resolving this week',
+    detail: '4 CTA issues to resolve this week',
     progress: 61,
     icon: BoltRounded,
     tone: '#f97316',
   },
-]
+] as const
 
 const queueItems = [
   { name: 'Spring launch hero cut', status: 'Running', eta: '09 min', score: 'Attention +12%' },
   { name: 'Retention email narrative', status: 'Queued', eta: '14 min', score: 'Memory watch' },
   { name: 'Social proof static set', status: 'Ready', eta: 'Ready', score: 'Compare candidates' },
-]
+] as const
 
 function DashboardPage({
   session,
@@ -93,6 +95,35 @@ function DashboardPage({
   onTabChange,
   onSignOut,
 }: DashboardPageProps) {
+  const visiblePrimaryItems = useMemo(() => primaryMenuItems.filter((item) => !item.hidden), [])
+  const visibleFooterItems = useMemo(() => footerMenuItems.filter((item) => !item.hidden), [])
+
+  const handleTabChange = useCallback(
+    (tab: DashboardTab) => {
+      onTabChange(tab)
+    },
+    [onTabChange],
+  )
+
+  const renderActivePage = useCallback(() => {
+    if (activeTab === 'account') {
+      return <AccountPage session={session} />
+    }
+    if (activeTab === 'profile') {
+      return <ProfilePage session={session} />
+    }
+    if (activeTab === 'analysis') {
+      return <AnalysisPage onOpenCompareWorkspace={() => handleTabChange('compare')} session={session} />
+    }
+    if (activeTab === 'compare') {
+      return <ComparePage session={session} />
+    }
+    if (activeTab === 'settings') {
+      return <SettingsPage session={session} />
+    }
+    return <HomeTab onTabChange={handleTabChange} />
+  }, [activeTab, session, handleTabChange])
+
   return (
     <Box className="dashboard-page">
       <Box className="dashboard-page__glow dashboard-page__glow--left" />
@@ -100,64 +131,85 @@ function DashboardPage({
 
       <Box className="dashboard-shell">
         <Paper className="dashboard-sidebar" elevation={0}>
-          <Stack spacing={3}>
-            <Stack spacing={1.5}>
+          <Stack spacing={0} sx={{ flex: 1, height: '100%', minHeight: 0, gap: 0 }}>
+            <Box className="dashboard-sidebar__brand" component="header">
               <Chip
                 className="dashboard-chip"
                 color="primary"
                 label="NeuroMarketer"
-                sx={{ alignSelf: 'flex-start', borderRadius: 999 }}
+                size="small"
+                sx={{ borderRadius: 999, fontWeight: 700 }}
               />
-              <Box>
-                <Typography variant="h5">Creative Ops Console</Typography>
-                <Typography color="text.secondary" variant="body2">
-                  A lighter dashboard shell inspired by the Mantis layout language.
-                </Typography>
-              </Box>
-            </Stack>
+              <Typography className="dashboard-sidebar__brand-title" component="p" variant="subtitle2">
+                Creative Ops Console
+              </Typography>
+            </Box>
 
-            <List disablePadding sx={{ display: 'grid', gap: 1 }}>
-              {menuItems.map((item) => {
-                const Icon = item.icon
-                const isActive = activeTab === item.id
-                return (
-                  <ListItemButton
-                    className={`dashboard-nav-item ${isActive ? 'is-active' : ''}`}
-                    key={item.id}
-                    onClick={() => onTabChange(item.id)}
-                  >
-                    <ListItemIcon>
-                      <Icon color={isActive ? 'primary' : 'inherit'} />
-                    </ListItemIcon>
-                    <ListItemText primary={item.label} />
-                  </ListItemButton>
-                )
-              })}
-            </List>
-
-            <Paper className="dashboard-sidebar__panel" elevation={0}>
-              <Stack spacing={1.5}>
-                <Typography variant="overline">Workspace focus</Typography>
-                <Typography variant="h6">Pre-launch decision quality</Typography>
-                <Typography color="text.secondary" variant="body2">
-                  Keep attention, memory, and conversion-proxy outputs visible without exposing raw
-                  model internals.
-                </Typography>
-                <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-                  <Chip icon={<PsychologyRounded />} label="Interpretability" size="small" />
-                  <Chip icon={<CheckCircleRounded />} label="Reliable async jobs" size="small" />
-                </Stack>
-              </Stack>
-            </Paper>
-
-            <Button
-              color="inherit"
-              onClick={onSignOut}
-              startIcon={<LogoutRounded />}
-              sx={{ alignSelf: 'flex-start', mt: 'auto' }}
+            <Box
+              aria-label="Primary navigation"
+              component="nav"
+              sx={{ flex: '1 1 auto', minHeight: 0, display: 'flex', overflow: 'hidden' }}
             >
-              Sign out
-            </Button>
+              <List
+                className="dashboard-sidebar__nav-scroll dashboard-sidebar__nav-list"
+                disablePadding
+                sx={{ py: 0.5, flex: 1, minHeight: 0, width: '100%', overflow: 'hidden' }}
+              >
+                {visiblePrimaryItems.map((item) => {
+                  const Icon = item.icon
+                  const isActive = activeTab === item.id
+                  return (
+                    <ListItem disablePadding key={item.id}>
+                      <ListItemButton
+                        aria-current={isActive ? 'page' : undefined}
+                        className={`dashboard-nav-item ${isActive ? 'is-active' : ''}`}
+                        onClick={() => handleTabChange(item.id)}
+                      >
+                        <ListItemIcon>
+                          <Icon color={isActive ? 'primary' : 'inherit'} fontSize="medium" />
+                        </ListItemIcon>
+                        <ListItemText primary={item.label} primaryTypographyProps={{ variant: 'body1' }} />
+                      </ListItemButton>
+                    </ListItem>
+                  )
+                })}
+              </List>
+            </Box>
+
+            <Box className="dashboard-sidebar__footer">
+              <Box aria-label="Account and session" component="nav">
+                <List className="dashboard-sidebar__nav-list" disablePadding sx={{ pb: 0.5 }}>
+                  {visibleFooterItems.map((item) => {
+                    const Icon = item.icon
+                    const isActive = activeTab === item.id
+                    return (
+                      <ListItem disablePadding key={item.id}>
+                        <ListItemButton
+                          aria-current={isActive ? 'page' : undefined}
+                          className={`dashboard-nav-item ${isActive ? 'is-active' : ''}`}
+                          onClick={() => handleTabChange(item.id)}
+                        >
+                          <ListItemIcon>
+                            <Icon color={isActive ? 'primary' : 'inherit'} fontSize="medium" />
+                          </ListItemIcon>
+                          <ListItemText primary={item.label} primaryTypographyProps={{ variant: 'body1' }} />
+                        </ListItemButton>
+                      </ListItem>
+                    )
+                  })}
+                </List>
+              </Box>
+              <Button
+                className="dashboard-sidebar__sign-out"
+                color="inherit"
+                fullWidth
+                onClick={onSignOut}
+                startIcon={<LogoutRounded fontSize="medium" />}
+                sx={{ justifyContent: 'flex-start' }}
+              >
+                Sign out
+              </Button>
+            </Box>
           </Stack>
         </Paper>
 
@@ -170,11 +222,11 @@ function DashboardPage({
               spacing={2}
             >
               <Box>
-                <Typography variant="overline">Signed-in workspace</Typography>
-                <Typography variant="h4">{getDashboardTitle(activeTab)}</Typography>
-                <Typography color="text.secondary" variant="body2">
-                  {getDashboardSubtitle(activeTab)}
-                </Typography>
+                <Typography variant="overline">Workspace</Typography>
+                <Stack alignItems="center" direction="row" spacing={0.75}>
+                  <Typography variant="h4">{getDashboardTitle(activeTab)}</Typography>
+                  <HelpTooltip title={getDashboardTooltip(activeTab)} />
+                </Stack>
               </Box>
 
               <Stack alignItems="center" direction="row" spacing={1.5}>
@@ -191,16 +243,18 @@ function DashboardPage({
             </Stack>
           </Paper>
 
-          <Suspense fallback={<DashboardTabFallback tab={activeTab} />}>
-            {renderActivePage(activeTab, session, onTabChange)}
-          </Suspense>
+          <Suspense fallback={<DashboardTabFallback tab={activeTab} />}>{renderActivePage()}</Suspense>
         </Box>
       </Box>
     </Box>
   )
 }
 
-function HomeTab() {
+type HomeTabProps = {
+  onTabChange: (tab: DashboardTab) => void
+}
+
+function HomeTabBase({ onTabChange }: HomeTabProps) {
   return (
     <Stack spacing={3}>
       <Box className="dashboard-grid dashboard-grid--metrics">
@@ -223,6 +277,7 @@ function HomeTab() {
                 {metric.detail}
               </Typography>
               <LinearProgress
+                aria-label={`${metric.label} progress`}
                 sx={{
                   height: 8,
                   borderRadius: 999,
@@ -240,13 +295,8 @@ function HomeTab() {
       <Box className="dashboard-grid dashboard-grid--content">
         <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
           <Stack spacing={2.5}>
-            <Chip color="primary" label="Dashboard home" sx={{ alignSelf: 'flex-start' }} />
-            <Typography variant="h4">See creative testing activity at a glance.</Typography>
-            <Typography color="text.secondary" variant="body1">
-              This home tab is meant to feel like a compact admin workspace: current jobs, account
-              health, and the creative feedback loop are visible without forcing users through a
-              dense navigation tree.
-            </Typography>
+            <Chip color="primary" label="Workspace home" sx={{ alignSelf: 'flex-start' }} />
+            <Typography variant="h4">Creative testing at a glance.</Typography>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} useFlexGap flexWrap="wrap">
               <Chip label="Attention" />
               <Chip label="Emotion" />
@@ -254,12 +304,33 @@ function HomeTab() {
               <Chip label="Cognitive load" />
               <Chip label="Conversion proxy" />
             </Stack>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
+              <Button
+                onClick={() => onTabChange('analysis')}
+                size="medium"
+                startIcon={<AutoGraphRounded />}
+                variant="contained"
+              >
+                Run analysis
+              </Button>
+              <Button
+                onClick={() => onTabChange('compare')}
+                size="medium"
+                startIcon={<CompareArrowsRounded />}
+                variant="outlined"
+              >
+                Compare versions
+              </Button>
+            </Stack>
           </Stack>
         </Paper>
 
         <Paper className="dashboard-card" elevation={0}>
           <Stack spacing={2}>
-            <Typography variant="h6">Active queue</Typography>
+            <Stack alignItems="center" direction="row" spacing={0.5}>
+              <Typography variant="h6">Active queue</Typography>
+              <HelpTooltip title="Most recent prediction jobs and their progress." />
+            </Stack>
             <Stack spacing={1.5}>
               {queueItems.map((item) => (
                 <Box className="queue-row" key={item.name}>
@@ -289,6 +360,8 @@ function HomeTab() {
   )
 }
 
+const HomeTab = memo(HomeTabBase)
+
 function DashboardTabFallback({ tab }: { tab: DashboardTab }) {
   const title = getDashboardTitle(tab)
   return (
@@ -297,9 +370,6 @@ function DashboardTabFallback({ tab }: { tab: DashboardTab }) {
         <Stack spacing={2.5}>
           <Chip color="primary" label={`Loading ${title}`} sx={{ alignSelf: 'flex-start' }} />
           <Typography variant="h4">Preparing the {title.toLowerCase()} workspace.</Typography>
-          <Typography color="text.secondary" variant="body1">
-            This page is loaded only when needed so the main dashboard shell stays lighter.
-          </Typography>
           <Skeleton animation="wave" height={24} sx={{ borderRadius: 999, maxWidth: 280 }} variant="rounded" />
           <Skeleton animation="wave" height={18} sx={{ borderRadius: 999, maxWidth: 360 }} variant="rounded" />
         </Stack>
@@ -327,61 +397,22 @@ function DashboardTabFallback({ tab }: { tab: DashboardTab }) {
   )
 }
 
-function renderActivePage(tab: DashboardTab, session: AuthSession, onTabChange: (tab: DashboardTab) => void) {
-  if (tab === 'account') {
-    return <AccountPage session={session} />
-  }
-  if (tab === 'profile') {
-    return <ProfilePage session={session} />
-  }
-  if (tab === 'analysis') {
-    return <AnalysisPage onOpenCompareWorkspace={() => onTabChange('compare')} session={session} />
-  }
-  if (tab === 'compare') {
-    return <ComparePage session={session} />
-  }
-  if (tab === 'settings') {
-    return <SettingsPage session={session} />
-  }
-  return <HomeTab />
-}
-
 function getDashboardTitle(tab: DashboardTab): string {
-  if (tab === 'account') {
-    return 'Account'
-  }
-  if (tab === 'profile') {
-    return 'Profile'
-  }
-  if (tab === 'analysis') {
-    return 'Analysis'
-  }
-  if (tab === 'compare') {
-    return 'Compare'
-  }
-  if (tab === 'settings') {
-    return 'Settings'
-  }
+  if (tab === 'account') return 'Account'
+  if (tab === 'profile') return 'Profile'
+  if (tab === 'analysis') return 'Analyze'
+  if (tab === 'compare') return 'Compare'
+  if (tab === 'settings') return 'Settings'
   return 'Home'
 }
 
-function getDashboardSubtitle(tab: DashboardTab): string {
-  if (tab === 'account') {
-    return 'Workspace identity, capacity, and platform access posture.'
-  }
-  if (tab === 'profile') {
-    return 'Personal details and recent activity inside the workspace.'
-  }
-  if (tab === 'analysis') {
-    return 'Upload video, audio, or text assets and stage them for multimodal review.'
-  }
-  if (tab === 'compare') {
-    return 'Select completed analyses, rank likely winners, and revisit past comparison decisions.'
-  }
-  if (tab === 'settings') {
-    return 'Manage backend environment variables, persisted workspace settings, and restart-sensitive controls.'
-  }
-  return 'Creative prediction activity, queue health, and immediate operating context.'
+function getDashboardTooltip(tab: DashboardTab): string {
+  if (tab === 'account') return 'Workspace identity, access, and security controls.'
+  if (tab === 'profile') return 'Personal account details.'
+  if (tab === 'analysis') return 'Upload assets and run multimodal scoring.'
+  if (tab === 'compare') return 'Rank versions and revisit comparison decisions.'
+  if (tab === 'settings') return 'Workspace, model, and admin configuration.'
+  return 'Live queue health and recent prediction activity.'
 }
 
 export default DashboardPage

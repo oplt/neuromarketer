@@ -1,5 +1,7 @@
-import { Box, Paper, Stack, Typography } from '@mui/material'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import { Box, Paper, Stack, Tooltip, Typography } from '@mui/material'
 import { RadarChart } from '@mui/x-charts/RadarChart'
+import { memo, useMemo } from 'react'
 
 type MetricRow = {
   key: string
@@ -90,44 +92,60 @@ function resolveRadarMax(value: number, unit: string) {
   return Math.ceil(value / 25) * 25
 }
 
-export default function MetricsRadarCard({
+function MetricsRadarCard({
   title,
   description,
   series,
   emptyMessage = 'Radar visualization appears when at least three metrics are available.',
   testId,
 }: MetricsRadarCardProps) {
-  const radarMetrics = buildRadarMetrics(series)
+  const radarMetrics = useMemo(() => buildRadarMetrics(series), [series])
   const hasEnoughMetrics = radarMetrics.length >= 3
   const chartHeight = series.length > 1 ? 280 : 250
+
+  const chartSeries = useMemo(
+    () =>
+      series.map((item) => ({
+        label: series.length > 1 ? item.label : undefined,
+        data: radarMetrics.map(
+          (metric) => item.metrics.find((entry) => entry.key === metric.key)?.value ?? 0,
+        ),
+        fillArea: series.length === 1,
+      })),
+    [series, radarMetrics],
+  )
+
+  const chartRadar = useMemo(
+    () => ({
+      metrics: radarMetrics.map((metric) => ({
+        name: formatRadarAxisLabel(metric.label),
+        max: metric.max,
+      })),
+    }),
+    [radarMetrics],
+  )
 
   return (
     <Paper className="dashboard-card" data-testid={testId} elevation={0}>
       <Stack spacing={1.25}>
-        <Box>
+        <Stack alignItems="center" direction="row" spacing={0.75}>
           <Typography variant="h6">{title}</Typography>
-          <Typography color="text.secondary" sx={{ lineHeight: 1.45 }} variant="caption">
-            {description}
-          </Typography>
-        </Box>
+          <Tooltip arrow placement="top" title={description}>
+            <InfoOutlinedIcon
+              aria-label={`${title} description`}
+              fontSize="small"
+              sx={{ color: 'text.secondary', cursor: 'help' }}
+              tabIndex={0}
+            />
+          </Tooltip>
+        </Stack>
 
         {hasEnoughMetrics ? (
           <Box sx={{ height: chartHeight, width: '100%' }}>
             <RadarChart
               height={chartHeight}
-              series={series.map((item) => ({
-                label: series.length > 1 ? item.label : undefined,
-                data: radarMetrics.map(
-                  (metric) => item.metrics.find((entry) => entry.key === metric.key)?.value ?? 0,
-                ),
-                fillArea: series.length === 1,
-              }))}
-              radar={{
-                metrics: radarMetrics.map((metric) => ({
-                  name: formatRadarAxisLabel(metric.label),
-                  max: metric.max,
-                })),
-              }}
+              series={chartSeries}
+              radar={chartRadar}
               slotProps={{ tooltip: { trigger: series.length > 1 ? 'axis' : 'item' } }}
             />
           </Box>
@@ -142,3 +160,5 @@ export default function MetricsRadarCard({
     </Paper>
   )
 }
+
+export default memo(MetricsRadarCard)

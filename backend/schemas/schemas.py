@@ -5,15 +5,13 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, Field
+
+from backend.schemas.base import APIBaseSchema, ORMBaseSchema
 
 # ---------------------------------------------------------------------
 # Shared
 # ---------------------------------------------------------------------
-
-
-class ORMBaseSchema(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
 
 
 class HealthResponse(BaseModel):
@@ -23,13 +21,13 @@ class HealthResponse(BaseModel):
     dependencies: dict[str, str] = Field(default_factory=dict)
 
 
-class SignUpRequest(BaseModel):
+class SignUpRequest(APIBaseSchema):
     full_name: str = Field(min_length=1, max_length=255)
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
 
 
-class SignInRequest(BaseModel):
+class SignInRequest(APIBaseSchema):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=128)
 
@@ -99,7 +97,7 @@ class AuthResponse(BaseModel):
         )
 
 
-class MfaChallengeVerifyRequest(BaseModel):
+class MfaChallengeVerifyRequest(APIBaseSchema):
     challenge_token: str = Field(min_length=16)
     code: str | None = Field(default=None, min_length=6, max_length=16)
     recovery_code: str | None = Field(default=None, min_length=6, max_length=32)
@@ -113,7 +111,7 @@ class InvitePreviewRead(BaseModel):
     expires_at: datetime
 
 
-class AcceptInviteRequest(BaseModel):
+class AcceptInviteRequest(APIBaseSchema):
     invite_token: str = Field(min_length=16)
     full_name: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8, max_length=128)
@@ -124,7 +122,7 @@ class AcceptInviteRequest(BaseModel):
 # ---------------------------------------------------------------------
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(APIBaseSchema):
     organization_id: UUID
     created_by_user_id: UUID | None = None
     name: str = Field(min_length=1, max_length=255)
@@ -145,13 +143,13 @@ class ProjectRead(ORMBaseSchema):
     updated_at: datetime
 
 
-class CreativeCreate(BaseModel):
+class CreativeCreate(APIBaseSchema):
     project_id: UUID
     created_by_user_id: UUID | None = None
     name: str = Field(min_length=1, max_length=255)
     asset_type: Literal["image", "video", "audio", "text", "html", "url"]
-    tags: list[str] = Field(default_factory=list)
-    metadata_json: dict[str, Any] = Field(default_factory=dict)
+    tags: list[str] = Field(default_factory=list, max_length=50)
+    metadata_json: dict[str, Any] = Field(default_factory=dict, max_length=50)
 
 
 class CreativeRead(ORMBaseSchema):
@@ -167,7 +165,7 @@ class CreativeRead(ORMBaseSchema):
     updated_at: datetime
 
 
-class CreativeVersionCreate(BaseModel):
+class CreativeVersionCreate(APIBaseSchema):
     creative_id: UUID
     version_number: int = Field(ge=1)
     is_current: bool = True
@@ -178,7 +176,7 @@ class CreativeVersionCreate(BaseModel):
     sha256: str | None = None
 
     raw_text: str | None = None
-    source_url: HttpUrl | None = None
+    source_url: str | None = Field(default=None, max_length=2048)
     html_snapshot_uri: str | None = None
 
     duration_ms: int | None = Field(default=None, ge=0)
@@ -186,8 +184,8 @@ class CreativeVersionCreate(BaseModel):
     height_px: int | None = Field(default=None, ge=0)
     frame_rate: Decimal | None = None
 
-    extracted_metadata: dict[str, Any] = Field(default_factory=dict)
-    preprocessing_summary: dict[str, Any] = Field(default_factory=dict)
+    extracted_metadata: dict[str, Any] = Field(default_factory=dict, max_length=100)
+    preprocessing_summary: dict[str, Any] = Field(default_factory=dict, max_length=100)
 
 
 class CreativeVersionRead(ORMBaseSchema):
@@ -217,27 +215,27 @@ class CreativeVersionRead(ORMBaseSchema):
 # ---------------------------------------------------------------------
 
 
-class PredictRequest(BaseModel):
+class PredictRequest(APIBaseSchema):
     project_id: UUID
     creative_id: UUID
     creative_version_id: UUID
     created_by_user_id: UUID | None = None
-    audience_context: dict[str, Any] = Field(default_factory=dict)
-    campaign_context: dict[str, Any] = Field(default_factory=dict)
-    runtime_params: dict[str, Any] = Field(default_factory=dict)
+    audience_context: dict[str, Any] = Field(default_factory=dict, max_length=50)
+    campaign_context: dict[str, Any] = Field(default_factory=dict, max_length=50)
+    runtime_params: dict[str, Any] = Field(default_factory=dict, max_length=100)
 
 
-class CompareRequest(BaseModel):
+class CompareRequest(APIBaseSchema):
     project_id: UUID
     name: str
     creative_version_ids: list[UUID] = Field(min_length=2)
-    comparison_context: dict[str, Any] = Field(default_factory=dict)
+    comparison_context: dict[str, Any] = Field(default_factory=dict, max_length=50)
 
 
-class OptimizeRequest(BaseModel):
+class OptimizeRequest(APIBaseSchema):
     prediction_result_id: UUID
     max_suggestions: int = Field(default=5, ge=1, le=20)
-    constraints: dict[str, Any] = Field(default_factory=dict)
+    constraints: dict[str, Any] = Field(default_factory=dict, max_length=50)
 
 
 # ---------------------------------------------------------------------

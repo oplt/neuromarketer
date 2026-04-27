@@ -14,10 +14,27 @@ from sqlalchemy.ext.asyncio import (
 from backend.core.config import settings
 from backend.db.models import Base
 
+_STATEMENT_TIMEOUT_MS = getattr(settings, "database_statement_timeout_ms", 30_000)
+_IDLE_IN_TX_TIMEOUT_MS = getattr(
+    settings, "database_idle_in_transaction_timeout_ms", 60_000
+)
+
+_connect_args: dict = {
+    "server_settings": {
+        "statement_timeout": str(_STATEMENT_TIMEOUT_MS),
+        "idle_in_transaction_session_timeout": str(_IDLE_IN_TX_TIMEOUT_MS),
+    },
+}
+
 engine: AsyncEngine = create_async_engine(
     settings.database_url,
     echo=settings.database_echo,
     pool_pre_ping=settings.database_pool_pre_ping,
+    pool_size=getattr(settings, "database_pool_size", 20),
+    max_overflow=getattr(settings, "database_max_overflow", 10),
+    pool_timeout=getattr(settings, "database_pool_timeout", 30),
+    pool_recycle=getattr(settings, "database_pool_recycle", 1800),
+    connect_args=_connect_args,
 )
 
 AsyncSessionLocal = async_sessionmaker(

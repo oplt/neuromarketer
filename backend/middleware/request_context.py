@@ -97,6 +97,11 @@ class RequestContextMiddleware:
 
             if not failure_logged:
                 failure_context = consume_request_failure(scope)
+                if failure_context is not None:
+                    failure_context = dict(failure_context)
+                    for key in ("status", "status_code", "duration_ms", "method", "path"):
+                        failure_context.pop(key, None)
+
                 if failure_context is not None or status_code >= 500:
                     log_event(
                         logger,

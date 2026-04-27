@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,7 +45,7 @@ class RankedAnalysisComparisonCandidate:
 
 
 class AnalysisComparisonApplicationService:
-    SCORE_WEIGHTS: dict[str, float] = {
+    SCORE_WEIGHTS: ClassVar[dict[str, float]] = {
         "conversion_proxy": 0.30,
         "overall_attention": 0.22,
         "hook": 0.18,
@@ -188,10 +188,30 @@ class AnalysisComparisonApplicationService:
         project_id: UUID,
         analysis_job_ids: list[UUID],
     ) -> list[LoadedAnalysisComparisonCandidate]:
-        loaded: list[LoadedAnalysisComparisonCandidate] = []
+        jobs = await self.predictions.inference.list_analysis_jobs_by_ids(job_ids=analysis_job_ids)
+        jobs_by_id = {job.id: job for job in jobs}
+        missing_ids = [job_id for job_id in analysis_job_ids if job_id not in jobs_by_id]
+        if missing_ids:
+            raise NotFoundAppError("Analysis job not found.")
+        asset_ids: list[UUID] = []
+        ordered_jobs = [jobs_by_id[job_id] for job_id in analysis_job_ids]
+        for job in ordered_jobs:
+            raw_asset_id = (job.runtime_params or {}).get("asset_id")
+            if raw_asset_id is None:
+                continue
+            try:
+                asset_ids.append(UUID(str(raw_asset_id)))
+            except (TypeError, ValueError):
+                continue
+        assets_by_id = await self.analysis.uploads.get_analysis_artifacts_by_ids(
+            artifact_ids=asset_ids,
+            project_id=project_id,
+            created_by_user_id=user_id,
+        )
+
         creative_version_ids: set[UUID] = set()
-        for analysis_job_id in analysis_job_ids:
-            raw_job = await self.predictions.get_job(analysis_job_id)
+        loaded: list[LoadedAnalysisComparisonCandidate] = []
+        for raw_job in ordered_jobs:
             self.analysis._ensure_job_ownership(raw_job, user_id=user_id)
             if raw_job.project_id != project_id:
                 raise ValidationAppError(
@@ -207,11 +227,18 @@ class AnalysisComparisonApplicationService:
                     "Compare workspace currently requires distinct creative versions for each selected analysis."
                 )
 
-            snapshot = await self.analysis._build_job_status_response(raw_job)
-            if snapshot.result is None:
+            result = self.analysis._build_result(raw_job)
+            if result is None:
                 raise ConflictAppError(
                     "Each selected analysis must have completed results before comparison."
                 )
+            raw_asset_id = (raw_job.runtime_params or {}).get("asset_id")
+            asset = None
+            if raw_asset_id is not None:
+                try:
+                    asset = assets_by_id.get(UUID(str(raw_asset_id)))
+                except (TypeError, ValueError):
+                    asset = None
 
             creative_version_ids.add(raw_job.creative_version_id)
             loaded.append(
@@ -219,9 +246,9 @@ class AnalysisComparisonApplicationService:
                     analysis_job_id=raw_job.id,
                     creative_id=raw_job.creative_id,
                     creative_version_id=raw_job.creative_version_id,
-                    job=snapshot.job,
-                    asset=snapshot.asset,
-                    result=snapshot.result,
+                    job=self.analysis._build_job_read(raw_job),
+                    asset=self.analysis._build_asset_read(asset) if asset is not None else None,
+                    result=result,
                 )
             )
         return loaded

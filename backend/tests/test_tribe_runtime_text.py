@@ -6,7 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from backend.core.config import settings
-from backend.services.tribe_runtime import TribeRuntime, TribeRuntimeInput
+from backend.services.tribe_runtime import (
+    TribeRuntime,
+    TribeRuntimeInput,
+    _ensure_tribe_model_from_pretrained_strips_hub_kwargs,
+)
 
 
 class _ExplodingTextModel:
@@ -153,3 +157,22 @@ def test_prediction_error_mentions_text_model_for_gated_repo() -> None:
     assert "configured Hugging Face feature model is gated" in message
     assert runtime.text_feature_model_name in message
     assert "TRIBE_TEXT_FEATURE_MODEL_NAME" in message
+
+
+def test_tribe_from_pretrained_hub_token_patch_is_idempotent() -> None:
+    from tribev2.demo_utils import TribeModel
+
+    patch_attr = "_neuromarketer_strip_hf_token_kwargs_applied"
+    _ensure_tribe_model_from_pretrained_strips_hub_kwargs()
+    assert getattr(TribeModel, patch_attr, False) is True
+    _ensure_tribe_model_from_pretrained_strips_hub_kwargs()
+    assert getattr(TribeModel, patch_attr, False) is True
+
+
+def test_format_load_error_explains_token_kwarg_rejection() -> None:
+    runtime = TribeRuntime()
+    message = runtime._format_load_error(
+        TypeError("TribeModel.from_pretrained() got an unexpected keyword argument 'token'")
+    )
+    assert "token" in message.lower()
+    assert "HF_TOKEN" in message

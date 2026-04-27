@@ -1,6 +1,5 @@
 import { Suspense, lazy, startTransition, useState } from 'react'
 import { Box, Chip, CircularProgress, CssBaseline, Paper, Stack, ThemeProvider, Typography, createTheme } from '@mui/material'
-import './App.css'
 import {
   clearStoredSession,
   readStoredSession,

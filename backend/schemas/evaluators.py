@@ -5,7 +5,9 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
+
+from backend.schemas.base import StrictSchemaModel
 
 
 class EvaluationMode(str, enum.Enum):
@@ -32,10 +34,6 @@ class Priority(str, enum.Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
-
-
-class StrictSchemaModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
 
 
 class RiskItem(StrictSchemaModel):

@@ -6,6 +6,7 @@ import time
 import unittest
 from uuid import uuid4
 
+from backend.core import security as security_module
 from backend.core.exceptions import UnauthorizedAppError
 from backend.core.security import (
     MfaChallengeClaims,
@@ -26,13 +27,13 @@ from backend.core.security import (
 
 class TestSessionToken(unittest.TestCase):
     def _make_token(self, **overrides):
-        defaults = dict(
-            user_id=uuid4(),
-            organization_id=uuid4(),
-            email="test@example.com",
-            session_id=uuid4(),
-            expires_at_epoch=int(time.time()) + 3600,
-        )
+        defaults = {
+            "user_id": uuid4(),
+            "organization_id": uuid4(),
+            "email": "test@example.com",
+            "session_id": uuid4(),
+            "expires_at_epoch": int(time.time()) + 3600,
+        }
         defaults.update(overrides)
         return create_session_token(**defaults), defaults
 
@@ -156,6 +157,32 @@ class TestSecretSeal(unittest.TestCase):
         with self.assertRaises(UnauthorizedAppError):
             unseal_secret(sealed[:-4] + "XXXX")
 
+    def test_invalid_secret_raises(self):
+        with self.assertRaises(UnauthorizedAppError):
+            unseal_secret("not-a-valid-secret")
+
+    def test_legacy_sealed_values_still_readable(self):
+        value = "legacy-secret"
+        nonce = b"\x01" * 16
+        key = security_module._derive_secret_encryption_key()
+        plaintext = value.encode("utf-8")
+        keystream = security_module._derive_keystream(key, nonce, len(plaintext))
+        ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream, strict=False))
+        mac = security_module.hmac.new(
+            key,
+            nonce + ciphertext,
+            security_module.hashlib.sha256,
+        ).digest()
+        legacy = security_module._base64url_encode(nonce + ciphertext + mac)
+        self.assertEqual(unseal_secret(legacy), value)
+
+    def test_derived_key_is_cached(self):
+        security_module._derive_secret_encryption_key.cache_clear()
+        security_module._derive_secret_encryption_key()
+        security_module._derive_secret_encryption_key()
+        cache_info = security_module._derive_secret_encryption_key.cache_info()
+        self.assertGreaterEqual(cache_info.hits, 1)
+
 
 class TestProductionSecretGuard(unittest.TestCase):
     """Verify that the production secret guard in config fires correctly."""
@@ -174,7 +201,7 @@ class TestProductionSecretGuard(unittest.TestCase):
             "DATABASE_URL": "postgresql+asyncpg://x:y@localhost/z",
         }
         try:
-            with patch.dict(os.environ, env, clear=False), self.assertRaises(Exception):
+            with patch.dict(os.environ, env, clear=False), self.assertRaises(ValueError):
                 config_module.Settings(_env_file=None)
         finally:
             config_module.get_settings.cache_clear()

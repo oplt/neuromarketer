@@ -16,11 +16,11 @@ from backend.core.exceptions import ConflictAppError, NotFoundAppError, Validati
 from backend.db.models import (
     CalibrationObservation,
     InferenceJob,
-    JobStatus,
     OutcomeEvent,
     OutcomeMetricType,
     PredictionResult,
 )
+from backend.db.repositories import InferenceRepository
 from backend.schemas.analysis import (
     AnalysisBenchmarkMetricRead,
     AnalysisBenchmarkResponse,
@@ -62,6 +62,7 @@ LOWER_IS_BETTER_METRICS = {
 class AnalysisInsightsApplicationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.inference = InferenceRepository(session)
 
     async def get_benchmark(self, *, user_id: UUID, job_id: UUID) -> AnalysisBenchmarkResponse:
         job = await self._load_analysis_job(user_id=user_id, job_id=job_id)
@@ -139,11 +140,17 @@ class AnalysisInsightsApplicationService:
 
         sorted_metrics = sorted(benchmark.metrics, key=lambda item: item.percentile, reverse=True)
         top_strengths = [
-            f"{metric.label} ranks in the {self._ordinal_percentile(metric.percentile)} percentile for this cohort."
+            (
+                f"{metric.label} ranks in the "
+                f"{self._ordinal_percentile(metric.percentile)} percentile for this cohort."
+            )
             for metric in sorted_metrics[:3]
         ]
         top_risks = [
-            f"{metric.label} is lagging at the {self._ordinal_percentile(metric.percentile)} percentile."
+            (
+                f"{metric.label} is lagging at the "
+                f"{self._ordinal_percentile(metric.percentile)} percentile."
+            )
             for metric in sorted_metrics[-3:]
         ]
 
@@ -198,7 +205,8 @@ class AnalysisInsightsApplicationService:
         missing_columns = {"metric_type", "metric_value", "observed_at"} - set(reader.fieldnames)
         if missing_columns:
             raise ValidationAppError(
-                f"Outcome import CSV is missing required columns: {', '.join(sorted(missing_columns))}."
+                "Outcome import CSV is missing required columns: "
+                f"{', '.join(sorted(missing_columns))}."
             )
 
         imported_events = 0
@@ -345,84 +353,57 @@ class AnalysisInsightsApplicationService:
         self,
         job: InferenceJob,
     ) -> tuple[list[InferenceJob], str, str]:
-        result = await self.session.execute(
-            select(InferenceJob)
-            .options(selectinload(InferenceJob.analysis_result_record))
-            .where(
-                InferenceJob.project_id == job.project_id,
-                InferenceJob.status == JobStatus.SUCCEEDED,
-            )
-            .order_by(desc(InferenceJob.created_at))
-            .limit(250)
-        )
-        candidates = [
-            candidate
-            for candidate in result.scalars().all()
-            if candidate.analysis_result_record is not None
-            and (candidate.runtime_params or {}).get("analysis_surface") == "analysis_dashboard"
-        ]
-
         media_type = str((job.runtime_params or {}).get("media_type") or "")
         campaign_context = (job.request_payload or {}).get("campaign_context") or {}
         goal_template = str(campaign_context.get("goal_template") or "")
         channel = str(campaign_context.get("channel") or "")
-
         cohort_options = [
             (
-                [
-                    candidate
-                    for candidate in candidates
-                    if str((candidate.runtime_params or {}).get("media_type") or "") == media_type
-                    and str(
-                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
-                            "goal_template"
-                        )
-                        or ""
-                    )
-                    == goal_template
-                    and str(
-                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
-                            "channel"
-                        )
-                        or ""
-                    )
-                    == channel
-                ],
-                f"{media_type or 'analysis'} cohort for {goal_template or 'general'} / {channel or 'default'}",
+                media_type or None,
+                goal_template or None,
+                channel or None,
+                (
+                    f"{media_type or 'analysis'} cohort for "
+                    f"{goal_template or 'general'} / {channel or 'default'}"
+                ),
                 "exact_match",
             ),
             (
-                [
-                    candidate
-                    for candidate in candidates
-                    if str((candidate.runtime_params or {}).get("media_type") or "") == media_type
-                    and str(
-                        ((candidate.request_payload or {}).get("campaign_context") or {}).get(
-                            "goal_template"
-                        )
-                        or ""
-                    )
-                    == goal_template
-                ],
+                media_type or None,
+                goal_template or None,
+                None,
                 f"{media_type or 'analysis'} cohort for {goal_template or 'general'}",
                 "goal_template",
             ),
             (
-                [
-                    candidate
-                    for candidate in candidates
-                    if str((candidate.runtime_params or {}).get("media_type") or "") == media_type
-                ],
+                media_type or None,
+                None,
+                None,
                 f"{media_type or 'analysis'} cohort",
                 "media_type",
             ),
-            (candidates, "Project-wide analysis cohort", "project"),
+            (None, None, None, "Project-wide analysis cohort", "project"),
         ]
 
-        for cohort, label, fallback_level in cohort_options:
+        last_cohort: list[InferenceJob] = []
+        for (
+            current_media_type,
+            current_goal_template,
+            current_channel,
+            label,
+            fallback_level,
+        ) in cohort_options:
+            cohort = await self.inference.query_analysis_benchmark_candidates(
+                project_id=job.project_id,
+                media_type=current_media_type,
+                goal_template=current_goal_template,
+                channel=current_channel,
+                limit=250,
+            )
+            last_cohort = cohort
             if len(cohort) >= 5:
                 return cohort, label, fallback_level
-        return candidates or [job], "Project-wide analysis cohort", "project"
+        return last_cohort or [job], "Project-wide analysis cohort", "project"
 
     async def _resolve_prediction_target(
         self,
@@ -499,7 +480,7 @@ class AnalysisInsightsApplicationService:
         )
 
     def _ordinal_percentile(self, value: float) -> str:
-        rounded = max(1, min(99, int(round(value))))
+        rounded = max(1, min(99, round(value)))
         if 10 <= rounded % 100 <= 20:
             suffix = "th"
         else:

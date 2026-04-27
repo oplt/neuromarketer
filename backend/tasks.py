@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import socket
 import time
-import warnings
+from collections.abc import Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from urllib.parse import urlparse
 from uuid import UUID
 
-from celery.app.control import DuplicateNodenameWarning
-
+from backend.application.services.analysis import AnalysisApplicationService
 from backend.application.services.analysis_evaluations import AnalysisEvaluationApplicationService
 from backend.application.services.predictions import PredictionApplicationService
 from backend.celery_app import celery_app
@@ -37,9 +34,41 @@ from backend.services.analysis_postprocessor import AnalysisPostprocessor
 from backend.services.tribe_inference_service import TribeInferenceService
 
 logger = get_logger(__name__)
+
+
+def _celery_workers_listen_to_queue(queue_name: str, *, timeout: float = 0.75) -> bool:
+    """Return True if inspect reports at least one worker consuming ``queue_name``."""
+    name = (queue_name or "").strip()
+    if not name:
+        return False
+    try:
+        inspector = celery_app.control.inspect(timeout=timeout)
+        active = inspector.active_queues()
+    except Exception as exc:
+        log_event(
+            logger,
+            "celery_inspect_active_queues_failed",
+            level="debug",
+            queue=name,
+            error_type=exc.__class__.__name__,
+            error_message=str(exc),
+        )
+        return False
+    if not active or not isinstance(active, dict):
+        return False
+    for _worker, queues in active.items():
+        if not isinstance(queues, list):
+            continue
+        for entry in queues:
+            if isinstance(entry, dict) and entry.get("name") == name:
+                return True
+    return False
+
+
 _in_process_tasks: set[asyncio.Task[None]] = set()
 _in_process_llm_tasks: set[asyncio.Task[None]] = set()
 _in_process_prediction_scoring_tasks: set[asyncio.Task[None]] = set()
+_in_process_asset_promotion_tasks: set[asyncio.Task[None]] = set()
 
 # ThreadPoolExecutor for in-process fallback jobs.
 # Using a bounded pool (max_workers=4) with wait=True on shutdown so
@@ -167,6 +196,19 @@ async def _run_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> None:
             raise
 
 
+async def _run_analysis_asset_promotion(
+    upload_session_id: UUID,
+    asset_id: UUID,
+    user_id: UUID,
+) -> None:
+    async with AsyncSessionLocal() as db:
+        await AnalysisApplicationService(db).promote_pending_asset(
+            upload_session_id=upload_session_id,
+            asset_id=asset_id,
+            user_id=user_id,
+        )
+
+
 async def _run_prediction_job_in_process(job_id: UUID) -> None:
     start = time.perf_counter()
     try:
@@ -194,7 +236,7 @@ async def _run_prediction_job_in_process(job_id: UUID) -> None:
 
 
 def _run_prediction_job_in_process_entrypoint(job_id: UUID) -> None:
-    asyncio.run(_run_prediction_job_in_process(job_id))
+    _run_async(_run_prediction_job_in_process(job_id))
 
 
 async def _run_prediction_scoring_job_in_process(job_id: UUID) -> None:
@@ -224,7 +266,7 @@ async def _run_prediction_scoring_job_in_process(job_id: UUID) -> None:
 
 
 def _run_prediction_scoring_job_in_process_entrypoint(job_id: UUID) -> None:
-    asyncio.run(_run_prediction_scoring_job_in_process(job_id))
+    _run_async(_run_prediction_scoring_job_in_process(job_id))
 
 
 async def _run_llm_evaluation_job_in_process(job_id: UUID, mode: EvaluationMode) -> None:
@@ -255,7 +297,19 @@ async def _run_llm_evaluation_job_in_process(job_id: UUID, mode: EvaluationMode)
 
 
 def _run_llm_evaluation_job_in_process_entrypoint(job_id: UUID, mode: EvaluationMode) -> None:
-    asyncio.run(_run_llm_evaluation_job_in_process(job_id, mode))
+    _run_async(_run_llm_evaluation_job_in_process(job_id, mode))
+
+
+def _run_analysis_asset_promotion_in_process_entrypoint(
+    upload_session_id: UUID,
+    asset_id: UUID,
+    user_id: UUID,
+) -> None:
+    _run_async(_run_analysis_asset_promotion(upload_session_id, asset_id, user_id))
+
+
+def _run_async(coro: Coroutine[object, object, object]) -> None:
+    asyncio.run(coro)
 
 
 def _schedule_prediction_job_in_process(job_id: UUID) -> None:
@@ -312,118 +366,36 @@ def _schedule_prediction_scoring_job_in_process(job_id: UUID) -> None:
     task.add_done_callback(_in_process_prediction_scoring_tasks.discard)
 
 
-def _get_broker_socket_address(broker_url: str) -> tuple[str, int] | None:
-    parsed = urlparse(broker_url)
-    if not parsed.hostname:
-        return None
-    if parsed.port is not None:
-        return parsed.hostname, parsed.port
-
-    scheme = parsed.scheme.lower()
-    if scheme in {"redis", "rediss"}:
-        return parsed.hostname, 6379
-    if scheme in {"amqp", "amqps", "pyamqp"}:
-        return parsed.hostname, 5672
-    return None
-
-
-def _is_broker_reachable(timeout_seconds: float = 0.25) -> bool:
-    address = _get_broker_socket_address(celery_app.conf.broker_url)
-    if address is None:
-        return False
-
+def _schedule_asset_promotion_job_in_process(
+    upload_session_id: UUID,
+    asset_id: UUID,
+    user_id: UUID,
+) -> None:
     try:
-        with socket.create_connection(address, timeout=timeout_seconds):
-            return True
-    except OSError as exc:
-        log_exception(
-            logger,
-            "prediction_job_broker_unreachable",
-            exc,
-            level="warning",
-            broker_url=celery_app.conf.broker_url,
-            host=address[0],
-            port=address[1],
-            status="fallback",
-            dispatch_mode="in_process",
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        context = copy_context()
+        _fallback_executor.submit(
+            context.run,
+            _run_analysis_asset_promotion_in_process_entrypoint,
+            upload_session_id,
+            asset_id,
+            user_id,
         )
-        return False
+        return
 
-
-def _has_active_workers(queue_name: str | None = None, timeout_seconds: float = 0.4) -> bool:
-    if not _is_broker_reachable():
-        return False
-
-    try:
-        with warnings.catch_warnings(record=True) as probe_warnings:
-            warnings.simplefilter("always", DuplicateNodenameWarning)
-            inspector = celery_app.control.inspect(timeout=timeout_seconds)
-            responses = inspector.ping() or {}
-            active_queues = (inspector.active_queues() or {}) if responses and queue_name else {}
-    except Exception as exc:
-        log_exception(
-            logger,
-            "prediction_job_worker_probe_failed",
-            exc,
-            level="warning",
-            broker_url=celery_app.conf.broker_url,
-            status="fallback",
-            dispatch_mode="in_process",
-        )
-        return False
-
-    duplicate_node_warning = next(
-        (
-            str(warning.message)
-            for warning in probe_warnings
-            if issubclass(warning.category, DuplicateNodenameWarning)
-        ),
-        None,
+    task = loop.create_task(
+        _run_analysis_asset_promotion(upload_session_id, asset_id, user_id),
+        name=f"analysis-asset-promotion-{asset_id}",
     )
-    if duplicate_node_warning:
-        log_event(
-            logger,
-            "prediction_job_duplicate_worker_names",
-            level="warning",
-            broker_url=celery_app.conf.broker_url,
-            queue_name=queue_name,
-            warning_message=duplicate_node_warning,
-            status="degraded",
-        )
-
-    if responses:
-        if not queue_name:
-            return True
-
-        for worker_queues in active_queues.values():
-            for queue in worker_queues or []:
-                if queue.get("name") == queue_name:
-                    return True
-        log_event(
-            logger,
-            "prediction_job_queue_unserved",
-            level="warning",
-            broker_url=celery_app.conf.broker_url,
-            queue_name=queue_name,
-            status="fallback",
-            dispatch_mode="in_process",
-        )
-        return False
-
-    log_event(
-        logger,
-        "prediction_job_no_workers",
-        level="warning",
-        broker_url=celery_app.conf.broker_url,
-        status="fallback",
-        dispatch_mode="in_process",
-    )
-    return False
+    _in_process_asset_promotion_tasks.add(task)
+    task.add_done_callback(_in_process_asset_promotion_tasks.discard)
 
 
 async def dispatch_prediction_job(job_id: UUID) -> str:
     with bound_log_context(job_id=str(job_id)):
-        if not _has_active_workers(settings.celery_inference_queue):
+        allow_in_process = settings.enable_in_process_jobs
+        if allow_in_process and not _celery_workers_listen_to_queue(settings.celery_inference_queue):
             _schedule_prediction_job_in_process(job_id)
             log_event(
                 logger,
@@ -432,9 +404,9 @@ async def dispatch_prediction_job(job_id: UUID) -> str:
                 status="queued",
                 dispatch_mode="in_process",
                 queue_name=settings.celery_inference_queue,
+                reason="no_celery_workers_for_inference_queue",
             )
             return "in_process"
-
         try:
             process_prediction_job_task.apply_async(
                 args=[str(job_id)],
@@ -456,7 +428,12 @@ async def dispatch_prediction_job(job_id: UUID) -> str:
                 exc,
                 job_id=str(job_id),
                 status="failed",
+                dispatch_mode="in_process" if allow_in_process else "celery_only",
             )
+            if not allow_in_process:
+                raise DependencyAppError(
+                    "Prediction job enqueue failed and in-process jobs are disabled."
+                ) from exc
             _schedule_prediction_job_in_process(job_id)
             log_event(
                 logger,
@@ -471,7 +448,8 @@ async def dispatch_prediction_job(job_id: UUID) -> str:
 
 async def dispatch_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> str:
     with bound_log_context(job_id=str(job_id), mode=mode.value):
-        if not _has_active_workers(settings.celery_scoring_queue):
+        allow_in_process = settings.enable_in_process_jobs
+        if allow_in_process and not _celery_workers_listen_to_queue(settings.celery_scoring_queue):
             _schedule_llm_evaluation_job_in_process(job_id, mode)
             log_event(
                 logger,
@@ -481,9 +459,9 @@ async def dispatch_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> str
                 status="queued",
                 dispatch_mode="in_process",
                 queue_name=settings.celery_scoring_queue,
+                reason="no_celery_workers_for_scoring_queue",
             )
             return "in_process"
-
         try:
             process_llm_evaluation_task.apply_async(
                 args=[str(job_id), mode.value],
@@ -508,8 +486,12 @@ async def dispatch_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> str
                 job_id=str(job_id),
                 mode=mode.value,
                 status="fallback",
-                dispatch_mode="in_process",
+                dispatch_mode="in_process" if allow_in_process else "celery_only",
             )
+            if not allow_in_process:
+                raise DependencyAppError(
+                    "LLM evaluation enqueue failed and in-process jobs are disabled."
+                ) from exc
             _schedule_llm_evaluation_job_in_process(job_id, mode)
             log_event(
                 logger,
@@ -525,7 +507,8 @@ async def dispatch_llm_evaluation_job(job_id: UUID, mode: EvaluationMode) -> str
 
 async def dispatch_prediction_scoring_job(job_id: UUID) -> str:
     with bound_log_context(job_id=str(job_id)):
-        if not _has_active_workers(settings.celery_scoring_queue):
+        allow_in_process = settings.enable_in_process_jobs
+        if allow_in_process and not _celery_workers_listen_to_queue(settings.celery_scoring_queue):
             _schedule_prediction_scoring_job_in_process(job_id)
             log_event(
                 logger,
@@ -534,9 +517,9 @@ async def dispatch_prediction_scoring_job(job_id: UUID) -> str:
                 status="queued",
                 dispatch_mode="in_process",
                 queue_name=settings.celery_scoring_queue,
+                reason="no_celery_workers_for_scoring_queue",
             )
             return "in_process"
-
         try:
             process_prediction_scoring_task.apply_async(
                 args=[str(job_id)],
@@ -558,7 +541,12 @@ async def dispatch_prediction_scoring_job(job_id: UUID) -> str:
                 exc,
                 job_id=str(job_id),
                 status="failed",
+                dispatch_mode="in_process" if allow_in_process else "celery_only",
             )
+            if not allow_in_process:
+                raise DependencyAppError(
+                    "Prediction scoring enqueue failed and in-process jobs are disabled."
+                ) from exc
             _schedule_prediction_scoring_job_in_process(job_id)
             log_event(
                 logger,
@@ -569,6 +557,25 @@ async def dispatch_prediction_scoring_job(job_id: UUID) -> str:
                 queue_name=settings.celery_scoring_queue,
             )
             return "in_process"
+
+
+async def dispatch_analysis_asset_promotion(
+    *,
+    upload_session_id: UUID,
+    asset_id: UUID,
+    user_id: UUID,
+) -> str:
+    _schedule_asset_promotion_job_in_process(upload_session_id, asset_id, user_id)
+    log_event(
+        logger,
+        "analysis_asset_promotion_enqueued",
+        upload_session_id=str(upload_session_id),
+        asset_id=str(asset_id),
+        user_id=str(user_id),
+        status="queued",
+        dispatch_mode="in_process",
+    )
+    return "in_process"
 
 
 @celery_app.task(
@@ -582,7 +589,7 @@ async def dispatch_prediction_scoring_job(job_id: UUID) -> str:
 def process_prediction_job_task(self, job_id: str) -> None:
     start = time.perf_counter()
     try:
-        asyncio.run(_run_prediction_job(UUID(job_id)))
+        _run_async(_run_prediction_job(UUID(job_id)))
         metrics.observe(
             "prediction_job_duration_seconds",
             time.perf_counter() - start,
@@ -636,7 +643,7 @@ def process_llm_evaluation_task(self, job_id: str, mode: str) -> None:
     evaluation_mode = EvaluationMode(mode)
     start = time.perf_counter()
     try:
-        asyncio.run(_run_llm_evaluation_job(UUID(job_id), evaluation_mode))
+        _run_async(_run_llm_evaluation_job(UUID(job_id), evaluation_mode))
         metrics.observe(
             "llm_evaluation_duration_seconds",
             time.perf_counter() - start,
@@ -687,7 +694,7 @@ def process_llm_evaluation_task(self, job_id: str, mode: str) -> None:
 def process_prediction_scoring_task(self, job_id: str) -> None:
     start = time.perf_counter()
     try:
-        asyncio.run(_run_prediction_scoring_job(UUID(job_id)))
+        _run_async(_run_prediction_scoring_job(UUID(job_id)))
         metrics.observe(
             "prediction_job_duration_seconds",
             time.perf_counter() - start,

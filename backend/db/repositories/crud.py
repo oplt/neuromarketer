@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+# DEPRECATED MODULE
+# -----------------
+# This module mixes ad-hoc DB access with `await db.commit()` calls inside
+# helpers, which conflicts with the repository + service-transaction pattern
+# used elsewhere (`backend/db/repositories/{inference,creatives,...}.py`).
+#
+# Migration plan:
+#   1. New code MUST go through repository classes; commits belong to the
+#      service layer (or `session_scope()` in `backend/db/session.py`).
+#   2. Existing auth / MFA helpers below still commit because their callers
+#      depend on auto-commit semantics; they will be ported to a dedicated
+#      `AuthRepository` + `AuthService` and removed from this module.
+#   3. Inference / prediction / comparison helpers in this file are
+#      superseded by `InferenceRepository` and `ComparisonRepository`. They
+#      no longer commit so they cannot accidentally break a service-owned
+#      transaction; do not call them from new code.
+
 import re
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -404,7 +421,7 @@ async def create_inference_job(
         runtime_params=runtime_params,
     )
     db.add(job)
-    await db.commit()
+    await db.flush()
     await db.refresh(job)
     return job
 
@@ -417,8 +434,7 @@ async def mark_job_running(db: AsyncSession, job_id: UUID) -> InferenceJob | Non
 
     job.status = JobStatus.RUNNING
     job.started_at = datetime.now(UTC)
-    await db.commit()
-    await db.refresh(job)
+    await db.flush()
     return job
 
 
@@ -433,8 +449,7 @@ async def mark_job_failed(
     job.status = JobStatus.FAILED
     job.error_message = error_message
     job.completed_at = datetime.now(UTC)
-    await db.commit()
-    await db.refresh(job)
+    await db.flush()
     return job
 
 
@@ -455,7 +470,7 @@ async def add_job_metric(
         metadata_json=metadata_json or {},
     )
     db.add(metric)
-    await db.commit()
+    await db.flush()
     await db.refresh(metric)
     return metric
 
@@ -485,7 +500,7 @@ async def create_prediction_result(
         provenance_json=provenance_json,
     )
     db.add(obj)
-    await db.commit()
+    await db.flush()
     await db.refresh(obj)
     return obj
 
@@ -511,7 +526,7 @@ async def create_prediction_score(
         metadata_json=metadata_json or {},
     )
     db.add(obj)
-    await db.commit()
+    await db.flush()
     await db.refresh(obj)
     return obj
 
@@ -533,7 +548,7 @@ async def create_prediction_visualization(
         data_json=data_json,
     )
     db.add(obj)
-    await db.commit()
+    await db.flush()
     await db.refresh(obj)
     return obj
 
@@ -558,7 +573,7 @@ async def create_timeline_points(
         for point in points
     ]
     db.add_all(rows)
-    await db.commit()
+    await db.flush()
 
 
 async def create_optimization_suggestion(
@@ -583,7 +598,7 @@ async def create_optimization_suggestion(
         confidence=confidence,
     )
     db.add(obj)
-    await db.commit()
+    await db.flush()
     await db.refresh(obj)
     return obj
 
@@ -596,7 +611,7 @@ async def mark_job_succeeded(db: AsyncSession, job_id: UUID) -> InferenceJob | N
 
     job.status = JobStatus.SUCCEEDED
     job.completed_at = datetime.now(UTC)
-    await db.commit()
+    await db.flush()
     await db.refresh(job)
     return job
 
@@ -660,17 +675,17 @@ async def create_comparison(
 
     version_by_id = {version.id: version for version in versions}
 
-    for creative_version_id in creative_version_ids:
-        version = version_by_id[creative_version_id]
-        db.add(
+    db.add_all(
+        [
             CreativeComparisonItem(
                 comparison_id=comparison.id,
-                creative_id=version.creative_id,
+                creative_id=version_by_id[creative_version_id].creative_id,
                 creative_version_id=creative_version_id,
             )
-        )
-
-    await db.commit()
+            for creative_version_id in creative_version_ids
+        ]
+    )
+    await db.flush()
     await db.refresh(comparison)
     return comparison
 
@@ -691,8 +706,8 @@ async def save_comparison_result(
     db.add(comparison_result)
     await db.flush()
 
-    for item in items:
-        db.add(
+    db.add_all(
+        [
             CreativeComparisonItemResult(
                 comparison_result_id=comparison_result.id,
                 creative_version_id=item["creative_version_id"],
@@ -700,9 +715,10 @@ async def save_comparison_result(
                 scores_json=item["scores_json"],
                 rationale=item.get("rationale"),
             )
-        )
-
-    await db.commit()
+            for item in items
+        ]
+    )
+    await db.flush()
     await db.refresh(comparison_result)
     return comparison_result
 

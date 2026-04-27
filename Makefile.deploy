@@ -1,0 +1,36 @@
+.PHONY: prod-dev redis-dev backend-prod-dev celery-analysis-inference celery-analysis-scoring
+
+REDIS_BROKER=redis://127.0.0.1:6379/0
+REDIS_BACKEND=redis://127.0.0.1:6379/1
+
+prod-dev:
+	@echo "Starting production-like development..."
+	@trap 'kill 0' INT TERM EXIT; \
+	$(MAKE) -f Makefile.deploy redis-dev & \
+	sleep 2; \
+	$(MAKE) -f Makefile.deploy backend-prod-dev & \
+	$(MAKE) -f Makefile.deploy celery-analysis-inference & \
+	$(MAKE) -f Makefile.deploy celery-analysis-scoring & \
+	wait
+
+redis-dev:
+	redis-server
+
+backend-prod-dev:
+	uvicorn backend.api.main:app --reload --reload-dir backend --port 8000
+
+celery-analysis-inference:
+	CELERY_BROKER_URL=$(REDIS_BROKER) \
+	CELERY_RESULT_BACKEND=$(REDIS_BACKEND) \
+	CELERY_WORKER_ROLE=inference \
+	CELERY_INFERENCE_WORKER_CONCURRENCY=1 \
+	CELERY_INFERENCE_WORKER_PREFETCH_MULTIPLIER=1 \
+	celery -A backend.celery_app.celery_app worker -Q analysis-inference --concurrency=1 --prefetch-multiplier=1 --loglevel=info
+
+celery-analysis-scoring:
+	CELERY_BROKER_URL=$(REDIS_BROKER) \
+	CELERY_RESULT_BACKEND=$(REDIS_BACKEND) \
+	CELERY_WORKER_ROLE=scoring \
+	CELERY_SCORING_WORKER_CONCURRENCY=4 \
+	CELERY_SCORING_WORKER_PREFETCH_MULTIPLIER=4 \
+	celery -A backend.celery_app.celery_app worker -Q analysis-scoring --concurrency=4 --prefetch-multiplier=4 --loglevel=info

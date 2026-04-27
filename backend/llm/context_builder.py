@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import heapq
 from pathlib import Path
 from typing import Any
 
+from backend.core.config import settings
 from backend.core.logging import get_logger, log_event
 from backend.db.models import AnalysisResultRecord, CreativeVersion, InferenceJob
 from backend.services.analysis_goal_taxonomy import (
@@ -137,10 +139,12 @@ class EvaluationContextBuilder:
         opening = [item for item in timeline if int(item.get("timestamp_ms") or 0) < 3_000]
         midpoint = timeline[len(timeline) // 3 : (len(timeline) * 2) // 3] if timeline else []
         closing = timeline[-3:] if len(timeline) >= 3 else timeline
-        strongest = sorted(
-            timeline, key=lambda item: float(item.get("attention_score") or 0.0), reverse=True
-        )[:4]
-        weakest = sorted(timeline, key=lambda item: float(item.get("attention_score") or 0.0))[:4]
+        strongest = heapq.nlargest(
+            4, timeline, key=lambda item: float(item.get("attention_score") or 0.0)
+        )
+        weakest = heapq.nsmallest(
+            4, timeline, key=lambda item: float(item.get("attention_score") or 0.0)
+        )
 
         def _condense(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return [
@@ -173,13 +177,15 @@ class EvaluationContextBuilder:
     def _select_segments(
         self, *, segments: list[dict[str, Any]], reverse: bool
     ) -> list[dict[str, Any]]:
-        ranked = sorted(
-            segments,
-            key=lambda item: (
-                float(item.get("attention_score") or 0.0),
-                float(item.get("engagement_delta") or 0.0),
-            ),
-            reverse=reverse,
+        def key_fn(item: dict[str, Any]) -> tuple[float, float]:
+            return (
+            float(item.get("attention_score") or 0.0),
+            float(item.get("engagement_delta") or 0.0),
+            )
+        ranked = (
+            heapq.nlargest(4, segments, key=key_fn)
+            if reverse
+            else heapq.nsmallest(4, segments, key=key_fn)
         )
         return [
             {
@@ -191,7 +197,7 @@ class EvaluationContextBuilder:
                 "engagement_delta": segment.get("engagement_delta"),
                 "note": segment.get("note"),
             }
-            for segment in ranked[:4]
+            for segment in ranked
         ]
 
     def _build_visualization_hints(self, *, visualizations: dict[str, Any]) -> dict[str, Any]:
@@ -231,8 +237,15 @@ class EvaluationContextBuilder:
             return None
         if creative_version.raw_text and creative_version.raw_text.strip():
             return creative_version.raw_text.strip()[:1_600]
+        preprocessing_summary = creative_version.preprocessing_summary or {}
+        for key in ("raw_text_excerpt", "text_excerpt"):
+            excerpt = preprocessing_summary.get(key)
+            if isinstance(excerpt, str) and excerpt.strip():
+                return excerpt.strip()[:1_600]
+        if not settings.llm_allow_context_asset_excerpt_fallback:
+            return None
 
-        modality = (creative_version.preprocessing_summary or {}).get("modality")
+        modality = preprocessing_summary.get("modality")
         mime_type = creative_version.mime_type or ""
         if modality != "text" and not mime_type.startswith("text/"):
             return None

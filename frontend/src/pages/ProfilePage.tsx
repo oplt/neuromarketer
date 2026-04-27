@@ -1,12 +1,6 @@
-import CheckCircleRounded from '@mui/icons-material/CheckCircleRounded'
-import { Avatar, Box, Divider, Paper, Stack, Typography } from '@mui/material'
+import { Avatar, Box, Chip, Divider, Paper, Stack, Typography } from '@mui/material'
+import HelpTooltip from '../components/layout/HelpTooltip'
 import type { AuthSession } from '../lib/session'
-
-const profileActivity = [
-  'Updated profile details and workspace presentation settings',
-  'Reviewed three prediction jobs this morning',
-  'Opened compare flow for the spring launch set',
-]
 
 type ProfilePageProps = {
   session: AuthSession
@@ -22,31 +16,20 @@ function ProfilePage({ session }: ProfilePageProps) {
               {session.fullName.charAt(0).toUpperCase()}
             </Avatar>
             <Box>
-              <Typography variant="h6">{session.fullName}</Typography>
+              <Stack alignItems="center" direction="row" spacing={0.5}>
+                <Typography variant="h6">{session.fullName}</Typography>
+                <HelpTooltip title="Manage your name, email, and security settings on the Account page." />
+              </Stack>
               <Typography color="text.secondary" variant="body2">
                 {session.email}
               </Typography>
             </Box>
           </Stack>
           <Divider />
-          <DetailRow label="Role" value="Owner" />
           <DetailRow label="Default workspace" value={session.organizationName || 'Primary workspace'} />
           <DetailRow label="Profile status" value="Active" />
-        </Stack>
-      </Paper>
-
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack spacing={2}>
-          <Typography variant="h6">Recent activity</Typography>
-          <Stack spacing={1.25}>
-            {profileActivity.map((item) => (
-              <Box className="activity-row" key={item}>
-                <CheckCircleRounded color="primary" fontSize="small" />
-                <Typography color="text.secondary" variant="body2">
-                  {item}
-                </Typography>
-              </Box>
-            ))}
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            <Chip color="primary" label="Account → Members for role and access" size="small" variant="outlined" />
           </Stack>
         </Stack>
       </Paper>

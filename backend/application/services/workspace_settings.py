@@ -48,16 +48,20 @@ class WorkspaceSettingsService:
 
         for entry in env_entries:
             persisted = persisted_by_key.get(entry.key)
+            is_secret = is_secret_env_setting(entry.key)
+            has_value = entry.value is not None and str(entry.value) != ""
             fields.append(
                 SettingFieldRead(
                     key=entry.key,
                     env_name=entry.key,
                     group_id=classify_env_setting(entry.key),
                     label=build_setting_label(entry.key),
-                    value=entry.value,
+                    value=None if is_secret else entry.value,
+                    has_value=has_value,
+                    masked_value="********" if is_secret and has_value else None,
                     value_type=infer_value_type(entry.key, entry.value),
                     description=persisted.description if persisted is not None else None,
-                    is_secret=is_secret_env_setting(entry.key),
+                    is_secret=is_secret,
                     source="env_file",
                     updated_at=persisted.updated_at if persisted is not None else None,
                 )
@@ -67,13 +71,16 @@ class WorkspaceSettingsService:
         for row in persisted_rows:
             if row.key in seen_keys:
                 continue
+            has_value = row.value is not None and str(row.value) != ""
             fields.append(
                 SettingFieldRead(
                     key=row.key,
                     env_name=row.env_name,
                     group_id=row.group_id,
                     label=row.label,
-                    value=row.value,
+                    value=None if row.is_secret else row.value,
+                    has_value=has_value,
+                    masked_value="********" if row.is_secret and has_value else None,
                     value_type=row.value_type,
                     description=row.description,
                     is_secret=row.is_secret,

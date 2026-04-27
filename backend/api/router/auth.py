@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
+from backend.api.dependencies import AuthenticatedSessionContext, require_authenticated_session
 from backend.api.rate_limit import limiter
 from backend.application.services.auth_service import AuthApplicationService, AuthClientMetadata
 from backend.db.session import get_db
@@ -61,7 +61,7 @@ async def verify_mfa_challenge(
 @router.post("/signout")
 async def sign_out(
     db: AsyncSession = Depends(get_db),
-    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+    auth: AuthenticatedSessionContext = Depends(require_authenticated_session),
 ) -> dict[str, str]:
     await AuthApplicationService(db).sign_out(
         session_id=auth.session.id,

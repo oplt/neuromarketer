@@ -19,6 +19,17 @@ class LLMClientError(Exception):
 class LLMTransportError(LLMClientError):
     """Raised when the HTTP request to the LLM provider fails."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = True,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
 
 class LLMResponseFormatError(LLMClientError):
     """Raised when the LLM response cannot be parsed into the expected format."""
@@ -40,6 +51,7 @@ class LLMClientConfig:
     top_p: float = 0.9
     max_tokens: int = 2_000
     think: bool | None = None
+    supports_json_schema: bool = False
     default_headers: dict[str, str] = field(default_factory=dict)
 
 
@@ -103,6 +115,43 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
 class BaseLLMClient(ABC):
     def __init__(self, config: LLMClientConfig):
         self.config = config
+        self._http_client: httpx.AsyncClient | None = None
+
+    async def _client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=self.config.timeout_seconds)
+        return self._http_client
+
+    async def aclose(self) -> None:
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+
+    async def _post_json(
+        self, *, url: str, payload: dict[str, Any], headers: dict[str, str]
+    ) -> dict[str, Any]:
+        try:
+            response = await (await self._client()).post(url, json=payload, headers=headers)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            detail = _summarize_error_response(exc.response)
+            suffix = f"; response: {detail}" if detail else ""
+            retryable = status_code in {429, 500, 502, 503, 504}
+            raise LLMTransportError(
+                f"HTTP {status_code}: {_describe_http_error(exc)}{suffix}",
+                retryable=retryable,
+                status_code=status_code,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise LLMTransportError(
+                f"Failed to call LLM endpoint: {_describe_http_error(exc)}",
+                retryable=True,
+            ) from exc
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise LLMResponseFormatError("LLM provider response is not valid JSON.") from exc
 
     @abstractmethod
     async def generate_structured(
@@ -141,11 +190,13 @@ class BaseLLMClient(ABC):
             )
             repair_content = (
                 "Your previous answer was malformed. Return exactly one valid JSON object "
-                "that matches the required schema. Do not include markdown, comments, or extra text."
+                "that matches the required schema. Do not include markdown, comments, "
+                "or extra text."
             )
             if first_exc.raw_text:
                 repair_content += "\nMalformed JSON to repair:\n" + first_exc.raw_text[:4_000]
-            repair_messages = messages + [
+            repair_messages = [
+                *messages,
                 {
                     "role": "user",
                     "content": repair_content,
@@ -187,24 +238,15 @@ class OllamaLLMClient(BaseLLMClient):
         headers = {"Accept": "application/json", **self.config.default_headers}
 
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
-                response = await client.post(self._chat_url(), json=payload, headers=headers)
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            detail = _summarize_error_response(exc.response)
-            suffix = f"; response: {detail}" if detail else ""
+            response_json = await self._post_json(
+                url=self._chat_url(), payload=payload, headers=headers
+            )
+        except LLMTransportError as exc:
             raise LLMTransportError(
-                f"Failed to call Ollama endpoint: {_describe_http_error(exc)}{suffix}"
+                f"Failed to call Ollama endpoint: {exc}",
+                retryable=exc.retryable,
+                status_code=exc.status_code,
             ) from exc
-        except httpx.HTTPError as exc:
-            raise LLMTransportError(
-                f"Failed to call Ollama endpoint: {_describe_http_error(exc)}"
-            ) from exc
-
-        try:
-            response_json = response.json()
-        except ValueError as exc:
-            raise LLMResponseFormatError("Ollama response is not valid JSON.") from exc
 
         message = response_json.get("message")
         if not isinstance(message, dict):
@@ -263,11 +305,19 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             "temperature": self.config.temperature,
             "top_p": self.config.top_p,
             "max_tokens": self.config.max_tokens,
-            "response_format": {"type": "json_object"},
         }
+        if response_schema and self.config.supports_json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_response",
+                    "schema": response_schema,
+                },
+            }
+        else:
+            payload["response_format"] = {"type": "json_object"}
         if options:
             payload.update(options)
-        _ = response_schema
 
         headers = {
             "Accept": "application/json",
@@ -277,24 +327,15 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout_seconds) as client:
-                response = await client.post(self._chat_url(), json=payload, headers=headers)
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            detail = _summarize_error_response(exc.response)
-            suffix = f"; response: {detail}" if detail else ""
+            response_json = await self._post_json(
+                url=self._chat_url(), payload=payload, headers=headers
+            )
+        except LLMTransportError as exc:
             raise LLMTransportError(
-                f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}{suffix}"
+                f"Failed to call OpenAI-compatible endpoint: {exc}",
+                retryable=exc.retryable,
+                status_code=exc.status_code,
             ) from exc
-        except httpx.HTTPError as exc:
-            raise LLMTransportError(
-                f"Failed to call OpenAI-compatible endpoint: {_describe_http_error(exc)}"
-            ) from exc
-
-        try:
-            response_json = response.json()
-        except ValueError as exc:
-            raise LLMResponseFormatError("OpenAI-compatible response is not valid JSON.") from exc
 
         content = self._extract_content(response_json)
         parsed_json = parse_json_object(content)

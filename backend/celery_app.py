@@ -12,7 +12,7 @@ from celery.signals import (
     task_prerun,
     worker_process_init,
 )
-from kombu import Queue
+from kombu import Exchange, Queue
 
 from backend.core.config import settings
 from backend.core.log_context import (
@@ -20,16 +20,36 @@ from backend.core.log_context import (
     build_celery_task_headers,
     clear_log_context,
 )
-from backend.core.logging import configure_logging, log_event
+from backend.core.logging import configure_logging, get_logger, log_event
 from backend.services.tribe_runtime import get_shared_tribe_runtime
 
 configure_logging()
+logger = get_logger(__name__)
+
+
+def _worker_role() -> str:
+    return (settings.celery_worker_role or "default").strip().lower()
+
+
+def _is_inference_worker_role() -> bool:
+    return _worker_role() in {"inference", "inference-cpu", "analysis-inference"}
+
+
+def _worker_prefetch_multiplier() -> int:
+    if _is_inference_worker_role():
+        return max(1, settings.celery_inference_worker_prefetch_multiplier)
+    return max(1, settings.celery_scoring_worker_prefetch_multiplier)
+
 
 celery_app = Celery(
     "neuromarketing",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
+    include=["backend.tasks"],
 )
+
+# Default Celery `-A backend.celery_app` looks for `app` first.
+app = celery_app
 
 celery_app.conf.update(
     task_serializer="json",
@@ -46,13 +66,27 @@ celery_app.conf.update(
     worker_hijack_root_logger=False,
     task_default_queue=settings.celery_inference_queue,
     task_queues=(
-        Queue(settings.celery_inference_queue),
-        Queue(settings.celery_scoring_queue),
+        Queue(
+            settings.celery_inference_queue,
+            Exchange(settings.celery_inference_queue, type="direct"),
+            routing_key=settings.celery_inference_queue,
+        ),
+        Queue(
+            settings.celery_scoring_queue,
+            Exchange(settings.celery_scoring_queue, type="direct"),
+            routing_key=settings.celery_scoring_queue,
+        ),
     ),
     task_routes={
         "tasks.process_prediction_job": {"queue": settings.celery_inference_queue},
-        "tasks.process_prediction_scoring": {"queue": settings.celery_scoring_queue},
-        "tasks.process_llm_evaluation": {"queue": settings.celery_scoring_queue},
+        "tasks.process_prediction_scoring": {
+            "queue": settings.celery_scoring_queue,
+            "routing_key": settings.celery_scoring_queue,
+        },
+        "tasks.process_llm_evaluation": {
+            "queue": settings.celery_scoring_queue,
+            "routing_key": settings.celery_scoring_queue,
+        },
     },
 )
 
@@ -109,10 +143,22 @@ def clear_task_logging_context(**_: object) -> None:
 
 @worker_process_init.connect
 def preload_tribe_runtime(**_: object) -> None:
+    if not _is_inference_worker_role():
+        log_event(
+            logger,
+            "celery_worker_initialized",
+            worker_role=settings.celery_worker_role,
+            inference_queue=settings.celery_inference_queue,
+            scoring_queue=settings.celery_scoring_queue,
+            tribe_preloaded=False,
+            status="ready",
+        )
+        return
+
     runtime = get_shared_tribe_runtime()
     requested_device = runtime.get_requested_device()
     log_event(
-        logging.getLogger(__name__),
+        logger,
         "celery_worker_initialized",
         worker_role=settings.celery_worker_role,
         inference_queue=settings.celery_inference_queue,
@@ -129,10 +175,13 @@ def preload_tribe_runtime(**_: object) -> None:
 
     runtime.load()
     log_event(
-        logging.getLogger(__name__),
+        logger,
         "celery_worker_runtime_preloaded",
         worker_role=settings.celery_worker_role,
         tribe_requested_device=requested_device,
         tribe_resolved_device=runtime.get_resolved_device(),
         status="loaded",
     )
+
+
+import backend.tasks  # noqa: E402, F401 — register Celery tasks when worker loads only this app

@@ -1,3 +1,5 @@
+import { safeReadStorageItem, safeWriteStorageItem } from './session'
+
 export type CompareWorkspaceSnapshot = {
   selectedJobIds: string[]
   baselineJobId: string | null
@@ -10,16 +12,23 @@ const defaultSnapshot: CompareWorkspaceSnapshot = {
   activeComparisonId: null,
 }
 
+function getCompareStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
+
 export function buildCompareWorkspaceStorageKey(scope: string) {
   return `neuromarketer.compare.workspace.${scope}`
 }
 
 export function readCompareWorkspaceSnapshot(storageKey: string): CompareWorkspaceSnapshot {
-  if (typeof window === 'undefined') {
-    return defaultSnapshot
-  }
-
-  const rawValue = window.sessionStorage.getItem(storageKey)
+  const rawValue = safeReadStorageItem(getCompareStorage(), storageKey)
   if (!rawValue) {
     return defaultSnapshot
   }
@@ -43,8 +52,9 @@ export function readCompareWorkspaceSnapshot(storageKey: string): CompareWorkspa
 }
 
 export function storeCompareWorkspaceSnapshot(storageKey: string, snapshot: CompareWorkspaceSnapshot) {
-  if (typeof window === 'undefined') {
-    return
+  try {
+    safeWriteStorageItem(getCompareStorage(), storageKey, JSON.stringify(snapshot))
+  } catch {
+    // ignore JSON serialization or quota failures
   }
-  window.sessionStorage.setItem(storageKey, JSON.stringify(snapshot))
 }

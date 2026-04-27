@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from backend.schemas.base import APIBaseSchema
+
 CollaborationEntityTypeValue = Literal["analysis_job", "analysis_comparison"]
 ReviewStatusValue = Literal["draft", "in_review", "changes_requested", "approved"]
 
@@ -21,13 +23,13 @@ class WorkspaceMemberListResponse(BaseModel):
     items: list[WorkspaceMemberRead] = Field(default_factory=list)
 
 
-class CollaborationCommentCreateRequest(BaseModel):
+class CollaborationCommentCreateRequest(APIBaseSchema):
     body: str = Field(min_length=1, max_length=5_000)
     timestamp_ms: int | None = Field(default=None, ge=0)
     segment_label: str | None = Field(default=None, max_length=255)
 
 
-class CollaborationReviewUpdateRequest(BaseModel):
+class CollaborationReviewUpdateRequest(APIBaseSchema):
     status: ReviewStatusValue | None = None
     assignee_user_id: UUID | None = None
     review_summary: str | None = Field(default=None, max_length=2_000)

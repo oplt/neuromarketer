@@ -156,9 +156,10 @@ describe('AnalysisEvaluationSection', () => {
     )
 
     await flushEffects()
-    expect(mockedApiRequest).toHaveBeenCalledWith('/api/v1/analysis/jobs/job-1/evaluations', {
-      sessionToken: 'session-token',
-    })
+    expect(mockedApiRequest).toHaveBeenCalledWith(
+      '/api/v1/analysis/jobs/job-1/evaluations',
+      expect.objectContaining({ sessionToken: 'session-token' }),
+    )
 
     rerender(
       <AnalysisEvaluationSection
@@ -169,12 +170,13 @@ describe('AnalysisEvaluationSection', () => {
     )
 
     await flushEffects()
-    expect(mockedApiRequest).toHaveBeenCalledWith('/api/v1/analysis/jobs/job-2/evaluations', {
-      sessionToken: 'session-token',
-    })
+    expect(mockedApiRequest).toHaveBeenCalledWith(
+      '/api/v1/analysis/jobs/job-2/evaluations',
+      expect.objectContaining({ sessionToken: 'session-token' }),
+    )
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(4_000)
+      await vi.advanceTimersByTimeAsync(7_000)
     })
 
     expect(

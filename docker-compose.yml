@@ -83,6 +83,8 @@ services:
       - backend/.env.example
     environment:
       CELERY_WORKER_ROLE: inference-cpu
+      CELERY_INFERENCE_WORKER_CONCURRENCY: 1
+      CELERY_INFERENCE_WORKER_PREFETCH_MULTIPLIER: 1
     depends_on:
       postgres:
         condition: service_healthy
@@ -103,6 +105,8 @@ services:
       - backend/.env.example
     environment:
       CELERY_WORKER_ROLE: scoring-cpu
+      CELERY_SCORING_WORKER_CONCURRENCY: 4
+      CELERY_SCORING_WORKER_PREFETCH_MULTIPLIER: 4
     depends_on:
       postgres:
         condition: service_healthy

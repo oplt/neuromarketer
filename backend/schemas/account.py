@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, HttpUrl
 
+from backend.schemas.base import APIBaseSchema
+
 OrgRoleValue = Literal["owner", "admin", "member", "viewer"]
 ApiKeyStatusValue = Literal["active", "revoked"]
 WorkspaceInviteStatusValue = Literal["pending", "accepted", "revoked", "expired"]
@@ -137,9 +139,9 @@ class AccountSsoConfigRead(BaseModel):
 class AccountSecurityOverviewRead(BaseModel):
     session_policy: AccountSessionPolicyRead
     current_session_id: UUID | None = None
-    sessions: list[AccountUserSessionRead] = Field(default_factory=list)
+    sessions: list[AccountUserSessionRead] = Field(default_factory=list, max_length=100)
     mfa: AccountMfaStatusRead = Field(default_factory=AccountMfaStatusRead)
-    invites: list[AccountInviteRead] = Field(default_factory=list)
+    invites: list[AccountInviteRead] = Field(default_factory=list, max_length=100)
     sso: AccountSsoConfigRead = Field(default_factory=AccountSsoConfigRead)
     available_sso_providers: list[SsoProviderValue] = Field(
         default_factory=lambda: ["oidc", "saml"]
@@ -155,84 +157,84 @@ class AccountControlCenterRead(BaseModel):
     stats: AccountWorkspaceStatsRead
     available_api_key_scopes: list[str] = Field(default_factory=list)
     available_webhook_events: list[str] = Field(default_factory=list)
-    api_keys: list[AccountApiKeyRead] = Field(default_factory=list)
-    webhooks: list[AccountWebhookRead] = Field(default_factory=list)
-    members: list[AccountMemberRead] = Field(default_factory=list)
-    audit_logs: list[AccountAuditLogRead] = Field(default_factory=list)
+    api_keys: list[AccountApiKeyRead] = Field(default_factory=list, max_length=200)
+    webhooks: list[AccountWebhookRead] = Field(default_factory=list, max_length=200)
+    members: list[AccountMemberRead] = Field(default_factory=list, max_length=500)
+    audit_logs: list[AccountAuditLogRead] = Field(default_factory=list, max_length=100)
 
 
-class ApiKeyCreateRequest(BaseModel):
+class ApiKeyCreateRequest(APIBaseSchema):
     name: str = Field(min_length=1, max_length=120)
     scopes: list[str] = Field(default_factory=list, max_length=16)
     expires_in_days: int | None = Field(default=None, ge=1, le=3650)
 
 
-class ApiKeyCreateResponse(BaseModel):
+class ApiKeyCreateResponse(APIBaseSchema):
     api_key: AccountApiKeyRead
     token: str
 
 
-class ApiKeyRotateResponse(BaseModel):
+class ApiKeyRotateResponse(APIBaseSchema):
     rotated_from: AccountApiKeyRead
     api_key: AccountApiKeyRead
     token: str
 
 
-class WebhookCreateRequest(BaseModel):
+class WebhookCreateRequest(APIBaseSchema):
     url: HttpUrl
     subscribed_events: list[str] = Field(default_factory=list, max_length=16)
     is_active: bool = True
 
 
-class WebhookUpdateRequest(BaseModel):
+class WebhookUpdateRequest(APIBaseSchema):
     url: HttpUrl | None = None
     subscribed_events: list[str] | None = Field(default=None, max_length=16)
     is_active: bool | None = None
 
 
-class WebhookSecretResponse(BaseModel):
+class WebhookSecretResponse(APIBaseSchema):
     webhook: AccountWebhookRead
     signing_secret: str
 
 
-class MemberRoleUpdateRequest(BaseModel):
+class MemberRoleUpdateRequest(APIBaseSchema):
     role: OrgRoleValue
 
 
-class AccountInviteCreateRequest(BaseModel):
+class AccountInviteCreateRequest(APIBaseSchema):
     email: str = Field(min_length=3, max_length=320)
     role: OrgRoleValue = "viewer"
     expires_in_hours: int | None = Field(default=None, ge=1, le=24 * 90)
 
 
-class AccountInviteCreateResponse(BaseModel):
+class AccountInviteCreateResponse(APIBaseSchema):
     invite: AccountInviteRead
     invite_token: str
     invite_url: str
 
 
-class AccountMfaSetupStartResponse(BaseModel):
+class AccountMfaSetupStartResponse(APIBaseSchema):
     method_type: Literal["totp"] = "totp"
     secret: str
     otpauth_uri: str
     issuer: str
 
 
-class AccountMfaConfirmRequest(BaseModel):
+class AccountMfaConfirmRequest(APIBaseSchema):
     code: str = Field(min_length=6, max_length=16)
 
 
-class AccountMfaDisableRequest(BaseModel):
+class AccountMfaDisableRequest(APIBaseSchema):
     code: str | None = Field(default=None, min_length=6, max_length=32)
     recovery_code: str | None = Field(default=None, min_length=6, max_length=32)
 
 
-class AccountMfaRecoveryCodesResponse(BaseModel):
+class AccountMfaRecoveryCodesResponse(APIBaseSchema):
     recovery_codes: list[str] = Field(default_factory=list)
     status: AccountMfaStatusRead
 
 
-class AccountSsoConfigUpsertRequest(BaseModel):
+class AccountSsoConfigUpsertRequest(APIBaseSchema):
     provider_type: SsoProviderValue = "oidc"
     is_enabled: bool = False
     issuer_url: str | None = Field(default=None, max_length=2000)

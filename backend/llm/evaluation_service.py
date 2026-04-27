@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,6 +55,7 @@ class EvaluationResponse:
 class EvaluationService:
     def __init__(self, router: LLMRouter) -> None:
         self.router = router
+        self._cache: dict[str, tuple[float, EvaluationResponse]] = {}
 
     @classmethod
     def from_settings(cls) -> EvaluationService:
@@ -80,6 +84,14 @@ class EvaluationService:
             raise UnsupportedEvaluationModeError(str(exc)) from exc
 
         prompt_payload = evaluator.build_prompt(request.context)
+        cache_key = self._build_cache_key(
+            mode=request.mode,
+            prompt_version=evaluator.prompt_version,
+            context=request.context,
+        )
+        cached_response = self._cache_get(cache_key)
+        if cached_response is not None:
+            return cached_response
         try:
             generation = await self.router.generate_structured(
                 mode=request.mode,
@@ -150,7 +162,7 @@ class EvaluationService:
         except ValidationError as exc:
             raise EvaluationServiceError(f"Final evaluation normalization failed: {exc}") from exc
 
-        return EvaluationResponse(
+        response = EvaluationResponse(
             result=final_result,
             provider_id=str(
                 generation.metadata.get("provider_id") or generation.metadata["provider"]
@@ -173,3 +185,40 @@ class EvaluationService:
                 "budget_usd": generation.metadata.get("budget_usd"),
             },
         )
+        self._cache_set(cache_key, response)
+        return response
+
+    def _build_cache_key(
+        self,
+        *,
+        mode: EvaluationMode,
+        prompt_version: str,
+        context: dict[str, Any],
+    ) -> str:
+        preview = self.preview_route(mode)
+        normalized_context = json.dumps(context, sort_keys=True, separators=(",", ":"), default=str)
+        context_hash = hashlib.sha256(normalized_context.encode("utf-8")).hexdigest()
+        key_payload = (
+            f"{mode.value}:{prompt_version}:{preview.route_id}:{preview.provider}:"
+            f"{preview.model}:{context_hash}"
+        )
+        return hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
+
+    def _cache_get(self, cache_key: str) -> EvaluationResponse | None:
+        ttl_seconds = int(getattr(settings, "llm_evaluation_cache_ttl_seconds", 0) or 0)
+        if ttl_seconds <= 0:
+            return None
+        cached = self._cache.get(cache_key)
+        if cached is None:
+            return None
+        expires_at, response = cached
+        if expires_at < time.time():
+            self._cache.pop(cache_key, None)
+            return None
+        return response
+
+    def _cache_set(self, cache_key: str, response: EvaluationResponse) -> None:
+        ttl_seconds = int(getattr(settings, "llm_evaluation_cache_ttl_seconds", 0) or 0)
+        if ttl_seconds <= 0:
+            return
+        self._cache[cache_key] = (time.time() + ttl_seconds, response)

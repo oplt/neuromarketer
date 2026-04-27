@@ -8,7 +8,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from backend.services.document_text_extractor import DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES
+from backend.core.mime_types import DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 EnvironmentName = Literal["development", "staging", "production", "test"]
@@ -154,6 +154,23 @@ class Settings(BaseSettings):
         default="analysis-scoring", validation_alias="CELERY_SCORING_QUEUE"
     )
     celery_worker_role: str = Field(default="default", validation_alias="CELERY_WORKER_ROLE")
+    enable_in_process_jobs: bool = Field(default=True, validation_alias="ENABLE_IN_PROCESS_JOBS")
+    celery_inference_worker_prefetch_multiplier: int = Field(
+        default=1,
+        validation_alias="CELERY_INFERENCE_WORKER_PREFETCH_MULTIPLIER",
+    )
+    celery_scoring_worker_prefetch_multiplier: int = Field(
+        default=4,
+        validation_alias="CELERY_SCORING_WORKER_PREFETCH_MULTIPLIER",
+    )
+    celery_inference_worker_concurrency: int = Field(
+        default=1,
+        validation_alias="CELERY_INFERENCE_WORKER_CONCURRENCY",
+    )
+    celery_scoring_worker_concurrency: int = Field(
+        default=4,
+        validation_alias="CELERY_SCORING_WORKER_CONCURRENCY",
+    )
     celery_soft_time_limit_seconds: int = Field(
         default=900, validation_alias="CELERY_SOFT_TIME_LIMIT_SECONDS"
     )
@@ -166,6 +183,34 @@ class Settings(BaseSettings):
     analysis_progress_snapshot_refresh_seconds: float = Field(
         default=5.0,
         validation_alias="ANALYSIS_PROGRESS_SNAPSHOT_REFRESH_SECONDS",
+    )
+    auth_context_cache_ttl_seconds: int = Field(
+        default=60,
+        validation_alias="AUTH_CONTEXT_CACHE_TTL_SECONDS",
+    )
+    auth_session_cache_ttl_seconds: int = Field(
+        default=60,
+        validation_alias="AUTH_SESSION_CACHE_TTL_SECONDS",
+    )
+    trusted_proxy_ips: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("TRUSTED_PROXY_IPS", "trusted_proxy_ips"),
+    )
+    direct_upload_max_size_bytes: int = Field(
+        default=10 * 1024 * 1024,
+        validation_alias="DIRECT_UPLOAD_MAX_SIZE_BYTES",
+    )
+    analysis_stream_heartbeat_seconds: float = Field(
+        default=15.0,
+        validation_alias="ANALYSIS_STREAM_HEARTBEAT_SECONDS",
+    )
+    analysis_stream_fallback_poll_seconds: float = Field(
+        default=4.0,
+        validation_alias="ANALYSIS_STREAM_FALLBACK_POLL_SECONDS",
+    )
+    analysis_stream_max_connections_per_job_user: int = Field(
+        default=3,
+        validation_alias="ANALYSIS_STREAM_MAX_CONNECTIONS_PER_JOB_USER",
     )
 
     tribe_model_repo_id: str = Field(
@@ -190,9 +235,9 @@ class Settings(BaseSettings):
     tribe_feature_cluster: str | None = Field(
         default=None, validation_alias="TRIBE_FEATURE_CLUSTER"
     )
-    tribe_hf_token: str | None = Field(
+    hf_token: str | None = Field(
         default=None,
-        validation_alias=AliasChoices("TRIBE_HF_TOKEN", "HF_TOKEN", "HUGGINGFACE_HUB_TOKEN"),
+        validation_alias=AliasChoices("HF_TOKEN"),
     )
     tribe_video_feature_frequency_hz: float | None = Field(
         default=None,
@@ -203,7 +248,7 @@ class Settings(BaseSettings):
         validation_alias="TRIBE_VIDEO_MAX_IMSIZE",
     )
     tribe_preload_on_worker_startup: bool = Field(
-        default=True, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP"
+        default=False, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP"
     )
     tribe_validate_binaries_on_worker_startup: bool = Field(
         default=True,
@@ -245,6 +290,18 @@ class Settings(BaseSettings):
     llm_temperature: float = Field(default=0.2, validation_alias="LLM_TEMPERATURE")
     llm_top_p: float = Field(default=0.9, validation_alias="LLM_TOP_P")
     llm_ollama_think: bool = Field(default=False, validation_alias="LLM_OLLAMA_THINK")
+    llm_allow_context_asset_excerpt_fallback: bool = Field(
+        default=False,
+        validation_alias="LLM_ALLOW_CONTEXT_ASSET_EXCERPT_FALLBACK",
+    )
+    llm_openai_compatible_supports_json_schema: bool = Field(
+        default=False,
+        validation_alias="LLM_OPENAI_COMPATIBLE_SUPPORTS_JSON_SCHEMA",
+    )
+    llm_evaluation_cache_ttl_seconds: int = Field(
+        default=0,
+        validation_alias="LLM_EVALUATION_CACHE_TTL_SECONDS",
+    )
     llm_router_providers_json: list[dict[str, Any]] = Field(
         default_factory=list,
         validation_alias="LLM_ROUTER_PROVIDERS_JSON",
@@ -270,6 +327,22 @@ class Settings(BaseSettings):
         default=300,
         validation_alias="LLM_CIRCUIT_BREAKER_RESET_SECONDS",
     )
+    llm_shadow_evaluation_enabled: bool = Field(
+        default=False,
+        validation_alias="LLM_SHADOW_EVALUATION_ENABLED",
+    )
+    llm_shadow_sample_rate: float = Field(
+        default=0.25,
+        validation_alias="LLM_SHADOW_SAMPLE_RATE",
+    )
+    llm_shadow_timeout_seconds: int = Field(
+        default=45,
+        validation_alias="LLM_SHADOW_TIMEOUT_SECONDS",
+    )
+    llm_shadow_modes: list[str] = Field(
+        default_factory=list,
+        validation_alias="LLM_SHADOW_MODES",
+    )
     llm_cost_input_per_1k_tokens: float = Field(
         default=0.0, validation_alias="LLM_COST_INPUT_PER_1K_TOKENS"
     )
@@ -294,6 +367,29 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return cls._parse_listish_value(value)
         return value
+
+    @field_validator("llm_shadow_modes", mode="before")
+    @classmethod
+    def _parse_llm_shadow_modes(cls, value: object) -> object:
+        if isinstance(value, str):
+            return cls._parse_listish_value(value)
+        return value
+
+    @field_validator("trusted_proxy_ips", mode="before")
+    @classmethod
+    def _parse_trusted_proxy_ips(cls, value: object) -> object:
+        if isinstance(value, str):
+            return cls._parse_listish_value(value)
+        return value
+
+    @field_validator("llm_shadow_sample_rate", mode="before")
+    @classmethod
+    def _normalize_llm_shadow_sample_rate(cls, value: object) -> object:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.25
+        return max(0.0, min(parsed, 1.0))
 
     @field_validator(
         "analysis_allowed_video_mime_types",
@@ -369,7 +465,7 @@ class Settings(BaseSettings):
             insecure_secrets = ("dev-session-secret", "CHANGE_ME_USE_openssl_rand_hex_64", "")
             if self.session_secret in insecure_secrets or len(self.session_secret) < 32:
                 raise ValueError(
-                    "SESSION_SECRET must be set to a strong random value (>=32 chars) in production. "
+                    "SESSION_SECRET must be a strong random value (>=32 chars) in production. "
                     "Generate one with: openssl rand -hex 64"
                 )
         return self

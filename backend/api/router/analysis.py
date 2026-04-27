@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.dependencies import AuthenticatedRequestContext, require_authenticated_context
@@ -20,6 +23,9 @@ from backend.application.services.analysis_generated_variants import (
 from backend.application.services.analysis_insights import AnalysisInsightsApplicationService
 from backend.application.services.collaboration import CollaborationApplicationService
 from backend.core.config import settings
+from backend.core.exceptions import ValidationAppError
+from backend.core.logging import get_logger, log_event
+from backend.core.metrics import metrics
 from backend.db.models import CollaborationEntityType
 from backend.db.session import AsyncSessionLocal, get_db
 from backend.schemas.analysis import (
@@ -34,12 +40,12 @@ from backend.schemas.analysis import (
     AnalysisExecutiveVerdictRead,
     AnalysisGeneratedVariantCreateRequest,
     AnalysisGeneratedVariantListResponse,
+    AnalysisJobResultDetailResponse,
+    AnalysisJobStatusLiteResponse,
     AnalysisGoalPresetsResponse,
     AnalysisJobCreateRequest,
     AnalysisJobListResponse,
-    AnalysisJobStatusResponse,
     AnalysisOutcomeImportResponse,
-    AnalysisResultRead,
     AnalysisUploadCompleteRequest,
     AnalysisUploadCompleteResponse,
     AnalysisUploadCreateRequest,
@@ -66,6 +72,39 @@ from backend.services.analysis_job_events import (
 from backend.tasks import dispatch_prediction_job
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
+logger = get_logger(__name__)
+SSE_HEARTBEAT_SECONDS = max(5.0, float(settings.analysis_stream_heartbeat_seconds))
+SSE_FALLBACK_POLL_SECONDS = max(3.0, float(settings.analysis_stream_fallback_poll_seconds))
+SSE_MAX_CONNECTIONS_PER_JOB_USER = max(
+    1, int(settings.analysis_stream_max_connections_per_job_user)
+)
+
+
+def _resolve_stream_redis_url() -> str | None:
+    for candidate in (settings.celery_broker_url, settings.celery_result_backend):
+        parsed = urlparse(candidate)
+        if parsed.scheme.lower() in {"redis", "rediss"} and parsed.hostname:
+            return candidate
+    return None
+
+
+def _build_stream_slot_key(*, user_id: UUID, job_id: UUID) -> str:
+    return f"analysis:stream:slots:{user_id}:{job_id}"
+
+
+async def _acquire_stream_slot(*, user_id: UUID, job_id: UUID) -> tuple[Redis, str] | None:
+    redis_url = _resolve_stream_redis_url()
+    if redis_url is None:
+        return None
+    client = Redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+    slot_key = _build_stream_slot_key(user_id=user_id, job_id=job_id)
+    current_count = await client.incr(slot_key)
+    await client.expire(slot_key, int(SSE_HEARTBEAT_SECONDS * 4))
+    if current_count > SSE_MAX_CONNECTIONS_PER_JOB_USER:
+        await client.decr(slot_key)
+        await client.aclose()
+        return None
+    return client, slot_key
 
 
 def _encode_sse_event(*, event: str, data: dict) -> str:
@@ -85,7 +124,7 @@ def _decode_analysis_job_event_message(message: dict[str, Any] | None) -> dict[s
     return decoded if isinstance(decoded, dict) else None
 
 
-async def _load_analysis_job_snapshot(*, user_id: UUID, job_id: UUID) -> AnalysisJobStatusResponse:
+async def _load_analysis_job_snapshot(*, user_id: UUID, job_id: UUID) -> AnalysisJobStatusLiteResponse:
     async with AsyncSessionLocal() as session:
         return await AnalysisApplicationService(session).get_analysis_job(
             user_id=user_id, job_id=job_id
@@ -255,20 +294,33 @@ async def get_analysis_asset_media(
     request: Request,
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
-) -> Response:
-    asset, body, content_type = await AnalysisApplicationService(db).get_asset_media(
+) -> RedirectResponse:
+    asset, download_url = await AnalysisApplicationService(db).get_asset_download_url(
         user_id=auth.user.id,
         project_id=auth.default_project.id,
         asset_id=asset_id,
     )
-    response = Response(
-        content=body,
-        media_type=content_type or "application/octet-stream",
-    )
+    response = RedirectResponse(url=download_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
     if asset.original_filename:
         response.headers["Content-Disposition"] = f'inline; filename="{asset.original_filename}"'
     response.headers["Cache-Control"] = "private, max-age=300"
     return response
+
+
+@router.get("/assets/{asset_id}/download-url")
+@limiter.limit("60/minute")
+async def get_analysis_asset_download_url(
+    asset_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> dict[str, str]:
+    _, download_url = await AnalysisApplicationService(db).get_asset_download_url(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        asset_id=asset_id,
+    )
+    return {"url": download_url}
 
 
 @router.get("/jobs", response_model=AnalysisJobListResponse)
@@ -344,7 +396,7 @@ async def fallback_analysis_upload(
 
 
 @router.post(
-    "/jobs", response_model=AnalysisJobStatusResponse, status_code=status.HTTP_202_ACCEPTED
+    "/jobs", response_model=AnalysisJobStatusLiteResponse, status_code=status.HTTP_202_ACCEPTED
 )
 @limiter.limit("20/minute")
 async def create_analysis_job(
@@ -352,7 +404,7 @@ async def create_analysis_job(
     request: Request,
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
-) -> AnalysisJobStatusResponse:
+) -> AnalysisJobStatusLiteResponse:
     service = AnalysisApplicationService(db)
     response = await service.create_analysis_job(
         user_id=auth.user.id,
@@ -364,15 +416,15 @@ async def create_analysis_job(
         audience_segment=payload.audience_segment,
     )
     await dispatch_prediction_job(response.job.id)
-    return await service.get_analysis_job(user_id=auth.user.id, job_id=response.job.id)
+    return response
 
 
-@router.get("/jobs/{job_id}", response_model=AnalysisJobStatusResponse)
+@router.get("/jobs/{job_id}", response_model=AnalysisJobStatusLiteResponse)
 async def get_analysis_job(
     job_id: UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
-) -> AnalysisJobStatusResponse:
+) -> AnalysisJobStatusLiteResponse:
     return await AnalysisApplicationService(db).get_analysis_job(
         user_id=auth.user.id,
         job_id=job_id,
@@ -381,7 +433,7 @@ async def get_analysis_job(
 
 @router.post(
     "/jobs/{job_id}/rerun",
-    response_model=AnalysisJobStatusResponse,
+    response_model=AnalysisJobStatusLiteResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 @limiter.limit("10/minute")
@@ -390,7 +442,7 @@ async def rerun_analysis_job(
     request: Request,
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
-) -> AnalysisJobStatusResponse:
+) -> AnalysisJobStatusLiteResponse:
     """Re-queue a failed or canceled analysis job without re-uploading the asset."""
     from backend.application.services.predictions import PredictionApplicationService
 
@@ -412,10 +464,26 @@ async def stream_analysis_job_events(
     await _load_analysis_job_snapshot(user_id=auth.user.id, job_id=job_id)
 
     async def event_stream():
+        stream_slot = await _acquire_stream_slot(user_id=auth.user.id, job_id=job_id)
+        if stream_slot is None and _resolve_stream_redis_url() is not None:
+            raise ValidationAppError("Too many active stream connections for this job.")
         subscription = await open_analysis_job_subscription(job_id)
         last_snapshot_json: str | None = None
+        last_sent_job_status: str = ""
         heartbeat_elapsed = 0.0
-        last_snapshot_refresh_at = 0.0
+        stream_started_at = time.perf_counter()
+        stream_close_reason = "disconnected"
+        stream_mode = "polling_fallback" if subscription is None else "redis_pubsub"
+
+        metrics.increment(
+            "analysis_stream_sessions_total",
+            labels={"mode": stream_mode},
+        )
+        if subscription is None:
+            metrics.increment(
+                "analysis_stream_fallback_total",
+                labels={"source": "subscription_unavailable"},
+            )
 
         try:
             initial_snapshot = await _load_analysis_job_snapshot(
@@ -423,25 +491,25 @@ async def stream_analysis_job_events(
             )
             current_payload = initial_snapshot.model_dump(mode="json")
             last_snapshot_json = json.dumps(current_payload, sort_keys=True)
-            last_snapshot_refresh_at = asyncio.get_running_loop().time()
+            last_sent_job_status = str(initial_snapshot.job.status)
             yield _encode_sse_event(event="status", data=current_payload)
 
             if initial_snapshot.job.status in {"completed", "failed"}:
                 yield _encode_sse_event(event="done", data=current_payload)
+                stream_close_reason = "terminal_initial_snapshot"
                 return
 
             while True:
                 if await request.is_disconnected():
+                    stream_close_reason = "client_disconnected"
                     break
 
                 should_refresh_snapshot = False
                 if subscription is None:
-                    await asyncio.sleep(1.0)
-                    heartbeat_elapsed += 1.0
-                    should_refresh_snapshot = (
-                        heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
-                    )
-                    if heartbeat_elapsed >= 15.0:
+                    await asyncio.sleep(SSE_FALLBACK_POLL_SECONDS)
+                    heartbeat_elapsed += SSE_FALLBACK_POLL_SECONDS
+                    should_refresh_snapshot = True
+                    if heartbeat_elapsed >= SSE_HEARTBEAT_SECONDS:
                         yield _encode_sse_event(
                             event="heartbeat",
                             data={"job_id": str(job_id)},
@@ -449,16 +517,17 @@ async def stream_analysis_job_events(
                         heartbeat_elapsed = 0.0
                 else:
                     _, pubsub = subscription
+                    pubsub_poll_timeout = min(10.0, max(1.0, SSE_FALLBACK_POLL_SECONDS))
                     message = await pubsub.get_message(
                         ignore_subscribe_messages=True,
-                        timeout=10.0,
+                        timeout=pubsub_poll_timeout,
                     )
                     if message is None:
-                        heartbeat_elapsed += 10.0
-                        should_refresh_snapshot = (
-                            heartbeat_elapsed >= settings.analysis_progress_snapshot_refresh_seconds
-                        )
-                        if heartbeat_elapsed >= 15.0:
+                        heartbeat_elapsed += pubsub_poll_timeout
+                        # Pub/sub delivery can fail across processes (broker URL drift, publish
+                        # errors). Re-load the job row so the stream matches DB even without events.
+                        should_refresh_snapshot = True
+                        if heartbeat_elapsed >= SSE_HEARTBEAT_SECONDS:
                             yield _encode_sse_event(
                                 event="heartbeat",
                                 data={"job_id": str(job_id)},
@@ -467,6 +536,8 @@ async def stream_analysis_job_events(
                     else:
                         heartbeat_elapsed = 0.0
                         decoded_message = _decode_analysis_job_event_message(message)
+                        if decoded_message is None:
+                            metrics.increment("analysis_stream_decode_errors_total")
                         progress_payload = (decoded_message or {}).get("payload") or {}
                         if decoded_message is not None and (
                             decoded_message.get("event_type") == "job_progress"
@@ -522,27 +593,55 @@ async def stream_analysis_job_events(
                         }:
                             should_refresh_snapshot = True
 
-                loop_time = asyncio.get_running_loop().time()
-                if should_refresh_snapshot or (
-                    loop_time - last_snapshot_refresh_at
-                    >= settings.analysis_progress_snapshot_refresh_seconds
-                ):
+                if should_refresh_snapshot:
                     snapshot = await _load_analysis_job_snapshot(
                         user_id=auth.user.id, job_id=job_id
                     )
                     payload = snapshot.model_dump(mode="json")
                     snapshot_json = json.dumps(payload, sort_keys=True)
                     current_payload = payload
-                    last_snapshot_refresh_at = loop_time
                     if snapshot_json != last_snapshot_json:
+                        new_status = str(snapshot.job.status)
+                        progress_stage = None
+                        raw_progress = payload.get("progress")
+                        if isinstance(raw_progress, dict):
+                            progress_stage = raw_progress.get("stage")
+                        if (
+                            stream_mode == "redis_pubsub"
+                            and new_status != last_sent_job_status
+                        ):
+                            log_event(
+                                logger,
+                                "analysis_stream_pubsub_snapshot_status_changed",
+                                job_id=str(job_id),
+                                previous_status=last_sent_job_status,
+                                new_status=new_status,
+                                progress_stage=progress_stage,
+                            )
                         yield _encode_sse_event(event="status", data=payload)
                         last_snapshot_json = snapshot_json
+                        last_sent_job_status = new_status
 
                     if snapshot.job.status in {"completed", "failed"}:
                         yield _encode_sse_event(event="done", data=payload)
+                        stream_close_reason = "terminal_snapshot"
                         break
         finally:
             await close_analysis_job_subscription(subscription)
+            if stream_slot is not None:
+                slot_client, slot_key = stream_slot
+                try:
+                    await slot_client.decr(slot_key)
+                finally:
+                    await slot_client.aclose()
+            metrics.observe(
+                "analysis_stream_session_seconds",
+                time.perf_counter() - stream_started_at,
+                labels={
+                    "mode": stream_mode,
+                    "close_reason": stream_close_reason,
+                },
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -555,13 +654,13 @@ async def stream_analysis_job_events(
     )
 
 
-@router.get("/jobs/{job_id}/results", response_model=AnalysisResultRead)
+@router.get("/jobs/{job_id}/results", response_model=AnalysisJobResultDetailResponse)
 async def get_analysis_results(
     job_id: UUID,
     db: AsyncSession = Depends(get_db),
     auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
-) -> AnalysisResultRead:
-    return await AnalysisApplicationService(db).get_analysis_result(
+) -> AnalysisJobResultDetailResponse:
+    return await AnalysisApplicationService(db).get_analysis_job_detail(
         user_id=auth.user.id,
         job_id=job_id,
     )

@@ -9,9 +9,11 @@ import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import ClassVar
 from xml.etree import ElementTree
 
 from backend.core.exceptions import DependencyAppError, ValidationAppError
+from backend.core.mime_types import DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES
 
 try:
     from pypdf import PdfReader
@@ -59,26 +61,6 @@ DOCX_MIME_TYPES = frozenset(
 ODT_MIME_TYPES = frozenset({"application/vnd.oasis.opendocument.text"})
 RTF_MIME_TYPES = frozenset({"application/rtf", "text/rtf"})
 
-DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES = list(
-    dict.fromkeys(
-        [
-            "text/plain",
-            "text/markdown",
-            "text/csv",
-            "text/tab-separated-values",
-            "application/json",
-            "text/html",
-            "application/xml",
-            "text/xml",
-            "application/pdf",
-            "application/msword",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.oasis.opendocument.text",
-            "application/rtf",
-            "text/rtf",
-        ]
-    )
-)
 SUPPORTED_TEXT_DOCUMENT_MIME_TYPES = frozenset(DEFAULT_ANALYSIS_ALLOWED_TEXT_MIME_TYPES)
 
 _DOCX_TEXT_MEMBERS = (
@@ -117,7 +99,7 @@ class ExtractedDocumentText:
 
 
 class _HtmlTextExtractor(HTMLParser):
-    _BLOCK_TAGS = {
+    _BLOCK_TAGS: ClassVar[set[str]] = {
         "address",
         "article",
         "aside",
@@ -195,9 +177,10 @@ class DocumentTextExtractor:
 
         resolved_mime_type = resolve_text_document_mime_type(mime_type, filename or path.name)
         if not is_supported_text_document(resolved_mime_type, filename or path.name):
-            raise ValidationAppError(
-                f"Unsupported text document type: {resolved_mime_type or infer_text_document_mime_type(path.name) or 'unknown'}"
+            inferred_type = (
+                resolved_mime_type or infer_text_document_mime_type(path.name) or "unknown"
             )
+            raise ValidationAppError(f"Unsupported text document type: {inferred_type}")
 
         if resolved_mime_type in PDF_MIME_TYPES:
             text = self._extract_pdf(path)
@@ -227,7 +210,8 @@ class DocumentTextExtractor:
         if not normalized_text:
             raise ValidationAppError(
                 "No readable text could be extracted from the uploaded document. "
-                "If this is a scanned PDF or image-based document, convert it to selectable text first."
+                "If this is a scanned PDF or image-based document, "
+                "convert it to selectable text first."
             )
 
         return ExtractedDocumentText(

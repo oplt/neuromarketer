@@ -13,15 +13,13 @@ from backend.db.models import (
     ApiKey,
     ApiKeyStatus,
     AuditLog,
-    InferenceJob,
-    JobStatus,
     Organization,
     OrganizationMembership,
     OrgRole,
-    Project,
     User,
     WebhookEndpoint,
 )
+from backend.db.repositories import AccountAdminRepository
 from backend.schemas.account import (
     AccountApiKeyRead,
     AccountAuditLogRead,
@@ -62,6 +60,7 @@ ADMIN_ROLES = {OrgRole.OWNER, OrgRole.ADMIN}
 class AccountAdminApplicationService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self.repo = AccountAdminRepository(session)
 
     async def get_control_center(
         self,
@@ -436,55 +435,13 @@ class AccountAdminApplicationService:
         return webhook
 
     async def _build_stats(self, *, organization_id: UUID) -> AccountWorkspaceStatsRead:
-        member_count = int(
-            await self.session.scalar(
-                select(func.count(OrganizationMembership.id)).where(
-                    OrganizationMembership.organization_id == organization_id
-                )
-            )
-            or 0
-        )
-        project_count = int(
-            await self.session.scalar(
-                select(func.count(Project.id)).where(Project.organization_id == organization_id)
-            )
-            or 0
-        )
-        active_api_key_count = int(
-            await self.session.scalar(
-                select(func.count(ApiKey.id)).where(
-                    ApiKey.organization_id == organization_id,
-                    ApiKey.status == ApiKeyStatus.ACTIVE,
-                )
-            )
-            or 0
-        )
-        active_webhook_count = int(
-            await self.session.scalar(
-                select(func.count(WebhookEndpoint.id)).where(
-                    WebhookEndpoint.organization_id == organization_id,
-                    WebhookEndpoint.is_active.is_(True),
-                )
-            )
-            or 0
-        )
-        completed_analysis_count = int(
-            await self.session.scalar(
-                select(func.count(InferenceJob.id))
-                .join(Project, Project.id == InferenceJob.project_id)
-                .where(
-                    Project.organization_id == organization_id,
-                    InferenceJob.status == JobStatus.SUCCEEDED,
-                )
-            )
-            or 0
-        )
+        stats = await self.repo.get_control_center_stats(organization_id=organization_id)
         return AccountWorkspaceStatsRead(
-            member_count=member_count,
-            project_count=project_count,
-            active_api_key_count=active_api_key_count,
-            active_webhook_count=active_webhook_count,
-            completed_analysis_count=completed_analysis_count,
+            member_count=stats.member_count,
+            project_count=stats.project_count,
+            active_api_key_count=stats.active_api_key_count,
+            active_webhook_count=stats.active_webhook_count,
+            completed_analysis_count=stats.completed_analysis_count,
         )
 
     async def _list_api_keys(self, *, organization_id: UUID) -> list[AccountApiKeyRead]:

@@ -1,0 +1,16 @@
+.PHONY: local-dev kill-dev kill-celery
+
+kill-celery:
+	-pgrep -f "[c]elery -A backend.celery_app" | xargs -r kill
+
+kill-dev:
+	-pgrep -f "[u]vicorn" | xargs -r kill
+	-pgrep -f "[c]elery -A backend.celery_app" | xargs -r kill
+	-pgrep -f "[v]ite" | xargs -r kill
+	-pgrep -f "[n]pm run dev" | xargs -r kill
+	-pgrep -f "[h]oncho -f Procfile.dev start" | xargs -r kill
+	-fuser -k 8000/tcp
+	-fuser -k 5173/tcp
+
+local-dev: kill-dev
+	honcho -f Procfile.dev start

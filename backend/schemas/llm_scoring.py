@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
-
-class StrictSchemaModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+from backend.schemas.base import StrictSchemaModel
 
 
 class MetricAssessment(StrictSchemaModel):

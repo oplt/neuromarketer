@@ -34,15 +34,17 @@ class ComparisonRepository:
         self.session.add(comparison)
         await self.session.flush()
 
-        for index, (creative_id, creative_version_id) in enumerate(creative_items, start=1):
-            self.session.add(
+        self.session.add_all(
+            [
                 CreativeComparisonItem(
                     comparison_id=comparison.id,
                     creative_id=creative_id,
                     creative_version_id=creative_version_id,
                     candidate_rank=index,
                 )
-            )
+                for index, (creative_id, creative_version_id) in enumerate(creative_items, start=1)
+            ]
+        )
 
         await self.session.flush()
         await self.session.refresh(comparison)
@@ -79,8 +81,8 @@ class ComparisonRepository:
         self.session.add(comparison_result)
         await self.session.flush()
 
-        for item in items:
-            self.session.add(
+        self.session.add_all(
+            [
                 CreativeComparisonItemResult(
                     comparison_result_id=comparison_result.id,
                     creative_version_id=item["creative_version_id"],
@@ -88,7 +90,9 @@ class ComparisonRepository:
                     scores_json=item["scores_json"],
                     rationale=item.get("rationale"),
                 )
-            )
+                for item in items
+            ]
+        )
 
         await self.session.flush()
         await self.session.refresh(comparison_result)

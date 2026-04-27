@@ -5,6 +5,7 @@ from contextlib import contextmanager, suppress
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
+from itertools import islice
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -135,7 +136,7 @@ def normalize_log_value(value: Any, *, key: str | None = None, depth: int = 0) -
     if isinstance(value, Mapping):
         if _is_large_content_key(lower_key):
             return {
-                "keys": sorted(str(item) for item in value.keys())[:10],
+                "keys": sorted(str(item) for item in value)[:10],
                 "item_count": len(value),
             }
         normalized: dict[str, Any] = {}
@@ -148,15 +149,22 @@ def normalize_log_value(value: Any, *, key: str | None = None, depth: int = 0) -
             )
         return normalized
     if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-        items = list(value)
         if depth >= 2:
-            return {"item_count": len(items)}
+            if hasattr(value, "__len__"):
+                try:
+                    return {"item_count": len(value)}  # type: ignore[arg-type]
+                except TypeError:
+                    pass
+            sample = list(islice(iter(value), _MAX_COLLECTION_ITEMS + 1))
+            sample_count = min(len(sample), _MAX_COLLECTION_ITEMS)
+            return {"item_count": "unknown", "sample_count": sample_count}
+        sample = list(islice(iter(value), _MAX_COLLECTION_ITEMS + 1))
         normalized_items = [
             normalize_log_value(item, key=key, depth=depth + 1)
-            for item in items[:_MAX_COLLECTION_ITEMS]
+            for item in sample[:_MAX_COLLECTION_ITEMS]
         ]
-        if len(items) > _MAX_COLLECTION_ITEMS:
-            normalized_items.append({"_truncated_items": len(items) - _MAX_COLLECTION_ITEMS})
+        if len(sample) > _MAX_COLLECTION_ITEMS:
+            normalized_items.append({"_truncated_items": "unknown"})
         return normalized_items
     return value
 

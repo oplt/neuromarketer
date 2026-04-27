@@ -61,9 +61,8 @@ class AnalysisScoringService:
 
     def _request_options(self) -> dict[str, Any]:
         max_tokens = self._resolve_max_tokens()
-        preview = self.preview_route()
-
-        if preview.provider == "ollama":
+        token_key = self.router.output_token_option_key_for_mode(mode=self.MODE)
+        if token_key == "num_predict":
             return {"num_predict": max_tokens}
         return {"max_tokens": max_tokens}
 

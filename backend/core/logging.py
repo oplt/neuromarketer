@@ -47,7 +47,7 @@ def _coerce_legacy_event_dict(_: Any, __: str, event_dict: dict[str, Any]) -> di
 
         extra_fields = legacy_extra.get("extra_fields")
         if isinstance(extra_fields, dict):
-            event_dict.update(normalize_log_fields(extra_fields))
+            event_dict.update(extra_fields)
 
     record = event_dict.get("_record")
     if record is not None:
@@ -57,7 +57,7 @@ def _coerce_legacy_event_dict(_: Any, __: str, event_dict: dict[str, Any]) -> di
 
         record_extra_fields = getattr(record, "extra_fields", None)
         if isinstance(record_extra_fields, dict):
-            event_dict.update(normalize_log_fields(record_extra_fields))
+            event_dict.update(record_extra_fields)
 
     return event_dict
 
@@ -267,7 +267,7 @@ def log_event(
     level: str = "info",
     **fields: Any,
 ) -> None:
-    getattr(logger, level)(event, extra=normalize_log_fields(fields))
+    getattr(logger, level)(event, **fields)
 
 
 def log_exception(
@@ -278,7 +278,7 @@ def log_exception(
     level: str = "error",
     **fields: Any,
 ) -> None:
-    safe_fields = normalize_log_fields(fields)
+    safe_fields = dict(fields)
     safe_fields.setdefault("error_type", exc.__class__.__name__)
     safe_fields.setdefault("error_message", str(exc))
     getattr(logger, level)(

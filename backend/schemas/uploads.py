@@ -4,14 +4,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+from backend.schemas.base import APIBaseSchema, ORMBaseSchema
 
 
-class ORMBaseSchema(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-
-class UploadInitRequest(BaseModel):
+class UploadInitRequest(APIBaseSchema):
     project_id: UUID
     creative_id: UUID | None = None
     creative_version_id: UUID | None = None
@@ -22,7 +20,7 @@ class UploadInitRequest(BaseModel):
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
-class UploadInitResponse(BaseModel):
+class UploadInitResponse(APIBaseSchema):
     upload_session_id: UUID
     upload_token: str
     bucket_name: str
@@ -31,7 +29,7 @@ class UploadInitResponse(BaseModel):
     presigned_put_url: str | None = None
 
 
-class UploadCompleteRequest(BaseModel):
+class UploadCompleteRequest(APIBaseSchema):
     upload_token: str
 
 
@@ -72,6 +70,6 @@ class StoredArtifactRead(ORMBaseSchema):
     updated_at: datetime
 
 
-class DirectUploadResponse(BaseModel):
+class DirectUploadResponse(APIBaseSchema):
     upload_session: UploadSessionRead
     artifact: StoredArtifactRead

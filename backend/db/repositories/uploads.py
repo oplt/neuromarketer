@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import StoredArtifact, UploadSession, UploadStatus
@@ -144,9 +144,10 @@ class UploadRepository:
         *,
         project_id: UUID,
         created_by_user_id: UUID,
+        media_type: str | None = None,
         limit: int,
     ) -> list[StoredArtifact]:
-        result = await self.session.execute(
+        query = (
             select(StoredArtifact)
             .where(
                 StoredArtifact.project_id == project_id,
@@ -157,6 +158,34 @@ class UploadRepository:
             .order_by(desc(StoredArtifact.created_at))
             .limit(limit)
         )
+        if media_type is not None:
+            mime_fallback_filter = {
+                "audio": StoredArtifact.mime_type.like("audio/%"),
+                "text": or_(
+                    StoredArtifact.mime_type.like("text/%"),
+                    StoredArtifact.mime_type.in_(
+                        [
+                            "application/pdf",
+                            "application/json",
+                            "application/rtf",
+                            "application/msword",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        ]
+                    ),
+                ),
+                "video": StoredArtifact.mime_type.like("video/%"),
+            }.get(media_type, StoredArtifact.mime_type.like("video/%"))
+            query = query.where(
+                or_(
+                    StoredArtifact.metadata_json["media_type"].astext == media_type,
+                    or_(
+                        StoredArtifact.metadata_json["media_type"].astext.is_(None),
+                        StoredArtifact.metadata_json["media_type"].astext == "",
+                    )
+                    & mime_fallback_filter,
+                )
+            )
+        result = await self.session.execute(query)
         return list(result.scalars().all())
 
     async def mark_stored(

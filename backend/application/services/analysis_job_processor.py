@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.config import settings
@@ -30,6 +31,7 @@ PERSISTED_PROGRESS_STAGES = frozenset(
         "primary_scoring_ready",
         "recommendations_ready",
         "completed",
+        "failed",
     }
 )
 
@@ -50,6 +52,7 @@ class AnalysisJobProcessor:
         stage: str,
         stage_label: str,
         diagnostics: dict[str, int | None] | None = None,
+        partial_result: dict[str, Any] | None = None,
         is_partial: bool | None = None,
         replace_diagnostics: bool = False,
         persist: bool = False,
@@ -72,6 +75,10 @@ class AnalysisJobProcessor:
         }
         if is_partial is not None:
             next_progress["is_partial"] = is_partial
+        if persist and partial_result is not None:
+            runtime_params["analysis_partial_result"] = partial_result
+        elif persist and is_partial is False and stage in {"completed", "failed"}:
+            runtime_params.pop("analysis_partial_result", None)
         runtime_params["analysis_progress"] = next_progress
         job.runtime_params = runtime_params
         if persist:
@@ -118,6 +125,7 @@ class AnalysisJobProcessor:
             stage=stage,
             stage_label=stage_label,
             diagnostics=diagnostics,
+            partial_result=partial_result,
             is_partial=is_partial,
             replace_diagnostics=replace_diagnostics,
             persist=persist,
@@ -227,7 +235,8 @@ class AnalysisJobProcessor:
             )
 
             inference_started_at = time.perf_counter()
-            execution = self.tribe_inference.run_for_version(
+            execution = await run_in_threadpool(
+                self.tribe_inference.run_for_version,
                 creative_version=creative_version,
                 request_payload=job.request_payload or {},
                 runtime_params=job.runtime_params or {},
@@ -392,7 +401,8 @@ class AnalysisJobProcessor:
             )
 
             preview_started_at = time.perf_counter()
-            preview_payload = self.postprocessor.build_dashboard_payload(
+            preview_payload = await run_in_threadpool(
+                self.postprocessor.build_dashboard_payload,
                 runtime_output=runtime_output,
                 scoring_bundle=scoring_bundle,
                 modality=modality,
@@ -451,18 +461,10 @@ class AnalysisJobProcessor:
             )
 
             postprocess_started_at = time.perf_counter()
-            dashboard_payload = self.postprocessor.build_dashboard_payload(
-                runtime_output=runtime_output,
-                scoring_bundle=scoring_bundle,
-                modality=modality,
-                objective=str(objective).strip()
-                if isinstance(objective, str) and objective.strip()
-                else None,
-                goal_template=normalize_goal_template(campaign_context.get("goal_template")),
-                channel=normalize_analysis_channel(campaign_context.get("channel")),
-                audience_segment=str(campaign_context.get("audience_segment") or "").strip()
-                or None,
-                source_label=source_label,
+            dashboard_payload = await run_in_threadpool(
+                self.postprocessor.with_recommendations,
+                preview_payload,
+                scoring_bundle,
             )
             postprocess_finished_at = time.perf_counter()
             await self._record_progress(

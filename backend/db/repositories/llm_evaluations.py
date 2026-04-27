@@ -96,7 +96,7 @@ class LLMEvaluationRepository:
                 LLMEvaluationRecord.job_id == job_id,
                 LLMEvaluationRecord.mode == _mode_value(mode),
             )
-            .with_for_update()
+            .with_for_update(skip_locked=True)
         )
         record = result.scalar_one_or_none()
         if record is None:

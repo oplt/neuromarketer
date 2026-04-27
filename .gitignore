@@ -366,5 +366,9 @@ TODO.txt
 .aider*
 .agents
 .claude
+.codex
 logs/*
+AGENTS.md
+CLAUDE.md
+/skills
 

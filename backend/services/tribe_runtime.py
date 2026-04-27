@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 import re
 import shutil
 import tempfile
 import time
+import warnings
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from contextlib import contextmanager
+
 
 import numpy as np
 
@@ -25,6 +29,91 @@ from backend.core.logging import duration_ms, get_logger, log_event, log_excepti
 from backend.services.text_preprocess import TextPreprocessService
 
 logger = get_logger(__name__)
+
+# tribev2's TribeModel.from_pretrained does not accept HF ``token`` / legacy ``use_auth_token``.
+# Some hub helpers or wrappers inject those kwargs; strip them once on the live class.
+_TRIBE_FROM_PRETRAINED_PATCH_ATTR = "_neuromarketer_strip_hf_token_kwargs_applied"
+
+
+@contextmanager
+def _disable_tqdm():
+    old = os.environ.get("TQDM_DISABLE")
+    os.environ["TQDM_DISABLE"] = "1"
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TQDM_DISABLE", None)
+        else:
+            os.environ["TQDM_DISABLE"] = old
+
+
+def _ensure_tribe_model_from_pretrained_strips_hub_kwargs() -> None:
+    """Monkey-patch tribev2 so ``from_pretrained`` ignores token-style kwargs Hub stacks may inject."""
+    demo_utils = importlib.import_module("tribev2.demo_utils")
+    tribe_model = getattr(demo_utils, "TribeModel", None)
+    if tribe_model is None:
+        return
+    if getattr(tribe_model, _TRIBE_FROM_PRETRAINED_PATCH_ATTR, False):
+        return
+
+    descriptor = inspect.getattr_static(tribe_model, "from_pretrained")
+    if not isinstance(descriptor, classmethod):
+        return
+    underlying = descriptor.__func__
+
+    @classmethod  # type: ignore[misc]
+    def from_pretrained_compat(
+        cls: Any,
+        checkpoint_dir: str | Path,
+        checkpoint_name: str = "best.ckpt",
+        cache_folder: str | Path | None = None,
+        cluster: str | None = None,
+        device: str = "auto",
+        config_update: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.pop("token", None)
+        kwargs.pop("use_auth_token", None)
+        if kwargs:
+            names = ", ".join(sorted(kwargs))
+            raise TypeError(
+                "TribeModel.from_pretrained does not accept "
+                f"{names!s}. Use HF_TOKEN in the environment."
+            )
+        return underlying(
+            cls,
+            checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+            cache_folder=cache_folder,
+            cluster=cluster,
+            device=device,
+            config_update=config_update,
+        )
+
+    setattr(tribe_model, _TRIBE_FROM_PRETRAINED_PATCH_ATTR, True)
+    tribe_model.from_pretrained = from_pretrained_compat  # type: ignore[method-assign]
+
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"LabelEncoder: event_types has not been set.*",
+    category=UserWarning,
+    module=r"neuralset\.extractors\.base",
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"Missing events will be encoded using the default all-zero value.*",
+    category=UserWarning,
+    module=r"neuralset\.extractors\.base",
+)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch\.cuda\.amp\.autocast.*deprecated.*",
+    category=FutureWarning,
+)
 
 SUPPORTED_TRIBE_MODALITIES = frozenset({"video", "audio", "text"})
 UNSUPPORTED_TRIBE_MODALITIES = {
@@ -82,7 +171,7 @@ class TribeRuntime:
             settings.tribe_text_feature_model_name
         )
         self.feature_cluster = settings.tribe_feature_cluster
-        self.hf_token = settings.tribe_hf_token
+        self.hf_token = settings.hf_token
         self.enable_roi_summary = settings.tribe_enable_roi_summary
         self.text_preprocessor = TextPreprocessService()
         self.model_name = self.model_repo_id
@@ -254,6 +343,7 @@ class TribeRuntime:
             try:
                 tribe_module = importlib.import_module("tribev2")
                 model_cls = tribe_module.TribeModel
+                _ensure_tribe_model_from_pretrained_strips_hub_kwargs()
                 requested_device = self._get_requested_device()
                 model = model_cls.from_pretrained(
                     self.model_repo_id,
@@ -296,7 +386,9 @@ class TribeRuntime:
         self.load()
 
         model = self._get_loaded_model()
+        self._coerce_dataloader_workers_zero(model)
         temp_text_path: Path | None = None
+
 
         try:
             if payload.modality == "video":
@@ -315,17 +407,21 @@ class TribeRuntime:
                 predictions=predictions,
                 segments=segments,
             )
+
         finally:
             if temp_text_path is not None and temp_text_path.exists():
                 temp_text_path.unlink(missing_ok=True)
 
+
     def _prepare_video_events(self, *, model: Any, payload: TribeRuntimeInput) -> Any:
         path = self._require_local_file(payload.local_path, suffix_hint="video")
-        return model.get_events_dataframe(video_path=str(path))
+        with _disable_tqdm():
+            return model.get_events_dataframe(video_path=str(path))
 
     def _prepare_audio_events(self, *, model: Any, payload: TribeRuntimeInput) -> Any:
         path = self._require_local_file(payload.local_path, suffix_hint="audio")
-        return model.get_events_dataframe(audio_path=str(path))
+        with _disable_tqdm():
+            return model.get_events_dataframe(audio_path=str(path))
 
     def _prepare_text_events(
         self, *, model: Any, payload: TribeRuntimeInput
@@ -338,6 +434,7 @@ class TribeRuntime:
         processed = self.text_preprocessor.preprocess(raw_text)
         return self._build_text_events_dataframe(processed.normalized_text), None
 
+
     def _build_text_events_dataframe(self, text: str) -> Any:
         try:
             import pandas as pd
@@ -347,35 +444,290 @@ class TribeRuntime:
                 "TRIBE text event preparation dependencies are not installed."
             ) from exc
 
-        tokens = [token for token in re.findall(r"(?u)\b[\w'-]+\b", text) if token.strip()]
-        if not tokens:
-            raise ValidationAppError("TRIBE text inference requires at least one readable word.")
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", text.strip())
+            if sentence.strip()
+        ]
+        if not sentences:
+            sentences = [text.strip()]
 
-        context_window: deque[str] = deque(maxlen=128)
         rows: list[dict[str, Any]] = []
+        context_window: deque[str] = deque(maxlen=160)
         start_seconds = 0.0
+        sequence_id = 0
 
-        for index, token in enumerate(tokens):
-            context_window.append(token)
-            duration_seconds = max(0.18, min(0.75, len(token) * 0.045))
+        event_vocabulary = {
+            "Word",
+            "Sentence",
+            "Pause",
+            "CTA",
+            "BrandMention",
+            "NumberClaim",
+            "UrgencyCue",
+            "Question",
+        }
+
+        cta_terms = {
+            "buy",
+            "shop",
+            "order",
+            "subscribe",
+            "signup",
+            "sign",
+            "join",
+            "download",
+            "try",
+            "book",
+            "start",
+            "claim",
+            "register",
+            "learn",
+        }
+        urgency_terms = {
+            "now",
+            "today",
+            "limited",
+            "hurry",
+            "urgent",
+            "soon",
+            "deadline",
+            "last",
+            "exclusive",
+            "only",
+        }
+
+        for sentence_index, sentence in enumerate(sentences):
+            sentence_tokens = [
+                token for token in re.findall(r"(?u)\b[\w'-]+\b", sentence) if token.strip()
+            ]
+            if not sentence_tokens:
+                continue
+
+            sentence_start = start_seconds
+            sentence_duration = max(
+                0.75,
+                min(8.0, sum(max(0.18, min(0.75, len(token) * 0.045)) for token in sentence_tokens)),
+            )
+
             rows.append(
                 {
-                    "type": "Word",
-                    "text": token,
-                    "context": " ".join(context_window),
-                    "start": round(start_seconds, 6),
-                    "duration": round(duration_seconds, 6),
+                    "type": "Sentence",
+                    "event_type": "Sentence",
+                    "text": sentence,
+                    "context": " ".join(context_window) or sentence,
+                    "start": round(sentence_start, 6),
+                    "duration": round(sentence_duration, 6),
                     "timeline": "default",
                     "subject": "default",
-                    "sequence_id": index,
+                    "sequence_id": sequence_id,
+                    "sentence_index": sentence_index,
+                    "synthetic": True,
                 }
             )
-            start_seconds += duration_seconds
+            sequence_id += 1
 
-        events = pd.DataFrame(rows)
-        return standardize_events(events)
+            if sentence.endswith("?"):
+                rows.append(
+                    {
+                        "type": "Question",
+                        "event_type": "Question",
+                        "text": sentence,
+                        "context": sentence,
+                        "start": round(sentence_start, 6),
+                        "duration": round(min(sentence_duration, 1.5), 6),
+                        "timeline": "default",
+                        "subject": "default",
+                        "sequence_id": sequence_id,
+                        "sentence_index": sentence_index,
+                        "synthetic": True,
+                    }
+                )
+                sequence_id += 1
+
+            for token in sentence_tokens:
+                normalized = token.strip().lower()
+                context_window.append(token)
+                duration_seconds = max(0.18, min(0.75, len(token) * 0.045))
+
+                rows.append(
+                    {
+                        "type": "Word",
+                        "event_type": "Word",
+                        "text": token,
+                        "context": " ".join(context_window),
+                        "start": round(start_seconds, 6),
+                        "duration": round(duration_seconds, 6),
+                        "timeline": "default",
+                        "subject": "default",
+                        "sequence_id": sequence_id,
+                        "sentence_index": sentence_index,
+                        "synthetic": True,
+                    }
+                )
+                sequence_id += 1
+
+                if normalized in cta_terms:
+                    rows.append(
+                        {
+                            "type": "CTA",
+                            "event_type": "CTA",
+                            "text": token,
+                            "context": " ".join(context_window),
+                            "start": round(start_seconds, 6),
+                            "duration": round(duration_seconds, 6),
+                            "timeline": "default",
+                            "subject": "default",
+                            "sequence_id": sequence_id,
+                            "sentence_index": sentence_index,
+                            "synthetic": True,
+                        }
+                    )
+                    sequence_id += 1
+
+                if normalized in urgency_terms:
+                    rows.append(
+                        {
+                            "type": "UrgencyCue",
+                            "event_type": "UrgencyCue",
+                            "text": token,
+                            "context": " ".join(context_window),
+                            "start": round(start_seconds, 6),
+                            "duration": round(duration_seconds, 6),
+                            "timeline": "default",
+                            "subject": "default",
+                            "sequence_id": sequence_id,
+                            "sentence_index": sentence_index,
+                            "synthetic": True,
+                        }
+                    )
+                    sequence_id += 1
+
+                if any(char.isdigit() for char in token):
+                    rows.append(
+                        {
+                            "type": "NumberClaim",
+                            "event_type": "NumberClaim",
+                            "text": token,
+                            "context": " ".join(context_window),
+                            "start": round(start_seconds, 6),
+                            "duration": round(duration_seconds, 6),
+                            "timeline": "default",
+                            "subject": "default",
+                            "sequence_id": sequence_id,
+                            "sentence_index": sentence_index,
+                            "synthetic": True,
+                        }
+                    )
+                    sequence_id += 1
+
+                if token[:1].isupper() and len(token) > 2 and sentence_tokens.index(token) != 0:
+                    rows.append(
+                        {
+                            "type": "BrandMention",
+                            "event_type": "BrandMention",
+                            "text": token,
+                            "context": " ".join(context_window),
+                            "start": round(start_seconds, 6),
+                            "duration": round(duration_seconds, 6),
+                            "timeline": "default",
+                            "subject": "default",
+                            "sequence_id": sequence_id,
+                            "sentence_index": sentence_index,
+                            "synthetic": True,
+                        }
+                    )
+                    sequence_id += 1
+
+                start_seconds += duration_seconds
+
+            if sentence_index < len(sentences) - 1:
+                pause_duration = 0.35
+                rows.append(
+                    {
+                        "type": "Pause",
+                        "event_type": "Pause",
+                        "text": "",
+                        "context": " ".join(context_window),
+                        "start": round(start_seconds, 6),
+                        "duration": pause_duration,
+                        "timeline": "default",
+                        "subject": "default",
+                        "sequence_id": sequence_id,
+                        "sentence_index": sentence_index,
+                        "synthetic": True,
+                    }
+                )
+                sequence_id += 1
+                start_seconds += pause_duration
+
+        if not rows:
+            raise ValidationAppError("TRIBE text inference requires at least one readable word.")
+
+        existing_types = {row["type"] for row in rows}
+
+        for evt in event_vocabulary:
+            if evt not in existing_types:
+                rows.append({
+                    "type": evt,
+                    "event_type": evt,
+                    "text": "",
+                    "context": "",
+                    "start": round(start_seconds, 6),
+                    "duration": 0.001,
+                    "timeline": "default",
+                    "subject": "default",
+                    "sequence_id": sequence_id,
+                    "sentence_index": -1,
+                    "synthetic": True,
+                    "placeholder": True,
+                })
+                sequence_id += 1
+                start_seconds += 0.001
+
+        events = pd.DataFrame(rows).sort_values(["start", "sequence_id"]).reset_index(drop=True)
+        events.attrs["event_types"] = sorted(event_vocabulary)
+        events.attrs["synthetic_event_pipeline"] = "neuromarketer_text_v2"
+
+        return standardize_events(events, treat_missing_as_separate_class=True,)
+
+
+    @staticmethod
+    def _coerce_dataloader_workers_zero(model: Any) -> None:
+        visited: set[int] = set()
+        stack: list[Any] = [model]
+        while stack:
+            obj = stack.pop()
+            if obj is None:
+                continue
+            oid = id(obj)
+            if oid in visited:
+                continue
+            visited.add(oid)
+            if hasattr(obj, "num_workers"):
+                try:
+                    current = getattr(obj, "num_workers", None)
+                    if isinstance(current, int) and current > 0:
+                        setattr(obj, "num_workers", 0)
+                except Exception:
+                    pass
+            for name in (
+                "data",
+                "_model",
+                "model",
+                "datamodule",
+                "trainer",
+                "hparams",
+                "module",
+                "cfg",
+                "config",
+            ):
+                child = getattr(obj, name, None)
+                if child is not None and id(child) not in visited:
+                    stack.append(child)
 
     def _predict(self, *, model: Any, events: Any) -> tuple[np.ndarray, list[Any]]:
+        self._coerce_dataloader_workers_zero(model)
         try:
             predictions, segments = model.predict(events=events)
         except Exception as exc:
@@ -507,6 +859,16 @@ class TribeRuntime:
         has_audio = int(any("audio" in str(name).lower() for name in event_types))
         has_video = int(any("video" in str(name).lower() for name in event_types))
 
+        cta_count = int(sum(count for name, count in event_types.items() if "cta" in str(name).lower()))
+        urgency_count = int(
+            sum(count for name, count in event_types.items() if "urgency" in str(name).lower()))
+        number_claim_count = int(
+            sum(count for name, count in event_types.items() if "number" in str(name).lower()))
+        brand_mention_count = int(
+            sum(count for name, count in event_types.items() if "brand" in str(name).lower()))
+        question_count = int(
+            sum(count for name, count in event_types.items() if "question" in str(name).lower()))
+
         derived_neural_engagement_signal = self._clip01(mean_activation / (p95_activation + 1e-6))
         derived_peak_focus_signal = self._clip01(p95_activation / (peak_activation + 1e-6))
         derived_temporal_dynamics_signal = self._clip01(
@@ -540,6 +902,11 @@ class TribeRuntime:
             "derived_context_density_signal": round(derived_context_density_signal, 6),
             "derived_hemisphere_balance_signal": round(derived_hemisphere_balance_signal, 6),
             "derived_audio_language_mix_signal": round(derived_audio_language_mix_signal, 6),
+            "creative_cta_density_signal": round(self._clip01(cta_count / max(segment_count, 1)), 6),
+            "creative_urgency_density_signal": round(self._clip01(urgency_count / max(segment_count, 1)), 6),
+            "creative_specificity_signal": round(self._clip01((number_claim_count + brand_mention_count) / max(segment_count * 2, 1)),6,),
+            "creative_question_signal": round(self._clip01(question_count / max(segment_count, 1)),6,),
+            "event_type_distribution": event_types,
             "segment_features": segment_features,
         }
 
@@ -725,15 +1092,8 @@ class TribeRuntime:
         if not self.hf_token:
             return
 
-        try:
-            hub_module = importlib.import_module("huggingface_hub")
-            login = getattr(hub_module, "login", None)
-            if callable(login):
-                login(token=self.hf_token, add_to_git_credential=False)
-        except Exception as exc:
-            raise ConfigurationAppError(
-                "Configured Hugging Face credentials could not be applied."
-            ) from exc
+        os.environ["HF_TOKEN"] = self.hf_token
+
 
     @classmethod
     def _enable_local_huggingface_model_paths(cls) -> None:
@@ -809,6 +1169,8 @@ class TribeRuntime:
             "data.audio_feature.device": requested_device,
             "data.image_feature.image.device": requested_device,
             "data.video_feature.image.device": requested_device,
+            # Celery / threadpool: daemon contexts cannot spawn DataLoader worker processes.
+            "data.num_workers": 0,
         }
 
         if settings.tribe_video_feature_frequency_hz is not None:
@@ -882,7 +1244,7 @@ class TribeRuntime:
             return (
                 "TRIBE v2 prediction failed because a configured Hugging Face feature model is gated. "
                 f"Configured text feature model: {self.text_feature_model_name}. "
-                "Set TRIBE_TEXT_FEATURE_MODEL_NAME to a public compatible model or provide TRIBE_HF_TOKEN with access. "
+                "Set TRIBE_TEXT_FEATURE_MODEL_NAME to a public compatible model or provide HF_TOKEN with access. "
                 f"Original error: {message}"
             )
 
@@ -902,6 +1264,15 @@ class TribeRuntime:
                 f"Configured text feature model: {self.text_feature_model_name}. "
                 "Verify the directory exists inside the running API/worker environment and contains a full "
                 "Hugging Face model snapshot. "
+                f"Original error: {message}"
+            )
+
+        if "unexpected keyword argument 'token'" in lowered or "unexpected keyword argument 'use_auth_token'" in lowered:
+            return (
+                "TRIBE v2 refused a Hugging Face ``token`` / ``use_auth_token`` argument on "
+                "``TribeModel.from_pretrained`` (the upstream API only uses environment variables). "
+                "NeuroMarketer applies a compatibility shim on load; restart workers after upgrading. "
+                "Set HF_TOKEN for gated checkpoints. "
                 f"Original error: {message}"
             )
 

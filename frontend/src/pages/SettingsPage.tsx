@@ -2,6 +2,7 @@ import SaveRounded from '@mui/icons-material/SaveRounded'
 import SyncRounded from '@mui/icons-material/SyncRounded'
 import VisibilityOffRounded from '@mui/icons-material/VisibilityOffRounded'
 import VisibilityRounded from '@mui/icons-material/VisibilityRounded'
+import WarningAmberRounded from '@mui/icons-material/WarningAmberRounded'
 import {
   Alert,
   Box,
@@ -19,8 +20,10 @@ import {
   TextField,
   Typography,
 } from '@mui/material'
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 
+import HelpTooltip from '../components/layout/HelpTooltip'
+import PageHeader from '../components/layout/PageHeader'
 import { apiRequest } from '../lib/api'
 import type { AuthSession } from '../lib/session'
 
@@ -54,10 +57,42 @@ type SettingsResponse = {
   fields: SettingField[]
 }
 
+type SettingsCategory = 'workspace' | 'model' | 'admin'
+
+const CATEGORY_LABEL: Record<SettingsCategory, string> = {
+  workspace: 'Workspace',
+  model: 'Model',
+  admin: 'Developer / Admin',
+}
+
+const CATEGORY_TOOLTIP: Record<SettingsCategory, string> = {
+  workspace: 'Day-to-day workspace and product configuration.',
+  model: 'Inference, evaluation, and LLM-related configuration.',
+  admin: 'Sensitive infrastructure and credential settings. Changes here may require a restart and affect all members.',
+}
+
+function classifyGroup(group: SettingGroup): SettingsCategory {
+  const blob = `${group.id} ${group.label} ${group.description}`.toLowerCase()
+  if (
+    /(model|llm|inference|prediction|evaluator|tribe|prompt|score|scoring|ollama|openai)/.test(blob)
+  ) {
+    return 'model'
+  }
+  if (
+    /(secret|token|key|credential|database|redis|broker|celery|queue|infrastructure|admin|debug|dev|backend|webhook|sso|email|smtp|s3|storage|minio|sentry|logging)/.test(
+      blob,
+    )
+  ) {
+    return 'admin'
+  }
+  return 'workspace'
+}
+
 function SettingsPage({ session }: SettingsPageProps) {
   const sessionToken = session.sessionToken
   const [settingsResponse, setSettingsResponse] = useState<SettingsResponse | null>(null)
   const [draftValues, setDraftValues] = useState<Record<string, string>>({})
+  const [activeCategory, setActiveCategory] = useState<SettingsCategory>('workspace')
   const [activeGroupId, setActiveGroupId] = useState('')
   const [hideFieldLabels, setHideFieldLabels] = useState(false)
   const [visibleSecretFields, setVisibleSecretFields] = useState<Record<string, boolean>>({})
@@ -75,6 +110,18 @@ function SettingsPage({ session }: SettingsPageProps) {
     return grouped
   }, [settingsResponse])
 
+  const groupsByCategory = useMemo(() => {
+    const out: Record<SettingsCategory, SettingGroup[]> = {
+      workspace: [],
+      model: [],
+      admin: [],
+    }
+    for (const group of settingsResponse?.groups || []) {
+      out[classifyGroup(group)].push(group)
+    }
+    return out
+  }, [settingsResponse])
+
   const dirtyKeys = useMemo(() => {
     if (!settingsResponse) {
       return []
@@ -84,23 +131,27 @@ function SettingsPage({ session }: SettingsPageProps) {
       .map((field) => field.key)
   }, [draftValues, settingsResponse])
 
+  const visibleGroups = useMemo(
+    () => groupsByCategory[activeCategory] ?? [],
+    [activeCategory, groupsByCategory],
+  )
+
   const activeGroup = useMemo(
-    () => settingsResponse?.groups.find((group) => group.id === activeGroupId) ?? settingsResponse?.groups[0] ?? null,
-    [activeGroupId, settingsResponse],
+    () => visibleGroups.find((group) => group.id === activeGroupId) ?? visibleGroups[0] ?? null,
+    [activeGroupId, visibleGroups],
   )
 
   useEffect(() => {
-    if (!settingsResponse?.groups.length) {
+    if (!visibleGroups.length) {
       if (activeGroupId) {
         setActiveGroupId('')
       }
       return
     }
-
-    if (!settingsResponse.groups.some((group) => group.id === activeGroupId)) {
-      setActiveGroupId(settingsResponse.groups[0].id)
+    if (!visibleGroups.some((group) => group.id === activeGroupId)) {
+      setActiveGroupId(visibleGroups[0].id)
     }
-  }, [activeGroupId, settingsResponse])
+  }, [activeGroupId, visibleGroups])
 
   useEffect(() => {
     if (!sessionToken) {
@@ -134,7 +185,7 @@ function SettingsPage({ session }: SettingsPageProps) {
     void loadSettings()
   }, [sessionToken])
 
-  const handleSave = async () => {
+  const handleSave = useCallback(async () => {
     if (!sessionToken || !settingsResponse || dirtyKeys.length === 0) {
       return
     }
@@ -169,9 +220,9 @@ function SettingsPage({ session }: SettingsPageProps) {
     } finally {
       setIsSaving(false)
     }
-  }
+  }, [dirtyKeys, draftValues, sessionToken, settingsResponse])
 
-  const handleReload = async () => {
+  const handleReload = useCallback(async () => {
     if (!sessionToken) {
       return
     }
@@ -184,7 +235,7 @@ function SettingsPage({ session }: SettingsPageProps) {
       )
       setBannerMessage({
         type: 'info',
-        message: 'Reloaded settings from the backend `.env` file and persisted settings table.',
+        message: 'Reloaded settings from the backend.',
       })
     } catch (error) {
       setBannerMessage({
@@ -194,46 +245,69 @@ function SettingsPage({ session }: SettingsPageProps) {
     } finally {
       setIsLoading(false)
     }
-  }
+  }, [sessionToken])
+
+  const handleFieldChange = useCallback((key: string, value: string) => {
+    setDraftValues((current) => ({ ...current, [key]: value }))
+  }, [])
+
+  const handleToggleSecret = useCallback((key: string) => {
+    setVisibleSecretFields((current) => ({ ...current, [key]: !current[key] }))
+  }, [])
 
   return (
     <Stack spacing={3}>
       <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
         <Stack spacing={2.5}>
-          <Chip color="primary" label="Workspace settings" sx={{ alignSelf: 'flex-start' }} />
-          <Typography variant="h4">Manage the backend `.env` values from inside the dashboard.</Typography>
-          <Typography color="text.secondary" variant="body1">
-            This page reads the current backend `.env`, lets you update those values, and persists the saved state into the `settings` table.
-          </Typography>
+          <Chip color="primary" label="Settings" sx={{ alignSelf: 'flex-start' }} />
+          <PageHeader
+            dense
+            title="Workspace, model, and admin settings"
+            helpTooltip="Workspace and model settings are safe to edit. Developer / Admin settings can require a restart and affect all users."
+            subtitle="Configure features and infrastructure for everyone in this workspace."
+            action={
+              <Stack direction="row" spacing={1}>
+                <Button
+                  disabled={isLoading || isSaving}
+                  onClick={() => void handleReload()}
+                  startIcon={<SyncRounded />}
+                  variant="outlined"
+                >
+                  Reload
+                </Button>
+                <Button
+                  disabled={isLoading || isSaving || dirtyKeys.length === 0}
+                  onClick={() => void handleSave()}
+                  startIcon={<SaveRounded />}
+                  variant="contained"
+                >
+                  {isSaving ? 'Saving…' : 'Save changes'}
+                </Button>
+              </Stack>
+            }
+          />
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
             <Chip label={`${settingsResponse?.fields.length || 0} variables`} variant="outlined" />
-            <Chip label={`${dirtyKeys.length} unsaved`} variant="outlined" />
-            {settingsResponse?.restart_required ? <Chip label="Restart required after save" variant="outlined" /> : null}
+            <Chip
+              color={dirtyKeys.length ? 'warning' : 'default'}
+              label={`${dirtyKeys.length} unsaved`}
+              variant="outlined"
+            />
+            {settingsResponse?.restart_required ? (
+              <Chip
+                color="warning"
+                icon={<WarningAmberRounded />}
+                label="Restart required after save"
+                variant="outlined"
+              />
+            ) : null}
           </Stack>
         </Stack>
       </Paper>
 
       {bannerMessage ? <Alert severity={bannerMessage.type}>{bannerMessage.message}</Alert> : null}
 
-      <Paper className="dashboard-card" elevation={0}>
-        <Stack alignItems={{ xs: 'stretch', md: 'center' }} direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" spacing={2}>
-          <Box>
-            <Typography variant="h6">Backend environment source</Typography>
-            <Typography color="text.secondary" variant="body2">
-              {settingsResponse?.env_file_path || 'Loading `.env` path…'}
-            </Typography>
-          </Box>
-          <Stack direction="row" spacing={1}>
-            <Button disabled={isLoading || isSaving} onClick={() => void handleReload()} startIcon={<SyncRounded />} variant="outlined">
-              Reload
-            </Button>
-            <Button disabled={isLoading || isSaving || dirtyKeys.length === 0} onClick={() => void handleSave()} startIcon={<SaveRounded />} variant="contained">
-              {isSaving ? 'Saving…' : 'Save changes'}
-            </Button>
-          </Stack>
-        </Stack>
-        {isLoading || isSaving ? <LinearProgress sx={{ mt: 2, borderRadius: 999, height: 8 }} /> : null}
-      </Paper>
+      {isLoading || isSaving ? <LinearProgress sx={{ borderRadius: 999, height: 6 }} /> : null}
 
       <Paper className="dashboard-card" elevation={0}>
         <Stack spacing={3}>
@@ -243,55 +317,63 @@ function SettingsPage({ session }: SettingsPageProps) {
             justifyContent="space-between"
             spacing={2}
           >
-            <Box>
-              <Typography variant="h6">Settings groups</Typography>
-              <Typography color="text.secondary" variant="body2">
-                Open one configuration area at a time instead of scanning multiple containers in the same view.
-              </Typography>
-            </Box>
-            <Stack
-              alignItems={{ xs: 'flex-start', sm: 'center' }}
-              direction={{ xs: 'column', sm: 'row' }}
-              spacing={1.5}
+            <Tabs
+              aria-label="Settings categories"
+              onChange={(_, value: SettingsCategory) => setActiveCategory(value)}
+              sx={{ '& .MuiTabs-indicator': { height: 3, borderRadius: 999 } }}
+              value={activeCategory}
             >
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={hideFieldLabels}
-                    onChange={(event) => setHideFieldLabels(event.target.checked)}
-                    size="small"
-                  />
-                }
-                label="Hide field labels"
-                sx={{ m: 0 }}
-              />
-              <Chip
-                label={
-                  activeGroup
-                    ? `${(fieldsByGroup.get(activeGroup.id) || []).length} fields in ${activeGroup.label}`
-                    : 'No settings groups'
-                }
-                variant="outlined"
-              />
-            </Stack>
+              {(['workspace', 'model', 'admin'] as const).map((category) => (
+                <Tab
+                  key={category}
+                  label={
+                    <Stack alignItems="center" direction="row" spacing={0.5}>
+                      {category === 'admin' ? (
+                        <WarningAmberRounded fontSize="inherit" sx={{ color: 'warning.main' }} />
+                      ) : null}
+                      <span>{CATEGORY_LABEL[category]}</span>
+                      <HelpTooltip title={CATEGORY_TOOLTIP[category]} />
+                    </Stack>
+                  }
+                  value={category}
+                />
+              ))}
+            </Tabs>
+
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={hideFieldLabels}
+                  onChange={(event) => setHideFieldLabels(event.target.checked)}
+                  size="small"
+                />
+              }
+              label="Hide field labels"
+              sx={{ m: 0 }}
+            />
           </Stack>
 
-          {settingsResponse?.groups.length ? (
+          {activeCategory === 'admin' ? (
+            <Alert
+              icon={<WarningAmberRounded fontSize="inherit" />}
+              severity="warning"
+              variant="outlined"
+            >
+              Developer / Admin settings change infrastructure or credentials. Most edits require a restart and affect every member.
+            </Alert>
+          ) : null}
+
+          {visibleGroups.length ? (
             <>
               <Tabs
                 aria-label="Settings groups"
                 onChange={(_, value: string) => setActiveGroupId(value)}
                 scrollButtons="auto"
-                sx={{
-                  '& .MuiTabs-indicator': {
-                    height: 3,
-                    borderRadius: 999,
-                  },
-                }}
+                sx={{ '& .MuiTabs-indicator': { height: 3, borderRadius: 999 } }}
                 value={activeGroup?.id ?? false}
                 variant="scrollable"
               >
-                {settingsResponse.groups.map((group) => (
+                {visibleGroups.map((group) => (
                   <Tab
                     aria-controls={`settings-panel-${group.id}`}
                     id={`settings-tab-${group.id}`}
@@ -307,18 +389,14 @@ function SettingsPage({ session }: SettingsPageProps) {
                   aria-labelledby={`settings-tab-${activeGroup.id}`}
                   id={`settings-panel-${activeGroup.id}`}
                   role="tabpanel"
-                  sx={{
-                    borderTop: '1px solid',
-                    borderColor: 'divider',
-                    pt: 3,
-                  }}
+                  sx={{ borderTop: '1px solid', borderColor: 'divider', pt: 3 }}
                 >
                   <Stack spacing={3}>
                     <Box>
-                      <Typography variant="h6">{activeGroup.label}</Typography>
-                      <Typography color="text.secondary" variant="body2">
-                        {activeGroup.description}
-                      </Typography>
+                      <Stack alignItems="center" direction="row" spacing={0.5}>
+                        <Typography variant="h6">{activeGroup.label}</Typography>
+                        <HelpTooltip title={activeGroup.description} />
+                      </Stack>
                     </Box>
 
                     <Box
@@ -332,55 +410,13 @@ function SettingsPage({ session }: SettingsPageProps) {
                       }}
                     >
                       {(fieldsByGroup.get(activeGroup.id) || []).map((field) => (
-                        <TextField
-                          hiddenLabel={hideFieldLabels}
-                          helperText={field.description || `${field.env_name} · ${field.value_type}${field.is_secret ? ' · secret' : ''}`}
-                          id={`settings-field-${field.key}`}
+                        <SettingFieldInput
                           key={field.key}
-                          label={hideFieldLabels ? undefined : field.label}
-                          minRows={field.value_type === 'json' ? 4 : undefined}
-                          multiline={field.value_type === 'json'}
-                          onChange={(event) =>
-                            setDraftValues((current) => ({
-                              ...current,
-                              [field.key]: event.target.value,
-                            }))
-                          }
-                          placeholder={hideFieldLabels ? field.label : undefined}
-                          slotProps={{
-                            htmlInput: hideFieldLabels
-                              ? {
-                                  'aria-label': field.label,
-                                }
-                              : undefined,
-                            input:
-                              field.is_secret && field.value_type !== 'json'
-                                ? {
-                                    endAdornment: (
-                                      <InputAdornment position="end">
-                                        <IconButton
-                                          aria-label={
-                                            visibleSecretFields[field.key]
-                                              ? `Hide ${field.label}`
-                                              : `Show ${field.label}`
-                                          }
-                                          edge="end"
-                                          onClick={() =>
-                                            setVisibleSecretFields((current) => ({
-                                              ...current,
-                                              [field.key]: !current[field.key],
-                                            }))
-                                          }
-                                          onMouseDown={(event) => event.preventDefault()}
-                                        >
-                                          {visibleSecretFields[field.key] ? <VisibilityOffRounded /> : <VisibilityRounded />}
-                                        </IconButton>
-                                      </InputAdornment>
-                                    ),
-                                  }
-                                : undefined,
-                          }}
-                          type={field.is_secret && !visibleSecretFields[field.key] ? 'password' : 'text'}
+                          field={field}
+                          hideFieldLabels={hideFieldLabels}
+                          onChange={handleFieldChange}
+                          onToggleSecret={handleToggleSecret}
+                          showSecret={!!visibleSecretFields[field.key]}
                           value={draftValues[field.key] ?? field.value ?? ''}
                         />
                       ))}
@@ -390,12 +426,71 @@ function SettingsPage({ session }: SettingsPageProps) {
               ) : null}
             </>
           ) : (
-            <Alert severity="info">No editable settings groups are available yet.</Alert>
+            <Alert severity="info">
+              No {CATEGORY_LABEL[activeCategory].toLowerCase()} settings are available in this workspace.
+            </Alert>
           )}
         </Stack>
       </Paper>
     </Stack>
   )
 }
+
+type SettingFieldInputProps = {
+  field: SettingField
+  value: string
+  showSecret: boolean
+  hideFieldLabels: boolean
+  onChange: (key: string, value: string) => void
+  onToggleSecret: (key: string) => void
+}
+
+function SettingFieldInputBase({
+  field,
+  value,
+  showSecret,
+  hideFieldLabels,
+  onChange,
+  onToggleSecret,
+}: SettingFieldInputProps) {
+  const helperText = field.description || `${field.env_name} · ${field.value_type}${field.is_secret ? ' · secret' : ''}`
+
+  return (
+    <TextField
+      hiddenLabel={hideFieldLabels}
+      helperText={helperText}
+      id={`settings-field-${field.key}`}
+      label={hideFieldLabels ? undefined : field.label}
+      minRows={field.value_type === 'json' ? 4 : undefined}
+      multiline={field.value_type === 'json'}
+      onChange={(event) => onChange(field.key, event.target.value)}
+      placeholder={hideFieldLabels ? field.label : undefined}
+      slotProps={{
+        htmlInput: hideFieldLabels ? { 'aria-label': field.label } : undefined,
+        input:
+          field.is_secret && field.value_type !== 'json'
+            ? {
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      aria-label={showSecret ? `Hide ${field.label}` : `Show ${field.label}`}
+                      edge="end"
+                      onClick={() => onToggleSecret(field.key)}
+                      onMouseDown={(event) => event.preventDefault()}
+                    >
+                      {showSecret ? <VisibilityOffRounded /> : <VisibilityRounded />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }
+            : undefined,
+      }}
+      type={field.is_secret && !showSecret ? 'password' : 'text'}
+      value={value}
+    />
+  )
+}
+
+const SettingFieldInput = memo(SettingFieldInputBase)
 
 export default SettingsPage

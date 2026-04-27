@@ -46,6 +46,7 @@ import { buildCompareWorkspaceStorageKey, storeCompareWorkspaceSnapshot } from '
 import { runWhenIdle } from '../lib/defer'
 import type { AuthSession } from '../lib/session'
 import MetricsRadarCard from '../components/analysis/MetricsRadarCard'
+import HelpTooltip from '../components/layout/HelpTooltip'
 
 const AnalysisEvaluationSection = lazy(() => import('../components/analysis/AnalysisEvaluationSection'))
 const CollaborationPanel = lazy(() => import('../components/collaboration/CollaborationPanel'))
@@ -2435,11 +2436,16 @@ function AnalysisPage({ onOpenCompareWorkspace, session }: AnalysisPageProps) {
         <Stack spacing={3}>
           <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
             <Stack spacing={2.5}>
-              <Chip color="primary" label="Analysis workspace" sx={{ alignSelf: 'flex-start' }} />
-              <Typography variant="h4">Upload media, confirm storage, then run TRIBE-backed analysis.</Typography>
-              <Typography color="text.secondary" variant="body1">
-                Uploads go directly to object storage, the worker resolves assets from R2-compatible storage,
-                and the dashboard converts model output into marketer-friendly charts, segments, heatmaps, and recommendations.
+              <Stack alignItems="center" direction="row" spacing={1}>
+                <Chip color="primary" label="Analysis workspace" />
+                <HelpTooltip
+                  ariaLabel="How analysis works"
+                  title="Uploads go directly to object storage. The worker resolves assets from R2-compatible storage and converts model output into charts, segments, heatmaps, and recommendations."
+                />
+              </Stack>
+              <Typography variant="h4">Upload media, define a goal, run analysis.</Typography>
+              <Typography color="text.secondary" variant="body2">
+                Pick an asset, set the goal, and review the result. Diagnostics and raw payloads stay in the advanced details below.
               </Typography>
               <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
                 {mediaTypeOptions.map((option) => {

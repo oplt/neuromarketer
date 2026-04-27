@@ -1,0 +1,7 @@
+redis: ./scripts/dev-redis.sh
+backend: CELERY_BROKER_URL=redis://127.0.0.1:6379/0 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1 uvicorn backend.api.main:app --reload --reload-dir backend --port 8000
+frontend: cd frontend && npm run dev
+browser: sh -c 'sleep 3 && xdg-open http://localhost:5173 >/dev/null 2>&1 || true; tail -f /dev/null'
+ollama: ollama serve
+worker-inference: CELERY_BROKER_URL=redis://127.0.0.1:6379/0 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1 CELERY_WORKER_ROLE=inference CELERY_INFERENCE_WORKER_CONCURRENCY=1 CELERY_INFERENCE_WORKER_PREFETCH_MULTIPLIER=1 celery -A backend.celery_app.celery_app worker -Q analysis-inference --concurrency=1 --prefetch-multiplier=1 --loglevel=info -n inference-$$@%h
+worker-scoring: CELERY_BROKER_URL=redis://127.0.0.1:6379/0 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/1 CELERY_WORKER_ROLE=scoring celery -A backend.celery_app.celery_app worker -Q analysis-scoring --concurrency=4 --loglevel=info -n scoring-$$@%h

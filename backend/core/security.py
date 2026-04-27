@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import binascii
+import functools
 import hashlib
 import hmac
 import json
@@ -9,6 +11,8 @@ import struct
 import time
 from dataclasses import dataclass
 from uuid import UUID
+
+from cryptography.fernet import Fernet, InvalidToken
 
 from backend.core.config import settings
 from backend.core.exceptions import UnauthorizedAppError
@@ -210,20 +214,24 @@ def normalize_recovery_code(code: str) -> str:
 
 def seal_secret(value: str) -> str:
     plaintext = value.encode("utf-8")
-    nonce = secrets.token_bytes(16)
-    key = _derive_secret_encryption_key()
-    keystream = _derive_keystream(key, nonce, len(plaintext))
-    ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream, strict=False))
-    mac = hmac.new(key, nonce + ciphertext, hashlib.sha256).digest()
-    return _base64url_encode(nonce + ciphertext + mac)
+    return _fernet().encrypt(plaintext).decode("utf-8")
 
 
 def unseal_secret(value: str | None) -> str | None:
     if value is None:
         return None
     try:
+        decrypted = _fernet().decrypt(value.encode("utf-8"))
+        return decrypted.decode("utf-8")
+    except (InvalidToken, UnicodeEncodeError):
+        pass
+    return _legacy_unseal_secret(value)
+
+
+def _legacy_unseal_secret(value: str) -> str | None:
+    try:
         raw = _base64url_decode(value)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, binascii.Error):
         raise UnauthorizedAppError("Stored secret material is invalid.")
     if len(raw) < 16 + 32:
         raise UnauthorizedAppError("Stored secret material is invalid.")
@@ -273,6 +281,7 @@ def _verify_signed_token(token: str, *, expected_type: str) -> dict[str, object]
     return payload
 
 
+@functools.lru_cache(maxsize=1)
 def _derive_secret_encryption_key() -> bytes:
     return hashlib.pbkdf2_hmac(
         HASH_NAME,
@@ -291,6 +300,12 @@ def _derive_keystream(key: bytes, nonce: bytes, length: int) -> bytes:
         output.extend(block)
         counter += 1
     return bytes(output[:length])
+
+
+@functools.lru_cache(maxsize=1)
+def _fernet() -> Fernet:
+    key = _derive_secret_encryption_key()
+    return Fernet(base64.urlsafe_b64encode(key))
 
 
 def _generate_totp_code(secret: bytes, counter: int) -> str:

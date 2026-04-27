@@ -13,12 +13,55 @@ export type AuthSession = {
 
 const SESSION_STORAGE_KEY = 'neuromarketer.auth.session'
 
-export const readStoredSession = (): AuthSession | null => {
+function getSessionStorage(): Storage | null {
   if (typeof window === 'undefined') {
     return null
   }
+  try {
+    return window.sessionStorage
+  } catch {
+    return null
+  }
+}
 
-  const rawValue = window.sessionStorage.getItem(SESSION_STORAGE_KEY)
+export function safeReadStorageItem(storage: Storage | null, key: string): string | null {
+  if (!storage) {
+    return null
+  }
+  try {
+    return storage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+export function safeWriteStorageItem(storage: Storage | null, key: string, value: string): boolean {
+  if (!storage) {
+    return false
+  }
+  try {
+    storage.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function safeRemoveStorageItem(storage: Storage | null, key: string): boolean {
+  if (!storage) {
+    return false
+  }
+  try {
+    storage.removeItem(key)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export const readStoredSession = (): AuthSession | null => {
+  const storage = getSessionStorage()
+  const rawValue = safeReadStorageItem(storage, SESSION_STORAGE_KEY)
   if (!rawValue) {
     return null
   }
@@ -35,15 +78,15 @@ export const readStoredSession = (): AuthSession | null => {
 }
 
 export const storeSession = (session: AuthSession): void => {
-  if (typeof window === 'undefined') {
-    return
+  const storage = getSessionStorage()
+  try {
+    safeWriteStorageItem(storage, SESSION_STORAGE_KEY, JSON.stringify(session))
+  } catch {
+    // ignore JSON serialization or quota failures
   }
-  window.sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session))
 }
 
 export const clearStoredSession = (): void => {
-  if (typeof window === 'undefined') {
-    return
-  }
-  window.sessionStorage.removeItem(SESSION_STORAGE_KEY)
+  const storage = getSessionStorage()
+  safeRemoveStorageItem(storage, SESSION_STORAGE_KEY)
 }

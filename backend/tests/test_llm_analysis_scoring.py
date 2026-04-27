@@ -37,6 +37,10 @@ class _RouterStub:
             },
         )()
 
+    def output_token_option_key_for_mode(self, *, mode: str) -> str:
+        _ = mode
+        return "num_predict" if self.provider == "ollama" else "max_tokens"
+
     async def generate_structured(self, *, mode, messages, response_schema, options=None):
         self.last_options = options
         return type(

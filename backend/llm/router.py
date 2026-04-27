@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from threading import Lock
@@ -46,6 +47,7 @@ class LLMRouteConfig:
     top_p: float = 0.9
     max_tokens: int = 2_000
     think: bool | None = None
+    supports_json_schema: bool = False
     request_budget_usd: float | None = None
     max_attempts: int = 2
     retry_backoff_seconds: float = 1.0
@@ -68,6 +70,7 @@ class LLMRouteConfig:
                 top_p=self.top_p,
                 max_tokens=self.max_tokens,
                 think=self.think,
+                supports_json_schema=self.supports_json_schema,
                 default_headers=self.default_headers,
             )
         )
@@ -167,6 +170,10 @@ class LLMRouter:
         }
         self.mode_budgets = {key: float(value) for key, value in (mode_budgets or {}).items()}
 
+    async def aclose(self) -> None:
+        for client in self.clients.values():
+            await client.aclose()
+
     @classmethod
     def from_settings(cls, app_settings: Settings = settings) -> LLMRouter:
         routes: list[LLMRouteConfig] = []
@@ -219,6 +226,12 @@ class LLMRouter:
                         top_p=float(raw_route.get("top_p") or app_settings.llm_top_p),
                         max_tokens=int(raw_route.get("max_tokens") or app_settings.llm_max_tokens),
                         think=raw_route.get("think", app_settings.llm_ollama_think),
+                        supports_json_schema=bool(
+                            raw_route.get(
+                                "supports_json_schema",
+                                app_settings.llm_openai_compatible_supports_json_schema,
+                            )
+                        ),
                         request_budget_usd=_float_or_none(
                             raw_route.get("request_budget_usd"),
                             fallback=app_settings.llm_request_budget_usd,
@@ -261,6 +274,7 @@ class LLMRouter:
                     top_p=app_settings.llm_top_p,
                     max_tokens=app_settings.llm_max_tokens,
                     think=app_settings.llm_ollama_think,
+                    supports_json_schema=app_settings.llm_openai_compatible_supports_json_schema,
                     request_budget_usd=app_settings.llm_request_budget_usd,
                     max_attempts=app_settings.llm_retry_max_attempts,
                     retry_backoff_seconds=app_settings.llm_retry_backoff_seconds,
@@ -332,6 +346,29 @@ class LLMRouter:
         resolved[token_key] = max(scaled_value, base_value)
         return resolved
 
+    def resolve_output_token_cap(
+        self, *, route: LLMRouteConfig, options: dict[str, Any] | None
+    ) -> int:
+        resolved_options = options or {}
+        if "num_predict" in resolved_options:
+            try:
+                return max(int(resolved_options["num_predict"]), 1)
+            except (TypeError, ValueError):
+                return max(route.max_tokens, 1)
+        if "max_tokens" in resolved_options:
+            try:
+                return max(int(resolved_options["max_tokens"]), 1)
+            except (TypeError, ValueError):
+                return max(route.max_tokens, 1)
+        return max(route.max_tokens, 1)
+
+    def output_token_option_key_for_mode(self, *, mode: ModeKey) -> str:
+        candidate_order = self._candidate_order(mode)
+        if not candidate_order:
+            return "max_tokens"
+        route = self.routes[candidate_order[0]]
+        return "num_predict" if route.provider == "ollama" else "max_tokens"
+
     async def generate_structured(
         self,
         *,
@@ -357,9 +394,10 @@ class LLMRouter:
             route = self.routes[route_id]
             circuit_state = _circuit_breakers.snapshot(route_id)
             route_budget = budget_usd if budget_usd is not None else route.request_budget_usd
+            estimated_output_tokens = self.resolve_output_token_cap(route=route, options=options)
             estimated_cost = route.estimate_cost_usd(
                 tokens_in=estimated_prompt_tokens,
-                tokens_out=route.max_tokens,
+                tokens_out=estimated_output_tokens,
             )
             if circuit_state["is_open"]:
                 telemetry["provider_attempts"].append(
@@ -404,7 +442,10 @@ class LLMRouter:
                         "mode": mode_key,
                     },
                 )
-                last_error = f"Route {route.route_id} estimated ${estimated_cost:.4f}, exceeding the ${route_budget:.4f} budget."
+                last_error = (
+                    f"Route {route.route_id} estimated ${estimated_cost:.4f}, "
+                    f"exceeding the ${route_budget:.4f} budget."
+                )
                 continue
 
             for attempt in range(1, max(route.max_attempts, 1) + 1):
@@ -416,11 +457,18 @@ class LLMRouter:
                 )
 
                 try:
-                    generation = await self.clients[route_id].generate_structured_with_repair(
-                        messages=messages,
-                        response_schema=response_schema,
-                        options=attempt_options,
-                    )
+                    try:
+                        generation = await self.clients[route_id].generate_structured(
+                            messages=messages,
+                            response_schema=response_schema,
+                            options=attempt_options,
+                        )
+                    except LLMResponseFormatError:
+                        generation = await self.clients[route_id].generate_structured_with_repair(
+                            messages=messages,
+                            response_schema=response_schema,
+                            options=attempt_options,
+                        )
                     latency_ms = int((time.perf_counter() - started_at) * 1_000)
                     actual_cost = route.estimate_cost_usd(
                         tokens_in=int(generation.metadata.get("tokens_in") or 0),
@@ -468,6 +516,18 @@ class LLMRouter:
                             "request_options": attempt_options,
                         }
                     )
+                    shadow_route_id = self._schedule_shadow_evaluation_if_enabled(
+                        mode=mode_key,
+                        candidate_order=candidate_order,
+                        selected_route_id=route.route_id,
+                        messages=messages,
+                        response_schema=response_schema,
+                        options=options,
+                    )
+                    generation.metadata["shadow_evaluation"] = {
+                        "scheduled": shadow_route_id is not None,
+                        "route_id": shadow_route_id,
+                    }
                     log_event(
                         logger,
                         "llm_provider_request_succeeded",
@@ -518,7 +578,10 @@ class LLMRouter:
                     if raw_text:
                         telemetry["last_raw_text_preview"] = str(raw_text)[:1500]
 
-                    is_retry = attempt < max(route.max_attempts, 1)
+                    if isinstance(exc, LLMTransportError):
+                        is_retry = bool(exc.retryable) and attempt < max(route.max_attempts, 1)
+                    else:
+                        is_retry = False
                     status = "retrying" if is_retry else "failed"
                     opened = False
                     if not is_retry:
@@ -614,13 +677,164 @@ class LLMRouter:
         budget = default_route.request_budget_usd
         return budget if budget is not None and budget > 0 else None
 
+    def _schedule_shadow_evaluation_if_enabled(
+        self,
+        *,
+        mode: str,
+        candidate_order: list[str],
+        selected_route_id: str,
+        messages: list[dict[str, str]],
+        response_schema: dict[str, Any] | None,
+        options: dict[str, Any] | None,
+    ) -> str | None:
+        if not settings.llm_shadow_evaluation_enabled:
+            return None
+        if settings.llm_shadow_sample_rate <= 0:
+            return None
+        if random.random() > settings.llm_shadow_sample_rate:
+            return None
+
+        configured_modes = {value.strip().lower() for value in settings.llm_shadow_modes if value}
+        if configured_modes and mode not in configured_modes:
+            return None
+
+        shadow_route_id = next(
+            (route_id for route_id in candidate_order if route_id != selected_route_id),
+            None,
+        )
+        if shadow_route_id is None or shadow_route_id not in self.routes:
+            return None
+
+        shadow_route = self.routes[shadow_route_id]
+        shadow_options = self._request_options_for_attempt(
+            route=shadow_route,
+            options=options,
+            attempt=1,
+        )
+        if "max_tokens" in shadow_options:
+            shadow_options["max_tokens"] = max(
+                64,
+                min(int(shadow_options["max_tokens"] or shadow_route.max_tokens), 900),
+            )
+        if "num_predict" in shadow_options:
+            shadow_options["num_predict"] = max(
+                64,
+                min(int(shadow_options["num_predict"] or shadow_route.max_tokens), 900),
+            )
+
+        task = asyncio.create_task(
+            self._run_shadow_evaluation(
+                mode=mode,
+                selected_route_id=selected_route_id,
+                shadow_route_id=shadow_route_id,
+                messages=messages,
+                response_schema=response_schema,
+                options=shadow_options,
+            ),
+            name=f"llm-shadow-eval-{mode}-{selected_route_id}-vs-{shadow_route_id}",
+        )
+        task.add_done_callback(self._swallow_shadow_task_exception)
+        return shadow_route_id
+
+    async def _run_shadow_evaluation(
+        self,
+        *,
+        mode: str,
+        selected_route_id: str,
+        shadow_route_id: str,
+        messages: list[dict[str, str]],
+        response_schema: dict[str, Any] | None,
+        options: dict[str, Any] | None,
+    ) -> None:
+        route = self.routes.get(shadow_route_id)
+        if route is None:
+            return
+
+        started_at = time.perf_counter()
+        timeout_seconds = max(settings.llm_shadow_timeout_seconds, 1)
+        try:
+            generation = await asyncio.wait_for(
+                self.clients[shadow_route_id].generate_structured_with_repair(
+                    messages=messages,
+                    response_schema=response_schema,
+                    options=options,
+                ),
+                timeout=timeout_seconds,
+            )
+            latency_ms = int((time.perf_counter() - started_at) * 1_000)
+            actual_cost = route.estimate_cost_usd(
+                tokens_in=int(generation.metadata.get("tokens_in") or 0),
+                tokens_out=int(generation.metadata.get("tokens_out") or 0),
+            )
+            metrics.increment(
+                "llm_shadow_evaluations_total",
+                labels={
+                    "mode": mode,
+                    "status": "succeeded",
+                    "selected_route_id": selected_route_id,
+                    "shadow_route_id": shadow_route_id,
+                },
+            )
+            metrics.observe(
+                "llm_shadow_latency_seconds",
+                latency_ms / 1_000,
+                labels={"mode": mode, "shadow_route_id": shadow_route_id},
+            )
+            metrics.observe(
+                "llm_shadow_cost_usd",
+                actual_cost,
+                labels={"mode": mode, "shadow_route_id": shadow_route_id},
+            )
+            log_event(
+                logger,
+                "llm_shadow_evaluation_completed",
+                mode=mode,
+                selected_route_id=selected_route_id,
+                shadow_route_id=shadow_route_id,
+                shadow_provider=route.provider,
+                shadow_model=route.model,
+                latency_ms=latency_ms,
+                actual_cost_usd=actual_cost,
+                status="succeeded",
+            )
+        except Exception as exc:
+            metrics.increment(
+                "llm_shadow_evaluations_total",
+                labels={
+                    "mode": mode,
+                    "status": "failed",
+                    "selected_route_id": selected_route_id,
+                    "shadow_route_id": shadow_route_id,
+                },
+            )
+            log_event(
+                logger,
+                "llm_shadow_evaluation_failed",
+                level="warning",
+                mode=mode,
+                selected_route_id=selected_route_id,
+                shadow_route_id=shadow_route_id,
+                shadow_provider=route.provider,
+                shadow_model=route.model,
+                error_type=exc.__class__.__name__,
+                error_message=str(exc),
+                status="failed",
+            )
+
+    @staticmethod
+    def _swallow_shadow_task_exception(task: asyncio.Task[None]) -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+
 
 def estimate_prompt_tokens(messages: list[dict[str, str]]) -> int:
     total_chars = 0
     for message in messages:
         total_chars += len(str(message.get("content") or ""))
         total_chars += len(str(message.get("role") or "")) * 2
-    return max(int(math.ceil(total_chars / 4.0)), 1)
+    return max(math.ceil(total_chars / 4.0), 1)
 
 
 def cast_or_none(value: Any) -> str | None:

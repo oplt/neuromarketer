@@ -50,7 +50,12 @@ class UploadApplicationService:
         self.storage = storage if storage is not None else S3StorageService()
         self.preprocess = preprocess if preprocess is not None else PreprocessService()
 
-    async def create_upload_session(self, payload: UploadInitRequest) -> UploadSession:
+    async def create_upload_session(
+        self,
+        payload: UploadInitRequest,
+        *,
+        created_by_user_id: UUID | None = None,
+    ) -> UploadSession:
         with bound_log_context(
             project_id=str(payload.project_id),
             creative_id=str(payload.creative_id) if payload.creative_id else None,
@@ -85,7 +90,7 @@ class UploadApplicationService:
             )
             upload_session = await self.uploads.create_session(
                 project_id=payload.project_id,
-                created_by_user_id=None,
+                created_by_user_id=created_by_user_id,
                 creative_id=payload.creative_id,
                 creative_version_id=payload.creative_version_id,
                 upload_token=secrets.token_urlsafe(24),
@@ -117,10 +122,12 @@ class UploadApplicationService:
         self,
         *,
         project_id: UUID,
+        created_by_user_id: UUID,
         creative_id: UUID | None,
         creative_version_id: UUID | None,
         artifact_kind: str,
         file: UploadFile,
+        max_size_bytes: int | None = None,
     ) -> DirectUploadResult:
         with bound_log_context(
             project_id=str(project_id),
@@ -148,7 +155,7 @@ class UploadApplicationService:
 
             upload_session = await self.uploads.create_session(
                 project_id=project_id,
-                created_by_user_id=None,
+                created_by_user_id=created_by_user_id,
                 creative_id=creative_id,
                 creative_version_id=creative_version_id,
                 upload_token=secrets.token_urlsafe(24),
@@ -204,7 +211,12 @@ class UploadApplicationService:
                         ),
                     )
 
-                    if uploaded_object.file_size_bytes > settings.upload_max_size_bytes:
+                    configured_max_size = (
+                        min(settings.upload_max_size_bytes, max_size_bytes)
+                        if max_size_bytes is not None
+                        else settings.upload_max_size_bytes
+                    )
+                    if uploaded_object.file_size_bytes > configured_max_size:
                         await run_in_threadpool(
                             self.storage.delete_object,
                             bucket_name=uploaded_object.bucket_name,
@@ -212,9 +224,8 @@ class UploadApplicationService:
                         )
                         uploaded_object = None
                         raise ValidationAppError(
-                            f"Upload exceeds max size of {settings.upload_max_size_bytes} bytes.",
+                            f"Upload exceeds max size of {configured_max_size} bytes.",
                         )
-
                     preprocess_result = await self.preprocess.preprocess_upload(
                         filename=file.filename,
                         mime_type=file.content_type,
@@ -222,7 +233,7 @@ class UploadApplicationService:
                     )
                     artifact = await self.uploads.create_stored_artifact(
                         project_id=project_id,
-                        created_by_user_id=None,
+                        created_by_user_id=created_by_user_id,
                         creative_id=creative_id,
                         creative_version_id=creative_version_id,
                         artifact_kind=artifact_kind,

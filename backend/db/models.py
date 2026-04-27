@@ -599,6 +599,15 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "created_by_user_id",
             "created_at",
         ),
+        Index(
+            "ix_inference_jobs_project_user_surface_media_created",
+            "project_id",
+            "created_by_user_id",
+            "analysis_surface",
+            "media_type",
+            "created_at",
+        ),
+        Index("ix_inference_jobs_execution_phase", "execution_phase"),
     )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -635,6 +644,12 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     runtime_params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    analysis_surface: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    execution_phase: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    execution_phase_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -683,6 +698,11 @@ class PredictionResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("job_id", name="uq_prediction_result_job"),
         Index("ix_prediction_results_project_created_at", "project_id", "created_at"),
+        Index(
+            "ix_prediction_results_version_created_at",
+            "creative_version_id",
+            "created_at",
+        ),
     )
 
     job_id: Mapped[uuid.UUID] = mapped_column(

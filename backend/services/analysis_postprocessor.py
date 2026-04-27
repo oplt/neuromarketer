@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -219,6 +220,20 @@ class AnalysisPostprocessor:
             segments_json=segment_rows,
             visualizations_json=visualizations_json,
             recommendations_json=[],
+        )
+
+    def with_recommendations(
+        self,
+        base_payload: AnalysisDashboardPayload,
+        scoring_bundle: ScoringBundle,
+    ) -> AnalysisDashboardPayload:
+        return AnalysisDashboardPayload(
+            summary_json=copy.deepcopy(base_payload.summary_json),
+            metrics_json=copy.deepcopy(base_payload.metrics_json),
+            timeline_json=copy.deepcopy(base_payload.timeline_json),
+            segments_json=copy.deepcopy(base_payload.segments_json),
+            visualizations_json=copy.deepcopy(base_payload.visualizations_json),
+            recommendations_json=self._build_recommendations(scoring_bundle=scoring_bundle),
         )
 
     def build_result_payload(

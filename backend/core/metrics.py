@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from threading import Lock
+
+_METRIC_NAME_RE = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 
 
 def _normalize_labels(labels: dict[str, str] | None) -> tuple[tuple[str, str], ...]:
@@ -34,25 +37,39 @@ class MetricsRegistry:
             self._summaries[key]["sum"] += value
 
     def render_prometheus(self) -> str:
-        lines: list[str] = []
         with self._lock:
-            for (name, labels), value in sorted(self._counters.items()):
-                label_text = _format_labels(labels)
-                lines.append(f"# TYPE {name} counter")
-                lines.append(f"{name}{label_text} {value}")
-            for (name, labels), summary in sorted(self._summaries.items()):
-                label_text = _format_labels(labels)
-                lines.append(f"# TYPE {name} summary")
-                lines.append(f"{name}_count{label_text} {summary['count']}")
-                lines.append(f"{name}_sum{label_text} {summary['sum']}")
+            counters_snapshot = list(self._counters.items())
+            summaries_snapshot = list(self._summaries.items())
+        lines: list[str] = []
+        for (name, labels), value in sorted(counters_snapshot):
+            if not _is_valid_metric_name(name):
+                continue
+            label_text = _format_labels(labels)
+            lines.append(f"# TYPE {name} counter")
+            lines.append(f"{name}{label_text} {value}")
+        for (name, labels), summary in sorted(summaries_snapshot):
+            if not _is_valid_metric_name(name):
+                continue
+            label_text = _format_labels(labels)
+            lines.append(f"# TYPE {name} summary")
+            lines.append(f"{name}_count{label_text} {summary['count']}")
+            lines.append(f"{name}_sum{label_text} {summary['sum']}")
         return "\n".join(lines) + ("\n" if lines else "")
 
 
 def _format_labels(labels: tuple[tuple[str, str], ...]) -> str:
     if not labels:
         return ""
-    formatted = ",".join(f'{key}="{value}"' for key, value in labels)
+    formatted = ",".join(f'{key}="{_escape_label_value(value)}"' for key, value in labels)
     return f"{{{formatted}}}"
+
+
+def _escape_label_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+
+def _is_valid_metric_name(name: str) -> bool:
+    return bool(_METRIC_NAME_RE.match(name))
 
 
 metrics = MetricsRegistry()
