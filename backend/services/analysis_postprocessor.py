@@ -34,6 +34,43 @@ class AnalysisPostprocessor:
         "bottom_right",
     )
 
+    MODALITY_PRESENTATION = {
+        "video": {
+            "segment_prefix": "Scene",
+            "segment_plural": "Scenes",
+            "heatmap_prefix": "Keyframe",
+            "heatmap_subject": "Scene",
+            "timeline_label": "Video timeline",
+            "visualization_mode": "video_frame_grid",
+            "grid_caption": (
+                "Frame-grid using direct TRIBE-derived segment signals and "
+                "LLM-evaluated summary scores."
+            ),
+        },
+        "audio": {
+            "segment_prefix": "Audio window",
+            "segment_plural": "Audio windows",
+            "heatmap_prefix": "Audio signal",
+            "heatmap_subject": "Window",
+            "timeline_label": "Audio timeline",
+            "visualization_mode": "audio_signal_grid",
+            "grid_caption": (
+                "Signal grid using audio timeline features; it is not a spatial frame."
+            ),
+        },
+        "text": {
+            "segment_prefix": "Passage",
+            "segment_plural": "Passages",
+            "heatmap_prefix": "Copy signal",
+            "heatmap_subject": "Passage",
+            "timeline_label": "Text sequence",
+            "visualization_mode": "text_signal_grid",
+            "grid_caption": (
+                "Signal grid using text sequence features; it is not a visual heatmap."
+            ),
+        },
+    }
+
     def build_dashboard_payload(
         self,
         *,
@@ -82,6 +119,7 @@ class AnalysisPostprocessor:
             segment_features=segment_features,
             scoring_bundle=scoring_bundle,
             score_map=score_map,
+            modality=modality,
         )
         total_duration_ms = max(
             (int(row["end_time_ms"]) for row in segment_rows),
@@ -112,15 +150,18 @@ class AnalysisPostprocessor:
         )
         high_attention_intervals: list[dict[str, Any]] = []
         low_attention_intervals: list[dict[str, Any]] = []
+        presentation = self._presentation_for_modality(modality)
         visualizations_json = {
             "heatmap_frames": self._build_heatmap_frames(
                 timeline_rows=timeline_rows,
                 segment_features=segment_features,
                 score_map=score_map,
+                modality=modality,
             ),
             "high_attention_intervals": high_attention_intervals,
             "low_attention_intervals": low_attention_intervals,
-            "visualization_mode": "frame_grid_fallback",
+            "visualization_mode": presentation["visualization_mode"],
+            "presentation": presentation,
         }
         recommendations_json = (
             self._build_recommendations(
@@ -162,6 +203,7 @@ class AnalysisPostprocessor:
         segment_rows = self._build_segment_rows(
             timeline_rows=timeline_rows,
             segment_features=segment_features,
+            modality=modality,
         )
         total_duration_ms = max(
             (int(row["end_time_ms"]) for row in segment_rows),
@@ -197,6 +239,7 @@ class AnalysisPostprocessor:
                 "duration_ms": total_duration_ms,
             },
         }
+        presentation = self._presentation_for_modality(modality)
         visualizations_json = {
             "heatmap_frames": self._build_heatmap_frames(
                 timeline_rows=timeline_rows,
@@ -207,10 +250,12 @@ class AnalysisPostprocessor:
                     "cognitive_load": 0.0,
                     "conversion_proxy": 0.0,
                 },
+                modality=modality,
             ),
             "high_attention_intervals": [],
             "low_attention_intervals": [],
-            "visualization_mode": "frame_grid_fallback",
+            "visualization_mode": presentation["visualization_mode"],
+            "presentation": presentation,
         }
 
         return AnalysisDashboardPayload(
@@ -283,6 +328,17 @@ class AnalysisPostprocessor:
             }
         ]
 
+    def _presentation_for_modality(self, modality: str) -> dict[str, str]:
+        return dict(
+            self.MODALITY_PRESENTATION.get(
+                modality,
+                {
+                    **self.MODALITY_PRESENTATION["video"],
+                    "visualization_mode": f"{modality or 'analysis'}_signal_grid",
+                },
+            )
+        )
+
     def _build_summary_json(
         self,
         *,
@@ -323,6 +379,7 @@ class AnalysisPostprocessor:
             else self._average([row["engagement_score"] for row in timeline_rows]),
             2,
         )
+        presentation = self._presentation_for_modality(modality)
         return {
             "modality": modality,
             "overall_attention_score": overall_attention_score,
@@ -341,6 +398,10 @@ class AnalysisPostprocessor:
                 "source_label": source_label,
                 "segment_count": segment_count,
                 "duration_ms": total_duration_ms,
+                "segment_label": presentation["segment_prefix"],
+                "segment_label_plural": presentation["segment_plural"],
+                "timeline_label": presentation["timeline_label"],
+                "visualization_mode": presentation["visualization_mode"],
             },
         }
 
@@ -531,6 +592,7 @@ class AnalysisPostprocessor:
         segment_features: list[dict[str, Any]],
         scoring_bundle: ScoringBundle | None = None,
         score_map: dict[str, float] | None = None,
+        modality: str = "video",
     ) -> list[dict[str, Any]]:
         # Build lookup maps once for O(1) per-segment access
         _bundle_points = scoring_bundle.timeline_points if scoring_bundle is not None else []
@@ -544,6 +606,7 @@ class AnalysisPostprocessor:
         rows: list[dict[str, Any]] = []
         previous_engagement: float | None = None
         _score_map = score_map or {}
+        presentation = self._presentation_for_modality(modality)
         for index, timeline_row in enumerate(timeline_rows):
             segment = segment_features[index] if index < len(segment_features) else {}
             duration_ms = int(segment.get("duration_ms", 1000))
@@ -581,7 +644,7 @@ class AnalysisPostprocessor:
             rows.append(
                 {
                     "segment_index": index,
-                    "label": f"Scene {index + 1:02d}",
+                    "label": f"{presentation['segment_prefix']} {index + 1:02d}",
                     "start_time_ms": int(timeline_row["timestamp_ms"]),
                     "end_time_ms": int(timeline_row["timestamp_ms"]) + duration_ms,
                     "attention_score": round(attention_score, 2),
@@ -607,6 +670,7 @@ class AnalysisPostprocessor:
         timeline_rows: list[dict[str, Any]],
         segment_features: list[dict[str, Any]],
         score_map: dict[str, float],
+        modality: str = "video",
     ) -> list[dict[str, Any]]:
         if not timeline_rows:
             return []
@@ -622,6 +686,7 @@ class AnalysisPostprocessor:
             selected_indices.add(ranked_rows[-1][0])
 
         frames: list[dict[str, Any]] = []
+        presentation = self._presentation_for_modality(modality)
         for index in sorted(selected_indices)[:4]:
             timeline_row = timeline_rows[index]
             segment = segment_features[index] if index < len(segment_features) else {}
@@ -650,15 +715,13 @@ class AnalysisPostprocessor:
             frames.append(
                 {
                     "timestamp_ms": int(timeline_row["timestamp_ms"]),
-                    "label": f"Keyframe {len(frames) + 1}",
-                    "scene_label": f"Scene {index + 1:02d}",
+                    "label": f"{presentation['heatmap_prefix']} {len(frames) + 1}",
+                    "scene_label": f"{presentation['heatmap_subject']} {index + 1:02d}",
                     "grid_rows": 3,
                     "grid_columns": 3,
                     "intensity_map": grid,
                     "strongest_zone": self.GRID_LABELS[max_index],
-                    "caption": (
-                        "Fallback frame-grid using direct TRIBE-derived segment signals and LLM-evaluated summary scores."
-                    ),
+                    "caption": presentation["grid_caption"],
                 }
             )
         return frames

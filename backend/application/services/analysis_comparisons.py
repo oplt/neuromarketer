@@ -21,6 +21,7 @@ from backend.schemas.analysis import (
     AnalysisComparisonRead,
     AnalysisJobRead,
     AnalysisResultRead,
+    AnalysisSummaryPayload,
 )
 
 logger = get_logger(__name__)
@@ -53,6 +54,9 @@ class AnalysisComparisonApplicationService:
         "memory_proxy": 0.12,
         "low_cognitive_load": 0.04,
     }
+    # LLM scoring clamps missing/bad fields to 50 (see AnalysisScoringService._clamp_score).
+    _NEUTRAL_SCORE_LOW: ClassVar[float] = 49.0
+    _NEUTRAL_SCORE_HIGH: ClassVar[float] = 51.0
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -92,13 +96,29 @@ class AnalysisComparisonApplicationService:
                 baseline_job_id=baseline_job_id,
                 ranked_candidates=ranked_candidates,
             )
+            creative_items_by_version: dict[UUID, tuple[UUID, UUID]] = {}
+            for candidate in loaded_candidates:
+                creative_items_by_version.setdefault(
+                    candidate.creative_version_id,
+                    (candidate.creative_id, candidate.creative_version_id),
+                )
+
+            result_items_by_version: dict[UUID, dict[str, Any]] = {}
+            for ranked_candidate in ranked_candidates:
+                result_items_by_version.setdefault(
+                    ranked_candidate.candidate.creative_version_id,
+                    {
+                        "creative_version_id": ranked_candidate.candidate.creative_version_id,
+                        "overall_rank": ranked_candidate.overall_rank,
+                        "scores_json": ranked_candidate.scores_json,
+                        "rationale": ranked_candidate.rationale,
+                    },
+                )
+
             comparison = await self.comparisons.create_comparison(
                 project_id=project_id,
                 name=comparison_name,
-                creative_items=[
-                    (candidate.creative_id, candidate.creative_version_id)
-                    for candidate in loaded_candidates
-                ],
+                creative_items=list(creative_items_by_version.values()),
                 comparison_context=comparison_context,
             )
 
@@ -112,15 +132,7 @@ class AnalysisComparisonApplicationService:
                     ranked_candidates=ranked_candidates,
                     baseline_job_id=baseline_job_id,
                 ),
-                items=[
-                    {
-                        "creative_version_id": ranked_candidate.candidate.creative_version_id,
-                        "overall_rank": ranked_candidate.overall_rank,
-                        "scores_json": ranked_candidate.scores_json,
-                        "rationale": ranked_candidate.rationale,
-                    }
-                    for ranked_candidate in ranked_candidates
-                ],
+                items=list(result_items_by_version.values()),
             )
             await self.session.commit()
 
@@ -209,7 +221,6 @@ class AnalysisComparisonApplicationService:
             created_by_user_id=user_id,
         )
 
-        creative_version_ids: set[UUID] = set()
         loaded: list[LoadedAnalysisComparisonCandidate] = []
         for raw_job in ordered_jobs:
             self.analysis._ensure_job_ownership(raw_job, user_id=user_id)
@@ -222,11 +233,6 @@ class AnalysisComparisonApplicationService:
                 != "analysis_dashboard"
             ):
                 raise ValidationAppError("Only analysis workspace jobs can be compared here.")
-            if raw_job.creative_version_id in creative_version_ids:
-                raise ValidationAppError(
-                    "Compare workspace currently requires distinct creative versions for each selected analysis."
-                )
-
             result = self.analysis._build_result(raw_job)
             if result is None:
                 raise ConflictAppError(
@@ -239,13 +245,20 @@ class AnalysisComparisonApplicationService:
                     asset = assets_by_id.get(UUID(str(raw_asset_id)))
                 except (TypeError, ValueError):
                     asset = None
+            creative_version_id = raw_job.creative_version_id or (
+                asset.creative_version_id if asset is not None else None
+            )
+            if creative_version_id is None:
+                raise ConflictAppError(
+                    "This analysis was created before creative version promotion completed. "
+                    "Re-run it before comparing."
+                )
 
-            creative_version_ids.add(raw_job.creative_version_id)
             loaded.append(
                 LoadedAnalysisComparisonCandidate(
                     analysis_job_id=raw_job.id,
                     creative_id=raw_job.creative_id,
-                    creative_version_id=raw_job.creative_version_id,
+                    creative_version_id=creative_version_id,
                     job=self.analysis._build_job_read(raw_job),
                     asset=self.analysis._build_asset_read(asset) if asset is not None else None,
                     result=result,
@@ -288,6 +301,64 @@ class AnalysisComparisonApplicationService:
             for index, payload in enumerate(ranked_payloads, start=1)
         ]
 
+    def _score_in_llm_neutral_band(self, value: float) -> bool:
+        return self._NEUTRAL_SCORE_LOW <= float(value) <= self._NEUTRAL_SCORE_HIGH
+
+    def _summary_looks_like_llm_neutral_defaults(self, summary: AnalysisSummaryPayload) -> bool:
+        """True when all core summary scores sit at the LLM fallback (~50)."""
+        checks = (
+            summary.overall_attention_score,
+            summary.hook_score_first_3_seconds,
+            summary.sustained_engagement_score,
+            summary.memory_proxy_score,
+            summary.cognitive_load_proxy,
+        )
+        return all(self._score_in_llm_neutral_band(float(v)) for v in checks)
+
+    def _tribe_timeline_engagement_scores(
+        self, result: AnalysisResultRead
+    ) -> dict[str, float] | None:
+        """Derive attention/hook/sustained from TRIBE timeline when LLM returned neutral scores."""
+        timeline = result.timeline_json or []
+        if len(timeline) < 2:
+            return None
+        engagements = [float(p.engagement_score) for p in timeline]
+        span = max(engagements) - min(engagements)
+        if span < 0.25:
+            return None
+        overall = sum(engagements) / len(engagements)
+        opening = [float(p.engagement_score) for p in timeline if p.timestamp_ms < 3000]
+        sustained_rows = [float(p.engagement_score) for p in timeline if p.timestamp_ms >= 3000]
+        hook_base = opening if opening else engagements[: max(1, len(engagements) // 4)]
+        hook = sum(hook_base) / len(hook_base)
+        sustained = (
+            sum(sustained_rows) / len(sustained_rows) if sustained_rows else overall
+        )
+        return {
+            "overall_attention": round(overall, 2),
+            "hook": round(hook, 2),
+            "sustained_engagement": round(sustained, 2),
+        }
+
+    def _tribe_timeline_memory_score(self, result: AnalysisResultRead) -> float | None:
+        timeline = result.timeline_json or []
+        if len(timeline) < 2:
+            return None
+        memories = [float(p.memory_proxy) for p in timeline]
+        if max(memories) - min(memories) < 0.25:
+            return None
+        return round(sum(memories) / len(memories), 2)
+
+    def _tribe_segment_low_cognitive_load(self, result: AnalysisResultRead) -> float | None:
+        segments = result.segments_json or []
+        if len(segments) < 2:
+            return None
+        loads = [float(s.cognitive_load) for s in segments]
+        if max(loads) - min(loads) < 0.25:
+            return None
+        avg_load = sum(loads) / len(loads)
+        return round(min(100.0, max(0.0, 100.0 - avg_load)), 2)
+
     def _extract_score_map(self, result: AnalysisResultRead) -> dict[str, float]:
         metrics_by_key = {str(metric.key): float(metric.value) for metric in result.metrics_json}
         summary = result.summary_json
@@ -300,6 +371,16 @@ class AnalysisComparisonApplicationService:
             "low_cognitive_load": round(100.0 - float(summary.cognitive_load_proxy), 2),
             "confidence": round(float(summary.confidence or 0.0), 2),
         }
+        if self._summary_looks_like_llm_neutral_defaults(summary):
+            tribe_eng = self._tribe_timeline_engagement_scores(result)
+            if tribe_eng:
+                score_map.update(tribe_eng)
+            mem_fb = self._tribe_timeline_memory_score(result)
+            if mem_fb is not None:
+                score_map["memory_proxy"] = mem_fb
+            low_fb = self._tribe_segment_low_cognitive_load(result)
+            if low_fb is not None:
+                score_map["low_cognitive_load"] = low_fb
         score_map["composite"] = round(
             sum(score_map[key] * weight for key, weight in self.SCORE_WEIGHTS.items()),
             2,
@@ -320,7 +401,8 @@ class AnalysisComparisonApplicationService:
             self._format_metric_label(metric_name) for metric_name, _ in ranked_metrics[:2]
         )
         weakest_metric = ranked_metrics[-1][0] if ranked_metrics else "unknown"
-        return f"Strongest predicted drivers: {strongest}. Primary drag: {self._format_metric_label(weakest_metric)}."
+        weakest_label = self._format_metric_label(weakest_metric)
+        return f"Strongest predicted drivers: {strongest}. Primary drag: {weakest_label}."
 
     def _build_summary_json(
         self,
@@ -373,10 +455,14 @@ class AnalysisComparisonApplicationService:
         ranked_candidates: list[RankedAnalysisComparisonCandidate],
     ) -> dict[str, Any]:
         ordered_job_ids = [str(job_id) for job_id in payload.analysis_job_ids]
+        winner = ranked_candidates[0] if ranked_candidates else None
         return {
             "analysis_surface": "analysis_compare_workspace",
             "created_by_user_id": str(user_id),
             "baseline_job_id": str(baseline_job_id),
+            "winning_analysis_job_id": str(winner.candidate.analysis_job_id)
+            if winner is not None
+            else None,
             "analysis_job_ids": ordered_job_ids,
             "requested_context": payload.comparison_context,
             "items_metadata": [
@@ -390,6 +476,7 @@ class AnalysisComparisonApplicationService:
                     if ranked_candidate.candidate.asset is not None
                     else None,
                     "result": ranked_candidate.candidate.result.model_dump(mode="json"),
+                    "overall_rank": ranked_candidate.overall_rank,
                     "scores_json": ranked_candidate.scores_json,
                     "rationale": ranked_candidate.rationale,
                     "selected_order": payload.analysis_job_ids.index(
@@ -454,37 +541,47 @@ class AnalysisComparisonApplicationService:
         )
 
         items: list[AnalysisComparisonItemRead] = []
+        winning_analysis_job_id = self._resolve_winning_analysis_job_id(
+            comparison_context=comparison.comparison_context,
+            winning_creative_version_id=comparison.result.winning_creative_version_id,
+        )
         for metadata in items_metadata:
             creative_version_id = str(metadata.get("creative_version_id") or "")
             item_result = results_by_version_id.get(creative_version_id)
-            if item_result is None:
-                continue
             analysis_job_id = self._read_uuid(metadata.get("analysis_job_id"))
             if analysis_job_id is None:
                 continue
             candidate_result = self._parse_result_metadata(metadata.get("result"))
+            metadata_scores = dict(metadata.get("scores_json") or {})
+            item_scores = dict(item_result.scores_json or {}) if item_result is not None else {}
+            overall_rank = self._read_int(metadata.get("overall_rank"))
+            if overall_rank is None and item_result is not None:
+                overall_rank = item_result.overall_rank
+            if overall_rank is None:
+                continue
             items.append(
                 AnalysisComparisonItemRead(
                     analysis_job_id=analysis_job_id,
                     job=self._parse_job_metadata(metadata.get("job")),
                     asset=self._parse_asset_metadata(metadata.get("asset")),
                     result=candidate_result,
-                    overall_rank=item_result.overall_rank,
-                    is_winner=item_result.creative_version_id
-                    == comparison.result.winning_creative_version_id,
+                    overall_rank=overall_rank,
+                    is_winner=analysis_job_id == winning_analysis_job_id,
                     is_baseline=analysis_job_id == baseline_job_id,
-                    scores_json=dict(item_result.scores_json or metadata.get("scores_json") or {}),
+                    scores_json=metadata_scores or item_scores,
                     delta_json=self._build_delta_json(
                         baseline_result=baseline_result,
                         candidate_result=candidate_result,
                         baseline_scores=baseline_metadata.get("scores_json")
                         if baseline_metadata is not None
                         else None,
-                        candidate_scores=item_result.scores_json
-                        or metadata.get("scores_json")
-                        or {},
+                        candidate_scores=metadata_scores or item_scores,
                     ),
-                    rationale=item_result.rationale or metadata.get("rationale"),
+                    rationale=str(
+                        metadata.get("rationale")
+                        or (item_result.rationale if item_result is not None else "")
+                        or ""
+                    ),
                     scene_deltas_json=self._build_scene_deltas(
                         baseline_result=baseline_result,
                         candidate_result=candidate_result,
@@ -499,10 +596,6 @@ class AnalysisComparisonApplicationService:
             )
 
         items.sort(key=lambda item: item.overall_rank)
-        winning_analysis_job_id = self._resolve_winning_analysis_job_id(
-            comparison_context=comparison.comparison_context,
-            winning_creative_version_id=comparison.result.winning_creative_version_id,
-        )
         return AnalysisComparisonRead(
             id=comparison.id,
             name=comparison.name,
@@ -520,6 +613,11 @@ class AnalysisComparisonApplicationService:
         comparison_context: dict[str, Any],
         winning_creative_version_id: UUID | None,
     ) -> UUID | None:
+        stored_winning_job_id = self._read_uuid(
+            comparison_context.get("winning_analysis_job_id")
+        )
+        if stored_winning_job_id is not None:
+            return stored_winning_job_id
         winning_version = (
             str(winning_creative_version_id) if winning_creative_version_id is not None else None
         )
@@ -618,7 +716,9 @@ class AnalysisComparisonApplicationService:
                         if baseline_segment is not None
                         else None
                     ),
-                    "candidate_window": f"{candidate_segment.start_time_ms}-{candidate_segment.end_time_ms}",
+                    "candidate_window": (
+                        f"{candidate_segment.start_time_ms}-{candidate_segment.end_time_ms}"
+                    ),
                     "baseline_attention": round(baseline_attention, 2),
                     "candidate_attention": round(candidate_attention, 2),
                     "attention_delta": round(candidate_attention - baseline_attention, 2),
@@ -708,6 +808,12 @@ class AnalysisComparisonApplicationService:
     def _read_uuid(self, raw_value: Any) -> UUID | None:
         try:
             return UUID(str(raw_value))
+        except (TypeError, ValueError):
+            return None
+
+    def _read_int(self, raw_value: Any) -> int | None:
+        try:
+            return int(raw_value)
         except (TypeError, ValueError):
             return None
 

@@ -31,7 +31,7 @@ function CompareCandidateListBase({
   }
 
   return (
-    <Box className="analysis-job-history">
+    <Box className="compare-asset-list">
       {items.map((item) => (
         <CompareCandidateRow
           baselineJobId={baselineJobId}
@@ -60,46 +60,37 @@ function CompareCandidateRowBase({ baselineJobId, item, onSetBaseline, onToggle,
   const isBaseline = baselineJobId === item.job.id
 
   return (
-    <Box className={`analysis-job-history__item ${selected ? 'is-selected' : ''}`}>
-      <Stack spacing={1.25}>
-        <Stack alignItems="center" direction="row" justifyContent="space-between" spacing={1.5}>
-          <Box sx={{ minWidth: 0 }}>
+    <Box className={`compare-asset-row ${selected ? 'is-selected' : ''}`}>
+      <Stack alignItems={{ xs: 'stretch', sm: 'center' }} direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+        <Box className="compare-asset-thumb">{item.asset?.media_type?.slice(0, 1).toUpperCase() || 'A'}</Box>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Stack spacing={0.5}>
             <Typography sx={{ wordBreak: 'break-word' }} variant="subtitle2">
               {resolveAnalysisLabel(item)}
             </Typography>
             <Typography color="text.secondary" variant="body2">
               {formatTimestamp(item.job.created_at)}
             </Typography>
-          </Box>
-          <Stack direction="row" spacing={1}>
-            {isBaseline ? <Chip color="primary" label="Baseline" size="small" variant="outlined" /> : null}
-            <Chip
-              className={`analysis-status-chip is-${item.job.status}`}
-              label={item.job.status}
-              size="small"
-              variant="outlined"
-            />
+            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+              {isBaseline ? <Chip color="primary" label="Baseline" size="small" variant="outlined" /> : null}
+              {item.job.goal_template ? (
+                <Chip label={readableGoalTemplate(item.job.goal_template)} size="small" variant="outlined" />
+              ) : null}
+              {item.job.channel ? <Chip label={readableChannel(item.job.channel)} size="small" variant="outlined" /> : null}
+              <Chip label={item.asset?.media_type || 'analysis'} size="small" variant="outlined" />
+            </Stack>
+            <Typography color="text.secondary" variant="body2">
+              {truncateText(item.job.objective || 'No objective stored.', 84)}
+            </Typography>
           </Stack>
-        </Stack>
+        </Box>
 
-        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-          {item.job.goal_template ? (
-            <Chip label={readableGoalTemplate(item.job.goal_template)} size="small" variant="outlined" />
-          ) : null}
-          {item.job.channel ? <Chip label={readableChannel(item.job.channel)} size="small" variant="outlined" /> : null}
-          <Chip label={item.asset?.media_type || 'analysis'} size="small" variant="outlined" />
-        </Stack>
-
-        <Typography color="text.secondary" variant="body2">
-          {truncateText(item.job.objective || 'No objective stored for this analysis.', 132)}
-        </Typography>
-
-        <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+        <Stack alignItems={{ xs: 'stretch', sm: 'flex-end' }} spacing={1}>
           <Button onClick={handleToggle} size="small" variant={selected ? 'contained' : 'outlined'}>
-            {selected ? 'Selected' : 'Add to compare'}
+            {selected ? 'Selected' : 'Add'}
           </Button>
           <Button disabled={!selected} onClick={handleBaseline} size="small" variant="text">
-            Set as baseline
+            Baseline
           </Button>
         </Stack>
       </Stack>

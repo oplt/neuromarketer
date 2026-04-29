@@ -32,7 +32,7 @@ from backend.db.models import (
     OrgRole,
     UserMfaCredential,
 )
-from backend.db.repositories import crud
+from backend.db.repositories import AuthRepository
 from backend.schemas.account import (
     AccountMfaConfirmRequest,
     AccountMfaDisableRequest,
@@ -49,6 +49,7 @@ class MFAService:
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self._auth_repo = AuthRepository(session)
 
     # ------------------------------------------------------------------
     # Public API
@@ -264,8 +265,7 @@ class MFAService:
     async def _get_membership(
         self, *, organization_id: UUID, user_id: UUID
     ) -> OrganizationMembership:
-        membership = await crud.get_membership_for_user(
-            self.session,
+        membership = await self._auth_repo.get_membership_for_user(
             user_id=user_id,
             organization_id=organization_id,
         )

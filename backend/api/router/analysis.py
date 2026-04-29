@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
 from fastapi.responses import RedirectResponse, StreamingResponse
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,8 @@ from backend.db.session import AsyncSessionLocal, get_db
 from backend.schemas.analysis import (
     AnalysisAssetListResponse,
     AnalysisBenchmarkResponse,
+    AnalysisBulkDeleteRequest,
+    AnalysisBulkDeleteResponse,
     AnalysisCalibrationResponse,
     AnalysisClientEventRequest,
     AnalysisComparisonCreateRequest,
@@ -40,11 +42,11 @@ from backend.schemas.analysis import (
     AnalysisExecutiveVerdictRead,
     AnalysisGeneratedVariantCreateRequest,
     AnalysisGeneratedVariantListResponse,
-    AnalysisJobResultDetailResponse,
-    AnalysisJobStatusLiteResponse,
     AnalysisGoalPresetsResponse,
     AnalysisJobCreateRequest,
     AnalysisJobListResponse,
+    AnalysisJobResultDetailResponse,
+    AnalysisJobStatusLiteResponse,
     AnalysisOutcomeImportResponse,
     AnalysisUploadCompleteRequest,
     AnalysisUploadCompleteResponse,
@@ -124,7 +126,11 @@ def _decode_analysis_job_event_message(message: dict[str, Any] | None) -> dict[s
     return decoded if isinstance(decoded, dict) else None
 
 
-async def _load_analysis_job_snapshot(*, user_id: UUID, job_id: UUID) -> AnalysisJobStatusLiteResponse:
+async def _load_analysis_job_snapshot(
+    *,
+    user_id: UUID,
+    job_id: UUID,
+) -> AnalysisJobStatusLiteResponse:
     async with AsyncSessionLocal() as session:
         return await AnalysisApplicationService(session).get_analysis_job(
             user_id=user_id, job_id=job_id
@@ -342,6 +348,63 @@ async def list_analysis_jobs(
         audience_contains=audience_contains,
         limit=limit,
     )
+
+
+@router.delete("/jobs", response_model=AnalysisBulkDeleteResponse)
+async def delete_analysis_jobs(
+    payload: AnalysisBulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisBulkDeleteResponse:
+    return await AnalysisApplicationService(db).delete_jobs(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        job_ids=payload.ids,
+    )
+
+
+@router.delete("/assets", response_model=AnalysisBulkDeleteResponse)
+async def delete_analysis_assets(
+    payload: AnalysisBulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> AnalysisBulkDeleteResponse:
+    return await AnalysisApplicationService(db).delete_assets(
+        user_id=auth.user.id,
+        project_id=auth.default_project.id,
+        asset_ids=payload.ids,
+    )
+
+
+@router.post("/cache/cleanup")
+async def cleanup_analysis_local_caches(
+    purge_extractor: bool = Query(default=False),
+    purge_runtime: bool = Query(default=False),
+    purge_assets: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+    auth: AuthenticatedRequestContext = Depends(require_authenticated_context),
+) -> dict[str, Any]:
+    cleanup_summary = await AnalysisApplicationService(db).cleanup_local_caches(
+        purge_extractor=purge_extractor,
+        purge_runtime=purge_runtime,
+        purge_assets=purge_assets,
+    )
+    log_event(
+        logger,
+        "analysis_cache_cleanup_requested",
+        user_id=str(auth.user.id),
+        purge_extractor=purge_extractor,
+        purge_runtime=purge_runtime,
+        purge_assets=purge_assets,
+        status="completed",
+    )
+    return {
+        "status": "ok",
+        "purge_extractor": purge_extractor,
+        "purge_runtime": purge_runtime,
+        "purge_assets": purge_assets,
+        "summary": cleanup_summary,
+    }
 
 
 @router.post(

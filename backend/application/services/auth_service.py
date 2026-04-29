@@ -42,7 +42,7 @@ from backend.db.models import (
     WorkspaceInvite,
     WorkspaceInviteStatus,
 )
-from backend.db.repositories import crud
+from backend.db.repositories import AuthRepository
 from backend.schemas.account import (
     AccountInviteCreateRequest,
     AccountInviteCreateResponse,
@@ -78,18 +78,18 @@ class AuthClientMetadata:
     ip_address: str | None = None
 
 
-class AuthApplicationService:
+class AuthService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+        self._auth_repo = AuthRepository(session)
         self._mfa = MFAService(session)
 
     async def sign_up(self, *, payload: SignUpRequest, client: AuthClientMetadata) -> AuthResponse:
-        existing_user = await crud.get_user_by_email(self.session, payload.email)
+        existing_user = await self._auth_repo.get_user_by_email(payload.email)
         if existing_user is not None:
             raise ConflictAppError("An account with this email already exists.")
 
-        user, organization, default_project = await crud.create_user_with_workspace(
-            self.session,
+        user, organization, default_project = await self._auth_repo.create_user_with_workspace(
             email=payload.email,
             full_name=payload.full_name,
             password=payload.password,
@@ -118,17 +118,16 @@ class AuthApplicationService:
         )
 
     async def sign_in(self, *, payload: SignInRequest, client: AuthClientMetadata) -> AuthResponse:
-        user = await crud.get_user_by_email(self.session, payload.email)
+        user = await self._auth_repo.get_user_by_email(payload.email)
         if user is None or not verify_password(payload.password, user.password_hash):
             raise UnauthorizedAppError("Invalid email or password.")
         if not user.is_active or user.deleted_at is not None:
             raise UnauthorizedAppError("Your account is disabled.")
 
-        organization = await crud.get_primary_organization_for_user(self.session, user.id)
+        organization = await self._auth_repo.get_primary_organization_for_user(user.id)
         if organization is None:
             raise UnauthorizedAppError("No workspace is available for this account.")
-        default_project = await crud.get_or_create_default_project_for_organization(
-            self.session,
+        default_project = await self._auth_repo.get_or_create_default_project_for_organization(
             organization_id=organization.id,
             created_by_user_id=user.id,
         )
@@ -191,11 +190,10 @@ class AuthApplicationService:
         client: AuthClientMetadata,
     ) -> AuthResponse:
         claims = verify_mfa_challenge_token(payload.challenge_token)
-        user = await crud.get_user_by_id(self.session, claims.user_id)
+        user = await self._auth_repo.get_user_by_id(claims.user_id)
         if user is None or user.email.strip().lower() != claims.email:
             raise UnauthorizedAppError("The MFA challenge is invalid or has expired.")
-        organization = await crud.get_organization_for_user(
-            self.session,
+        organization = await self._auth_repo.get_organization_for_user(
             user_id=user.id,
             organization_id=claims.organization_id,
         )
@@ -212,8 +210,7 @@ class AuthApplicationService:
             credential=credential, code=payload.code, recovery_code=payload.recovery_code
         )
         credential.last_used_at = self._now()
-        default_project = await crud.get_or_create_default_project_for_organization(
-            self.session,
+        default_project = await self._auth_repo.get_or_create_default_project_for_organization(
             organization_id=organization.id,
             created_by_user_id=user.id,
         )
@@ -279,7 +276,7 @@ class AuthApplicationService:
         invite, organization = await self._resolve_invite(
             invite_token=payload.invite_token, require_pending=True
         )
-        existing_user = await crud.get_user_by_email(self.session, invite.email)
+        existing_user = await self._auth_repo.get_user_by_email(invite.email)
         if existing_user is not None:
             if not verify_password(payload.password, existing_user.password_hash):
                 raise UnauthorizedAppError("The password does not match the invited account.")
@@ -298,8 +295,7 @@ class AuthApplicationService:
             self.session.add(user)
             await self.session.flush()
 
-        membership = await crud.get_membership_for_user(
-            self.session,
+        membership = await self._auth_repo.get_membership_for_user(
             user_id=user.id,
             organization_id=organization.id,
         )
@@ -315,8 +311,7 @@ class AuthApplicationService:
         invite.status = WorkspaceInviteStatus.ACCEPTED
         invite.accepted_at = self._now()
         invite.accepted_by_user_id = user.id
-        default_project = await crud.get_or_create_default_project_for_organization(
-            self.session,
+        default_project = await self._auth_repo.get_or_create_default_project_for_organization(
             organization_id=organization.id,
             created_by_user_id=user.id,
         )
@@ -751,8 +746,7 @@ class AuthApplicationService:
     async def _get_membership(
         self, *, organization_id: UUID, user_id: UUID
     ) -> OrganizationMembership:
-        membership = await crud.get_membership_for_user(
-            self.session,
+        membership = await self._auth_repo.get_membership_for_user(
             user_id=user_id,
             organization_id=organization_id,
         )
@@ -809,7 +803,7 @@ class AuthApplicationService:
             for user_id in (invite.invited_by_user_id, invite.accepted_by_user_id)
             if user_id is not None
         ]
-        users_by_id = await crud.get_users_by_ids(self.session, related_user_ids)
+        users_by_id = await self._auth_repo.get_users_by_ids(related_user_ids)
         items: list[AccountInviteRead] = []
         for invite in invites:
             items.append(await self._build_invite_read(invite, users_by_id=users_by_id))
@@ -829,9 +823,9 @@ class AuthApplicationService:
                 users_by_id.get(invite.accepted_by_user_id) if invite.accepted_by_user_id else None
             )
         else:
-            invited_by = await crud.get_user_by_id(self.session, invite.invited_by_user_id)
+            invited_by = await self._auth_repo.get_user_by_id(invite.invited_by_user_id)
             accepted_by = (
-                await crud.get_user_by_id(self.session, invite.accepted_by_user_id)
+                await self._auth_repo.get_user_by_id(invite.accepted_by_user_id)
                 if invite.accepted_by_user_id
                 else None
             )
@@ -972,3 +966,7 @@ class AuthApplicationService:
 
     def _now(self) -> datetime:
         return datetime.now(UTC)
+
+
+# Backward-compatible alias for existing imports.
+AuthApplicationService = AuthService

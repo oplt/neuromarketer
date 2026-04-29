@@ -221,30 +221,35 @@ class NeuroScoringService:
                 assessment=assessments.attention,
                 modality=modality,
                 scoring_response=scoring_response,
+                include_telemetry=True,
             ),
             self._build_score_item(
                 score_type="emotion",
                 assessment=assessments.emotion,
                 modality=modality,
                 scoring_response=scoring_response,
+                include_telemetry=False,
             ),
             self._build_score_item(
                 score_type="memory",
                 assessment=assessments.memory,
                 modality=modality,
                 scoring_response=scoring_response,
+                include_telemetry=False,
             ),
             self._build_score_item(
                 score_type="cognitive_load",
                 assessment=assessments.cognitive_load,
                 modality=modality,
                 scoring_response=scoring_response,
+                include_telemetry=False,
             ),
             self._build_score_item(
                 score_type="conversion_proxy",
                 assessment=assessments.conversion_proxy,
                 modality=modality,
                 scoring_response=scoring_response,
+                include_telemetry=False,
             ),
         ]
 
@@ -255,29 +260,40 @@ class NeuroScoringService:
         assessment: MetricAssessment,
         modality: str,
         scoring_response: AnalysisScoringResponse,
+        include_telemetry: bool,
     ) -> ScoreItem:
         normalized_score = _score_decimal(assessment.score)
         evidence = _normalize_notes(assessment.evidence, limit=4)
+        metadata_json: dict[str, Any] = {
+            "model": self.SCORE_MODEL_NAME,
+            "modality": modality,
+            "provider": scoring_response.provider,
+            "provider_id": scoring_response.provider_id,
+            "model_name": scoring_response.model,
+            "prompt_version": scoring_response.prompt_version,
+            "reason": assessment.reason,
+            "evidence": evidence,
+            "interpretation_layer": (
+                "LLM-evaluated product score grounded in TRIBE-derived internal features and summaries."
+            ),
+        }
+        if include_telemetry:
+            telemetry = dict(scoring_response.telemetry or {})
+            metadata_json["telemetry"] = {
+                "route_id": telemetry.get("route_id"),
+                "attempts": telemetry.get("attempts"),
+                "fallback_count": telemetry.get("fallback_count"),
+                "latency_ms": telemetry.get("latency_ms"),
+                "provider": telemetry.get("provider"),
+                "model": telemetry.get("model"),
+            }
         return ScoreItem(
             score_type=score_type,
             normalized_score=normalized_score,
             raw_value=None,
             confidence=_decimal(assessment.confidence, precision=4),
             percentile=normalized_score,
-            metadata_json={
-                "model": self.SCORE_MODEL_NAME,
-                "modality": modality,
-                "provider": scoring_response.provider,
-                "provider_id": scoring_response.provider_id,
-                "model_name": scoring_response.model,
-                "prompt_version": scoring_response.prompt_version,
-                "reason": assessment.reason,
-                "evidence": evidence,
-                "telemetry": scoring_response.telemetry,
-                "interpretation_layer": (
-                    "LLM-evaluated product score grounded in TRIBE-derived internal features and summaries."
-                ),
-            },
+            metadata_json=metadata_json,
         )
 
     def _build_visualizations(
@@ -320,7 +336,12 @@ class NeuroScoringService:
                 visualization_type=VisualizationType.BRAIN_REGION_SUMMARY,
                 title="Derived Brain Response Summary",
                 storage_uri=None,
-                data_json=region_activation_summary,
+                data_json={
+                    "hemisphere_summary": region_activation_summary.get("hemisphere_summary"),
+                    "top_rois": list(region_activation_summary.get("top_rois") or [])[
+                        :MAX_SCORING_TOP_ROIS
+                    ],
+                },
             ),
         ]
 
@@ -367,7 +388,7 @@ class NeuroScoringService:
                     fallback_scores=overall_scores,
                     segment=None,
                 )
-                for point in scoring_response.result.timeline_points
+                for point in scoring_response.result.timeline_points[:MAX_SCORING_SEGMENTS]
             ]
 
         return [
@@ -408,7 +429,9 @@ class NeuroScoringService:
             metadata_json["rationale"] = rationale
         if segment is not None:
             metadata_json["event_count"] = int(segment.get("event_count", 0))
-            metadata_json["event_types"] = list(segment.get("event_types", []))
+            metadata_json["event_types"] = list(segment.get("event_types", []))[
+                :MAX_SCORING_EVENT_TYPES
+            ]
 
         return TimelinePointItem(
             timestamp_ms=timestamp_ms,
@@ -439,12 +462,16 @@ class NeuroScoringService:
     ) -> list[SuggestionItem]:
         suggestions: list[SuggestionItem] = []
         for suggestion in scoring_response.result.suggestions:
+            try:
+                suggestion_type = SuggestionType(str(suggestion.suggestion_type))
+            except ValueError:
+                continue
             proposed_change_json = dict(suggestion.proposed_change_json or {})
             if suggestion.timestamp_ms is not None:
                 proposed_change_json.setdefault("timestamp_ms", int(suggestion.timestamp_ms))
             suggestions.append(
                 SuggestionItem(
-                    suggestion_type=SuggestionType(suggestion.suggestion_type),
+                    suggestion_type=suggestion_type,
                     status=SuggestionStatus.PROPOSED,
                     title=suggestion.title,
                     rationale=suggestion.rationale,

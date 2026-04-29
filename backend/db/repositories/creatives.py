@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import UUID
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
@@ -88,38 +89,53 @@ class CreativeRepository:
         if artifact.creative_id is None:
             raise ValueError("Artifact is not attached to a creative.")
 
-        resolved_version_number = version_number or await self.next_version_number(
-            artifact.creative_id
-        )
+        # Even with parent-row locking in next_version_number(), retain
+        # a retry loop for the unique constraint
+        # (creative_id, version_number). Distributed workers can still
+        # race around lock boundaries or replay transactions.
+        max_retries = 3 if version_number is None else 1
+        last_integrity_error: IntegrityError | None = None
+        for _ in range(max_retries):
+            resolved_version_number = version_number or await self.next_version_number(
+                artifact.creative_id
+            )
+            version = CreativeVersion(
+                creative_id=artifact.creative_id,
+                version_number=resolved_version_number,
+                is_current=True,
+                source_uri=artifact.storage_uri,
+                mime_type=artifact.mime_type,
+                file_size_bytes=artifact.file_size_bytes,
+                sha256=artifact.sha256,
+                raw_text=raw_text,
+                extracted_metadata=artifact.metadata_json.get("extracted_metadata", {}),
+                preprocessing_summary=artifact.metadata_json.get("preprocessing_summary", {}),
+                duration_ms=artifact.metadata_json.get("extracted_metadata", {}).get("duration_ms"),
+                width_px=artifact.metadata_json.get("extracted_metadata", {}).get("width_px"),
+                height_px=artifact.metadata_json.get("extracted_metadata", {}).get("height_px"),
+                frame_rate=artifact.metadata_json.get("extracted_metadata", {}).get("frame_rate"),
+            )
+            try:
+                async with self.session.begin_nested():
+                    await self.session.execute(
+                        update(CreativeVersion)
+                        .where(CreativeVersion.creative_id == artifact.creative_id)
+                        .values(is_current=False)
+                    )
+                    self.session.add(version)
+                    creative = await self.get_creative(artifact.creative_id)
+                    if creative is not None:
+                        creative.status = CreativeStatus.READY
+                    await self.session.flush()
+                await self.session.refresh(version)
+                return version
+            except IntegrityError as exc:
+                last_integrity_error = exc
+                # Caller supplied an explicit version_number; retrying
+                # cannot help and would just repeat the same conflict.
+                if version_number is not None:
+                    raise
+                continue
 
-        await self.session.execute(
-            update(CreativeVersion)
-            .where(CreativeVersion.creative_id == artifact.creative_id)
-            .values(is_current=False)
-        )
-
-        version = CreativeVersion(
-            creative_id=artifact.creative_id,
-            version_number=resolved_version_number,
-            is_current=True,
-            source_uri=artifact.storage_uri,
-            mime_type=artifact.mime_type,
-            file_size_bytes=artifact.file_size_bytes,
-            sha256=artifact.sha256,
-            raw_text=raw_text,
-            extracted_metadata=artifact.metadata_json.get("extracted_metadata", {}),
-            preprocessing_summary=artifact.metadata_json.get("preprocessing_summary", {}),
-            duration_ms=artifact.metadata_json.get("extracted_metadata", {}).get("duration_ms"),
-            width_px=artifact.metadata_json.get("extracted_metadata", {}).get("width_px"),
-            height_px=artifact.metadata_json.get("extracted_metadata", {}).get("height_px"),
-            frame_rate=artifact.metadata_json.get("extracted_metadata", {}).get("frame_rate"),
-        )
-        self.session.add(version)
-
-        creative = await self.get_creative(artifact.creative_id)
-        if creative is not None:
-            creative.status = CreativeStatus.READY
-
-        await self.session.flush()
-        await self.session.refresh(version)
-        return version
+        assert last_integrity_error is not None
+        raise last_integrity_error

@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from backend.application.services.analysis import AnalysisApplicationService
 from backend.application.services.analysis_job_processor import AnalysisJobProcessor
+from backend.core.exceptions import NotFoundAppError
 from backend.db.models import JobStatus
 from backend.db.repositories.inference import InferenceRepository
 
@@ -147,6 +148,92 @@ class TestPartialProgressPersistence(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertNotIn("analysis_partial_result", job.runtime_params)
+
+
+class TestAnalysisProcessorTransactionBoundaries(unittest.IsolatedAsyncioTestCase):
+    async def test_process_commits_after_inference_acquire_before_long_work(self) -> None:
+        session = AsyncMock()
+        processor = AnalysisJobProcessor(session)
+        job = SimpleNamespace(
+            id=uuid4(),
+            project_id=uuid4(),
+            creative_id=uuid4(),
+            creative_version_id=uuid4(),
+            started_at=datetime.now(UTC),
+            created_at=datetime.now(UTC),
+            request_payload={},
+            runtime_params={},
+        )
+        processor.inference = SimpleNamespace(acquire_job=AsyncMock(return_value=job))
+        processor.creatives = SimpleNamespace(get_creative_version=AsyncMock(return_value=None))
+
+        with self.assertRaises(NotFoundAppError):
+            await processor.process(job.id)
+
+        session.commit.assert_awaited_once()
+
+    async def test_process_scoring_commits_after_acquire_before_long_scoring(self) -> None:
+        session = AsyncMock()
+        processor = AnalysisJobProcessor(session)
+        job = SimpleNamespace(
+            id=uuid4(),
+            project_id=uuid4(),
+            creative_id=uuid4(),
+            creative_version_id=uuid4(),
+            prediction=SimpleNamespace(id=uuid4()),
+            started_at=datetime.now(UTC),
+            request_payload={},
+            runtime_params={},
+        )
+        processor.inference = SimpleNamespace(acquire_scoring_job=AsyncMock(return_value=job))
+        processor.creatives = SimpleNamespace(get_creative_version=AsyncMock(return_value=None))
+
+        with self.assertRaises(NotFoundAppError):
+            await processor.process_scoring(job.id)
+
+        session.commit.assert_awaited_once()
+
+    async def test_process_scoring_commits_before_long_scoring_path(self) -> None:
+        """pre-scoring commit ends idle-in-transaction during LLM scoring."""
+        session = AsyncMock()
+        processor = AnalysisJobProcessor(session)
+        job_id = uuid4()
+        creative_version = SimpleNamespace(
+            id=uuid4(),
+            preprocessing_summary={"modality": "video"},
+            mime_type="video/mp4",
+            raw_text=None,
+            source_uri="s3://x",
+        )
+        prediction = SimpleNamespace(
+            raw_brain_response_uri=None,
+            raw_brain_response_summary={},
+            reduced_feature_vector={},
+            region_activation_summary={},
+            provenance_json={},
+        )
+        job = SimpleNamespace(
+            id=job_id,
+            project_id=uuid4(),
+            creative_id=uuid4(),
+            creative_version_id=creative_version.id,
+            started_at=datetime.now(UTC),
+            request_payload={},
+            runtime_params={"analysis_progress": {"diagnostics": {}}},
+            prediction=prediction,
+        )
+        processor.inference = SimpleNamespace(
+            acquire_scoring_job=AsyncMock(return_value=job),
+        )
+        processor.creatives = SimpleNamespace(
+            get_creative_version=AsyncMock(return_value=creative_version),
+        )
+        processor.scoring.score = AsyncMock(side_effect=RuntimeError("expected stop"))
+
+        with self.assertRaises(RuntimeError):
+            await processor.process_scoring(job_id)
+
+        self.assertGreaterEqual(session.commit.await_count, 2)
 
 
 class TestPartialRestoreWithoutFinalRecord(unittest.IsolatedAsyncioTestCase):

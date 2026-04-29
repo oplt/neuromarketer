@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    desc,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -607,7 +608,51 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "media_type",
             "created_at",
         ),
+        Index(
+            "ix_inference_jobs_project_user_surface_media_created_desc",
+            "project_id",
+            "created_by_user_id",
+            "analysis_surface",
+            "media_type",
+            desc("created_at"),
+        ),
         Index("ix_inference_jobs_execution_phase", "execution_phase"),
+        Index(
+            "ix_inference_jobs_status_created_at_desc",
+            "status",
+            desc("created_at"),
+        ),
+        Index(
+            "ix_inference_jobs_execution_phase_updated_at",
+            "execution_phase",
+            "execution_phase_updated_at",
+        ),
+        # Composite index that matches the benchmark-cohort query
+        # (project_id + status='SUCCEEDED' + analysis_surface filter,
+        # ordered by created_at DESC). Replaces the previous reliance
+        # on JSONB expression indexes for goal_template / channel.
+        Index(
+            "ix_inference_jobs_project_status_surface_media_created_desc",
+            "project_id",
+            "status",
+            "analysis_surface",
+            "media_type",
+            desc("created_at"),
+        ),
+        # Equality filters for the optional dashboard / benchmark
+        # refinements. Cheap to maintain (low-cardinality string
+        # columns) and lets PostgreSQL do BitmapAnd with the composite
+        # index above when callers pass ``goal_template`` / ``channel``.
+        Index(
+            "ix_inference_jobs_project_goal_template",
+            "project_id",
+            "goal_template",
+        ),
+        Index(
+            "ix_inference_jobs_project_channel",
+            "project_id",
+            "channel",
+        ),
     )
 
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -646,6 +691,13 @@ class InferenceJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     runtime_params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     analysis_surface: Mapped[str | None] = mapped_column(String(64), nullable=True)
     media_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Denormalised hot-filter keys lifted from
+    # ``request_payload['campaign_context']``. Indexed first-class
+    # columns let the dashboard list and the benchmark cohort query
+    # filter without scanning JSONB on every row.
+    goal_template: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audience_segment: Mapped[str | None] = mapped_column(String(255), nullable=True)
     execution_phase: Mapped[str | None] = mapped_column(String(40), nullable=True)
     execution_phase_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -1229,6 +1281,23 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_stored_artifacts_project_kind", "project_id", "artifact_kind"),
         Index("ix_stored_artifacts_user_status", "created_by_user_id", "upload_status"),
         Index("ix_stored_artifacts_storage_key", "storage_key"),
+        Index(
+            "ix_stored_artifacts_project_user_kind_status_media_created_desc",
+            "project_id",
+            "created_by_user_id",
+            "artifact_kind",
+            "upload_status",
+            "media_type",
+            desc("created_at"),
+        ),
+        Index(
+            "ix_stored_artifacts_project_user_kind_status_created_desc",
+            "project_id",
+            "created_by_user_id",
+            "artifact_kind",
+            "upload_status",
+            desc("created_at"),
+        ),
         UniqueConstraint("bucket_name", "storage_key", name="uq_artifact_bucket_key"),
     )
 
@@ -1260,6 +1329,7 @@ class StoredArtifact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     original_filename: Mapped[str | None] = mapped_column(String(512), nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    media_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     file_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     upload_status: Mapped[UploadStatus] = mapped_column(
@@ -1276,6 +1346,12 @@ class UploadSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         Index("ix_upload_sessions_project_status", "project_id", "status"),
         Index("ix_upload_sessions_user_status", "created_by_user_id", "status"),
+        Index(
+            "ix_upload_sessions_user_status_created_desc",
+            "created_by_user_id",
+            "status",
+            desc("created_at"),
+        ),
         UniqueConstraint("upload_token", name="uq_upload_sessions_token"),
     )
 

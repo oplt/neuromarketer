@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     database_echo: bool = False
     database_auto_create: bool = False
     database_pool_pre_ping: bool = True
+    database_statement_timeout_ms: int = 300000
+    # PostgreSQL: idle_in_transaction_session_timeout. Use 0 to disable (see session.py).
+    # Default 10 minutes so LLM scoring + dashboard postprocessing can exceed 60s safely.
+    database_idle_in_transaction_timeout_ms: int = Field(
+        default=600_000,
+        validation_alias="DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS",
+    )
 
     cors_allow_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
@@ -155,10 +162,13 @@ class Settings(BaseSettings):
     )
     celery_worker_role: str = Field(default="default", validation_alias="CELERY_WORKER_ROLE")
     enable_in_process_jobs: bool = Field(default=True, validation_alias="ENABLE_IN_PROCESS_JOBS")
+    # Explicit override for emergency use only; keep false in production.
+    force_in_process_jobs: bool = Field(default=False, validation_alias="FORCE_IN_PROCESS_JOBS")
     celery_inference_worker_prefetch_multiplier: int = Field(
         default=1,
         validation_alias="CELERY_INFERENCE_WORKER_PREFETCH_MULTIPLIER",
     )
+    # Recommended for GPU-heavy TRIBE workers: keep concurrency at 1.
     celery_scoring_worker_prefetch_multiplier: int = Field(
         default=4,
         validation_alias="CELERY_SCORING_WORKER_PREFETCH_MULTIPLIER",
@@ -167,6 +177,7 @@ class Settings(BaseSettings):
         default=1,
         validation_alias="CELERY_INFERENCE_WORKER_CONCURRENCY",
     )
+    # Recommended baseline for scoring workers (adjust for provider rate limits).
     celery_scoring_worker_concurrency: int = Field(
         default=4,
         validation_alias="CELERY_SCORING_WORKER_CONCURRENCY",
@@ -212,6 +223,25 @@ class Settings(BaseSettings):
         default=3,
         validation_alias="ANALYSIS_STREAM_MAX_CONNECTIONS_PER_JOB_USER",
     )
+    analysis_offload_large_payloads: bool = Field(
+        default=True, validation_alias="ANALYSIS_OFFLOAD_LARGE_PAYLOADS"
+    )
+    analysis_offload_payload_threshold_bytes: int = Field(
+        default=256 * 1024,
+        validation_alias="ANALYSIS_OFFLOAD_PAYLOAD_THRESHOLD_BYTES",
+    )
+    analysis_offload_timeline_preview_rows: int = Field(
+        default=200,
+        validation_alias="ANALYSIS_OFFLOAD_TIMELINE_PREVIEW_ROWS",
+    )
+    analysis_offload_segments_preview_rows: int = Field(
+        default=120,
+        validation_alias="ANALYSIS_OFFLOAD_SEGMENTS_PREVIEW_ROWS",
+    )
+    analysis_offload_recommendations_preview_rows: int = Field(
+        default=40,
+        validation_alias="ANALYSIS_OFFLOAD_RECOMMENDATIONS_PREVIEW_ROWS",
+    )
 
     tribe_model_repo_id: str = Field(
         default="facebook/tribev2", validation_alias="TRIBE_MODEL_REPO_ID"
@@ -247,6 +277,7 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="TRIBE_VIDEO_MAX_IMSIZE",
     )
+    # Recommended true on dedicated inference workers for faster warm starts.
     tribe_preload_on_worker_startup: bool = Field(
         default=False, validation_alias="TRIBE_PRELOAD_ON_WORKER_STARTUP"
     )
@@ -270,6 +301,42 @@ class Settings(BaseSettings):
         default=15,
         validation_alias="TRIBE_RUNTIME_OUTPUT_CACHE_CLEANUP_INTERVAL_MINUTES",
     )
+    tribe_extractor_cache_cleanup_enabled: bool = Field(
+        default=True,
+        validation_alias="TRIBE_EXTRACTOR_CACHE_CLEANUP_ENABLED",
+    )
+    tribe_extractor_cache_max_bytes: int = Field(
+        default=2 * 1024 * 1024 * 1024,
+        validation_alias="TRIBE_EXTRACTOR_CACHE_MAX_BYTES",
+    )
+    tribe_extractor_cache_max_age_hours: int = Field(
+        default=24 * 7,
+        validation_alias="TRIBE_EXTRACTOR_CACHE_MAX_AGE_HOURS",
+    )
+    tribe_extractor_cache_cleanup_interval_minutes: int = Field(
+        default=30,
+        validation_alias="TRIBE_EXTRACTOR_CACHE_CLEANUP_INTERVAL_MINUTES",
+    )
+    tribe_extractor_cache_purge_on_startup: bool = Field(
+        default=False,
+        validation_alias="TRIBE_EXTRACTOR_CACHE_PURGE_ON_STARTUP",
+    )
+    tribe_gc_collect_after_inference: bool = Field(
+        default=True,
+        validation_alias="TRIBE_GC_COLLECT_AFTER_INFERENCE",
+    )
+    tribe_cuda_empty_cache_after_inference: bool = Field(
+        default=False,
+        validation_alias="TRIBE_CUDA_EMPTY_CACHE_AFTER_INFERENCE",
+    )
+    tribe_cuda_empty_cache_before_inference: bool = Field(
+        default=True,
+        validation_alias="TRIBE_CUDA_EMPTY_CACHE_BEFORE_INFERENCE",
+    )
+    tribe_cuda_alloc_expandable_segments: bool = Field(
+        default=True,
+        validation_alias="TRIBE_CUDA_ALLOC_EXPANDABLE_SEGMENTS",
+    )
     tribe_enable_roi_summary: bool = Field(
         default=False, validation_alias="TRIBE_ENABLE_ROI_SUMMARY"
     )
@@ -281,6 +348,7 @@ class Settings(BaseSettings):
     llm_base_url: str = Field(default="http://localhost:11434", validation_alias="LLM_BASE_URL")
     llm_model: str = Field(default="gemma3:27b", validation_alias="LLM_MODEL")
     llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY")
+    # Practical range in production: 30-60 seconds.
     llm_timeout_seconds: int = Field(default=120, validation_alias="LLM_TIMEOUT_SECONDS")
     llm_max_tokens: int = Field(default=1400, validation_alias="LLM_MAX_TOKENS")
     llm_analysis_scoring_max_tokens: int = Field(
@@ -468,6 +536,14 @@ class Settings(BaseSettings):
                     "SESSION_SECRET must be a strong random value (>=32 chars) in production. "
                     "Generate one with: openssl rand -hex 64"
                 )
+        if self.app_env not in {"development", "test"}:
+            if self.force_in_process_jobs:
+                raise ValueError(
+                    "FORCE_IN_PROCESS_JOBS is not allowed outside development/test "
+                    "because it can overload API workers."
+                )
+            if self.enable_in_process_jobs:
+                self.enable_in_process_jobs = False
         return self
 
     @field_validator("log_format", mode="before")

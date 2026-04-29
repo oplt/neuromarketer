@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, InterfaceError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -14,14 +15,15 @@ from sqlalchemy.ext.asyncio import (
 from backend.core.config import settings
 from backend.db.models import Base
 
-_STATEMENT_TIMEOUT_MS = getattr(settings, "database_statement_timeout_ms", 30_000)
-_IDLE_IN_TX_TIMEOUT_MS = getattr(
-    settings, "database_idle_in_transaction_timeout_ms", 60_000
-)
+_STATEMENT_TIMEOUT_MS = settings.database_statement_timeout_ms
+_IDLE_IN_TX_TIMEOUT_MS = settings.database_idle_in_transaction_timeout_ms
 
 _connect_args: dict = {
     "server_settings": {
         "statement_timeout": str(_STATEMENT_TIMEOUT_MS),
+        # Per-connection cap on idle time inside an open transaction. The previous default
+        # (60s) terminated sessions during long scoring + CPU postprocessing even when
+        # commits were placed correctly. 0 disables the timeout (PostgreSQL semantics).
         "idle_in_transaction_session_timeout": str(_IDLE_IN_TX_TIMEOUT_MS),
     },
 }
@@ -50,14 +52,23 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+async def safe_rollback(session: AsyncSession) -> bool:
+    try:
+        if session.in_transaction():
+            await session.rollback()
+        return True
+    except (InterfaceError, DBAPIError, RuntimeError):
+        return False
+
+
 @asynccontextmanager
-async def session_scope() -> AsyncGenerator[AsyncSession, None]:
+async def session_scope():
     async with AsyncSessionLocal() as session:
         try:
             yield session
             await session.commit()
         except Exception:
-            await session.rollback()
+            await safe_rollback(session)
             raise
 
 

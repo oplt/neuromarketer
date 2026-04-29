@@ -1,0 +1,76 @@
+
+Stage 2 - Real MVP from critique
+
+Product focus
+- [ ] Narrow positioning to one wedge: pre-flight creative check for paid social teams.
+- [ ] Define ICP: performance marketer, small agency, DTC founder, or creative strategist.
+- [ ] Define primary promise: "know which creative to launch, fix, or kill before ad spend."
+- [ ] Remove secondary workflows that do not support that promise.
+- [ ] Create one killer workflow: upload 2-3 variants -> rank winner -> explain fix -> export.
+
+Decision layer
+- [ ] Add top-level verdict: SHIP, ITERATE, or KILL.
+- [ ] Add confidence score for verdict.
+- [ ] Add 3 specific reasons behind verdict.
+- [ ] Add 3 exact recommended edits tied to timestamp/scene/metric evidence.
+- [ ] Add buyer-friendly language that explains action, not model internals.
+- [ ] Add "expected risk if launched unchanged" section.
+- [ ] Add "best next test" recommendation.
+
+Trust and credibility
+- [ ] Add methodology page explaining what the model does and does not prove.
+- [ ] Add model limitation warnings for neuromarketing and conversion-proxy claims.
+- [ ] Add confidence bands or uncertainty labels to scores.
+- [ ] Add benchmark context for every key score.
+- [ ] Add provenance for each insight: TRIBE signal, heuristic, LLM, or benchmark.
+- [ ] Add example case study using sample creative and expected decision.
+- [ ] Add privacy/security statement for uploaded assets.
+- [ ] Add clear data retention policy.
+
+Benchmark and calibration moat
+- [ ] Build internal benchmark cohorts from completed analyses.
+- [ ] Show percentile rank against similar media type, channel, and objective.
+- [ ] Add outcome import flow for Meta/TikTok/Google Ads CSV.
+- [ ] Map post-launch metrics to analyzed creative versions.
+- [ ] Track whether predicted winner matched actual performance.
+- [ ] Add calibration dashboard: prediction accuracy, false positives, false negatives.
+- [ ] Use historical outcomes to improve score weighting over time.
+- [ ] Create "validated by your past campaigns" trust signal.
+
+Workflow and integrations
+- [ ] Add shareable report link or PDF export for clients/stakeholders.
+- [ ] Add webhook/API foundation for completed analyses.
+- [ ] Add scoped API keys with basic usage logging.
+- [ ] Add Slack/email notification when analysis finishes.
+- [ ] Add simple project/workspace organization for multiple brands or campaigns.
+- [ ] Add CSV import/export for assets, results, and outcomes.
+
+Reliability and production readiness
+- [ ] Add CI pipeline: backend lint/tests, frontend lint/tests/build.
+- [ ] Add API contract tests for core analysis endpoints.
+- [ ] Add worker integration tests with fake model runtime.
+- [ ] Add queue observability: backlog, active jobs, retries, failed jobs.
+- [ ] Add job idempotency to prevent duplicate analysis runs.
+- [ ] Add dead-letter/failure inspection for worker tasks.
+- [ ] Add backup/restore plan for Postgres and object storage.
+- [ ] Add basic SLOs: job success rate, median processing time, error budget.
+- [ ] Add production-ready logging and alerting setup.
+
+Security and buyer readiness
+- [ ] Harden RBAC for org, project, and analysis actions.
+- [ ] Add audit log UI for admin-relevant changes.
+- [ ] Add SSO/MFA posture to admin settings only after stable auth policy.
+- [ ] Add upload validation hardening and malware-scan plan.
+- [ ] Add dependency vulnerability scanning.
+- [ ] Add rate limits per organization and per user.
+- [ ] Add usage quotas by plan/workspace.
+
+Commercial MVP validation
+- [ ] Recruit 5 target users and run live creative review sessions.
+- [ ] Ask each user to bring real ads and judge whether output changes decision.
+- [ ] Measure time-to-decision versus their current workflow.
+- [ ] Track whether users would pay and at what price.
+- [ ] Convert 2-3 pilots into testimonials or case studies.
+- [ ] Build pricing hypothesis: per seat, per analysis pack, or agency workspace.
+- [ ] Create landing page copy focused on wasted ad spend prevention.
+- [ ] Cut any feature that does not improve trust, decision speed, or willingness to pay.

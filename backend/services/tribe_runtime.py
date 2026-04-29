@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import io
+import gc
 import os
 import re
 import shutil
@@ -9,12 +11,11 @@ import tempfile
 import time
 import warnings
 from collections import Counter, deque
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from contextlib import contextmanager
-
 
 import numpy as np
 
@@ -46,6 +47,18 @@ def _disable_tqdm():
             os.environ.pop("TQDM_DISABLE", None)
         else:
             os.environ["TQDM_DISABLE"] = old
+
+
+@contextmanager
+def _suppress_progress_output():
+    # Some TRIBE/neuralset paths invoke tqdm with implicit stdio writes.
+    # In daemonized Celery workers stdout/stderr can become invalid pipes,
+    # so force in-memory streams during inference prep/predict.
+    with ExitStack() as stack:
+        stack.enter_context(_disable_tqdm())
+        stack.enter_context(redirect_stdout(io.StringIO()))
+        stack.enter_context(redirect_stderr(io.StringIO()))
+        yield
 
 
 def _ensure_tribe_model_from_pretrained_strips_hub_kwargs() -> None:
@@ -159,6 +172,7 @@ class TribeRuntime:
     _shared_module: Any | None = None
     _resolved_device: str | None = None
     _local_hf_model_path_patch_applied: bool = False
+    _cuda_allocator_env_configured: bool = False
 
     def __init__(self) -> None:
         self.model_repo_id = settings.tribe_model_repo_id
@@ -173,8 +187,13 @@ class TribeRuntime:
         self.feature_cluster = settings.tribe_feature_cluster
         self.hf_token = settings.hf_token
         self.enable_roi_summary = settings.tribe_enable_roi_summary
+        self.gc_collect_after_inference = settings.tribe_gc_collect_after_inference
+        self.cuda_empty_cache_before_inference = settings.tribe_cuda_empty_cache_before_inference
+        self.cuda_empty_cache_after_inference = settings.tribe_cuda_empty_cache_after_inference
+        self.cuda_alloc_expandable_segments = settings.tribe_cuda_alloc_expandable_segments
         self.text_preprocessor = TextPreprocessService()
         self.model_name = self.model_repo_id
+        self._configure_cuda_allocator_env_if_enabled()
 
     def _project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
@@ -388,9 +407,14 @@ class TribeRuntime:
         model = self._get_loaded_model()
         self._coerce_dataloader_workers_zero(model)
         temp_text_path: Path | None = None
+        events: Any | None = None
+        predictions: np.ndarray | None = None
+        segments: list[Any] | None = None
 
 
         try:
+            if self.cuda_empty_cache_before_inference:
+                self._release_cuda_memory_best_effort()
             if payload.modality == "video":
                 events = self._prepare_video_events(model=model, payload=payload)
             elif payload.modality == "audio":
@@ -400,7 +424,11 @@ class TribeRuntime:
             else:  # pragma: no cover - guarded by assert_supported_modality
                 raise UnsupportedModalityAppError(f"Unsupported TRIBE modality: {payload.modality}")
 
-            predictions, segments = self._predict(model=model, events=events)
+            predictions, segments = self._predict_with_fallback(
+                model=model,
+                events=events,
+                payload=payload,
+            )
             return self._postprocess_predictions(
                 payload=payload,
                 events=events,
@@ -411,16 +439,43 @@ class TribeRuntime:
         finally:
             if temp_text_path is not None and temp_text_path.exists():
                 temp_text_path.unlink(missing_ok=True)
+            del events
+            del predictions
+            del segments
+            self._cleanup_inference_memory()
+
+    def _cleanup_inference_memory(self) -> None:
+        if self.gc_collect_after_inference:
+            gc.collect()
+        if self.cuda_empty_cache_after_inference:
+            self._release_cuda_memory_best_effort()
+
+    def _configure_cuda_allocator_env_if_enabled(self) -> None:
+        if not self.cuda_alloc_expandable_segments:
+            return
+        if self.__class__._cuda_allocator_env_configured:
+            return
+        self.__class__._cuda_allocator_env_configured = True
+
+        current = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip()
+        if "expandable_segments" in current:
+            return
+        next_value = (
+            "expandable_segments:True"
+            if not current
+            else f"{current},expandable_segments:True"
+        )
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = next_value
 
 
     def _prepare_video_events(self, *, model: Any, payload: TribeRuntimeInput) -> Any:
         path = self._require_local_file(payload.local_path, suffix_hint="video")
-        with _disable_tqdm():
+        with _suppress_progress_output():
             return model.get_events_dataframe(video_path=str(path))
 
     def _prepare_audio_events(self, *, model: Any, payload: TribeRuntimeInput) -> Any:
         path = self._require_local_file(payload.local_path, suffix_hint="audio")
-        with _disable_tqdm():
+        with _suppress_progress_output():
             return model.get_events_dataframe(audio_path=str(path))
 
     def _prepare_text_events(
@@ -689,7 +744,7 @@ class TribeRuntime:
         events.attrs["event_types"] = sorted(event_vocabulary)
         events.attrs["synthetic_event_pipeline"] = "neuromarketer_text_v2"
 
-        return standardize_events(events, treat_missing_as_separate_class=True,)
+        return standardize_events(events)
 
 
     @staticmethod
@@ -729,7 +784,8 @@ class TribeRuntime:
     def _predict(self, *, model: Any, events: Any) -> tuple[np.ndarray, list[Any]]:
         self._coerce_dataloader_workers_zero(model)
         try:
-            predictions, segments = model.predict(events=events)
+            with _suppress_progress_output():
+                predictions, segments = model.predict(events=events)
         except Exception as exc:
             raise ValidationAppError(self._format_prediction_error(exc)) from exc
 
@@ -737,6 +793,69 @@ class TribeRuntime:
         if array.ndim != 2 or array.shape[0] == 0 or array.shape[1] == 0:
             raise ValidationAppError("TRIBE v2 returned an empty prediction tensor.")
         return array, list(segments)
+
+    def _predict_with_fallback(
+        self,
+        *,
+        model: Any,
+        events: Any,
+        payload: TribeRuntimeInput,
+    ) -> tuple[np.ndarray, list[Any]]:
+        try:
+            return self._predict(model=model, events=events)
+        except ValidationAppError as exc:
+            if not self._should_retry_on_cpu_after_oom(exc):
+                raise
+
+            self._release_cuda_memory_best_effort()
+            log_event(
+                logger,
+                "tribe_runtime_oom_cpu_retry_started",
+                modality=payload.modality,
+                configured_device=self._get_requested_device(),
+                resolved_device=self._get_resolved_device(),
+                status="retrying",
+            )
+            cpu_model = self._load_cpu_fallback_model()
+            predictions, segments = self._predict(model=cpu_model, events=events)
+            log_event(
+                logger,
+                "tribe_runtime_oom_cpu_retry_succeeded",
+                modality=payload.modality,
+                status="succeeded",
+            )
+            return predictions, segments
+
+    def _should_retry_on_cpu_after_oom(self, exc: Exception) -> bool:
+        requested_device = (self._get_requested_device() or "").lower()
+        resolved_device = (self._get_resolved_device() or "").lower()
+        if "cpu" in requested_device or "cpu" in resolved_device:
+            return False
+        message = str(exc).lower()
+        return "cuda out of memory" in message or "cublas_status_alloc_failed" in message
+
+    def _load_cpu_fallback_model(self) -> Any:
+        tribe_module = self.__class__._shared_module or importlib.import_module("tribev2")
+        model_cls = tribe_module.TribeModel
+        _ensure_tribe_model_from_pretrained_strips_hub_kwargs()
+        return model_cls.from_pretrained(
+            self.model_repo_id,
+            checkpoint_name=self.checkpoint_name,
+            cache_folder=str(self.cache_folder),
+            cluster=self.feature_cluster,
+            device="cpu",
+            config_update=self._build_runtime_config_update("cpu"),
+        )
+
+    def _release_cuda_memory_best_effort(self) -> None:
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+        except Exception:
+            return
 
     def _postprocess_predictions(
         self,

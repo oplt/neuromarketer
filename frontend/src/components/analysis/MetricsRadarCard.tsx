@@ -1,13 +1,17 @@
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import { Chip } from '@mui/material'
 import { Box, Paper, Stack, Tooltip, Typography } from '@mui/material'
 import { RadarChart } from '@mui/x-charts/RadarChart'
-import { memo, useMemo } from 'react'
+import { memo, useMemo, useState } from 'react'
 
 type MetricRow = {
   key: string
   label: string
   value: number
   unit: string
+  detail?: string | null
+  confidence?: number | null
+  source?: string
 }
 
 type MetricsRadarSeries = {
@@ -92,6 +96,18 @@ function resolveRadarMax(value: number, unit: string) {
   return Math.ceil(value / 25) * 25
 }
 
+function formatMetricValue(metric: MetricRow) {
+  const suffix = metric.unit ? ` ${metric.unit}` : ''
+  return `${metric.value.toFixed(metric.unit === 'seconds' ? 2 : 1)}${suffix}`
+}
+
+function formatConfidence(confidence: number | null | undefined) {
+  if (confidence == null || Number.isNaN(confidence)) {
+    return 'n/a'
+  }
+  return confidence.toFixed(2)
+}
+
 function MetricsRadarCard({
   title,
   description,
@@ -102,6 +118,7 @@ function MetricsRadarCard({
   const radarMetrics = useMemo(() => buildRadarMetrics(series), [series])
   const hasEnoughMetrics = radarMetrics.length >= 3
   const chartHeight = series.length > 1 ? 280 : 250
+  const [highlightedMetricIndex, setHighlightedMetricIndex] = useState<number>(0)
 
   const chartSeries = useMemo(
     () =>
@@ -125,6 +142,13 @@ function MetricsRadarCard({
     [radarMetrics],
   )
 
+  const primarySeriesMetrics = series[0]?.metrics ?? []
+  const selectedMetricKey = radarMetrics[highlightedMetricIndex]?.key
+  const selectedMetric =
+    primarySeriesMetrics.find((metric) => metric.key === selectedMetricKey) ??
+    primarySeriesMetrics[0] ??
+    null
+
   return (
     <Paper className="dashboard-card" data-testid={testId} elevation={0}>
       <Stack spacing={1.25}>
@@ -144,10 +168,60 @@ function MetricsRadarCard({
           <Box sx={{ height: chartHeight, width: '100%' }}>
             <RadarChart
               height={chartHeight}
+              onHighlightChange={(highlight) => {
+                const axisIndex =
+                  typeof highlight?.dataIndex === 'number'
+                    ? highlight.dataIndex
+                    : null
+                if (axisIndex == null || axisIndex < 0 || axisIndex >= radarMetrics.length) {
+                  return
+                }
+                setHighlightedMetricIndex(axisIndex)
+              }}
               series={chartSeries}
               radar={chartRadar}
-              slotProps={{ tooltip: { trigger: series.length > 1 ? 'axis' : 'item' } }}
+              slotProps={{ tooltip: { trigger: 'none' } }}
             />
+          </Box>
+        ) : null}
+
+        {hasEnoughMetrics && selectedMetric ? (
+          <Box
+            sx={{
+              border: '1px solid rgba(148, 163, 184, 0.18)',
+              borderRadius: 3,
+              px: 1.5,
+              py: 1.25,
+            }}
+          >
+            <Stack alignItems="flex-start" direction="row" justifyContent="space-between" spacing={1.5}>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography sx={{ lineHeight: 1.25 }} variant="subtitle2">
+                  {selectedMetric.label}
+                </Typography>
+                <Typography color="text.secondary" sx={{ lineHeight: 1.4, mt: 0.35 }} variant="caption">
+                  {selectedMetric.detail || 'Directional model signal. Calibrate with campaign outcomes before treating it as proof.'}
+                </Typography>
+              </Box>
+              <Typography sx={{ flexShrink: 0, whiteSpace: 'nowrap' }} variant="subtitle2">
+                {formatMetricValue(selectedMetric)}
+              </Typography>
+            </Stack>
+
+            <Stack
+              direction="row"
+              flexWrap="wrap"
+              spacing={0.75}
+              sx={{ columnGap: 0.75, mt: 1 }}
+              useFlexGap
+            >
+              <Chip
+                label={`Confidence ${formatConfidence(selectedMetric.confidence)}`}
+                size="small"
+                variant="outlined"
+              />
+              {selectedMetric.source ? <Chip label={selectedMetric.source} size="small" variant="outlined" /> : null}
+            </Stack>
           </Box>
         ) : (
           <Box className="analysis-empty-state">

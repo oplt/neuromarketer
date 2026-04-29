@@ -15,11 +15,13 @@
     "@emotion/styled": "^11.14.1",
     "@fontsource/manrope": "^5.2.8",
     "@fontsource/montserrat": "^5.2.8",
+    "@fontsource/zen-old-mincho": "^5.2.8",
     "@mui/icons-material": "^7.3.9",
     "@mui/material": "^7.3.9",
     "@mui/x-charts": "^8.28.2",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "three": "^0.184.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

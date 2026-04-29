@@ -108,6 +108,78 @@ class AssetLoader:
             temporary=False,
         )
 
+    def remove_cached_asset(self, *, storage_uri: str) -> list[str]:
+        removed_paths: list[str] = []
+        for cached_path in self._candidate_cached_paths(storage_uri=storage_uri):
+            if not cached_path.exists():
+                continue
+            try:
+                cached_path.unlink()
+                removed_paths.append(str(cached_path))
+            except OSError as exc:
+                log_exception(
+                    logger,
+                    "asset_cache_delete_failed",
+                    exc,
+                    storage_uri=storage_uri,
+                    local_path=str(cached_path),
+                    status="failed",
+                )
+        if removed_paths:
+            log_event(
+                logger,
+                "asset_cache_deleted",
+                storage_uri=storage_uri,
+                removed_count=len(removed_paths),
+                removed_paths=removed_paths,
+                status="deleted",
+            )
+        return removed_paths
+
+    def _candidate_cached_paths(self, *, storage_uri: str) -> list[Path]:
+        uri_hash = hashlib.sha256(storage_uri.encode()).hexdigest()[:24]
+        parsed_path = storage_uri.replace("s3://", "", 1).split("/", 1)[-1]
+        suffix = Path(parsed_path).suffix
+        candidates = []
+        if suffix:
+            candidates.append(self._cache_dir / f"{uri_hash}{suffix}")
+        candidates.extend(self._cache_dir.glob(f"{uri_hash}.*"))
+        # Preserve deterministic order while removing duplicates.
+        return list(dict.fromkeys(candidates))
+
+    def purge_cache(self) -> dict[str, int]:
+        file_paths = [path for path in self._cache_dir.glob("*") if path.is_file()]
+        deleted_files = 0
+        deleted_bytes = 0
+        for file_path in file_paths:
+            try:
+                deleted_bytes += int(file_path.stat().st_size)
+                file_path.unlink(missing_ok=True)
+                deleted_files += 1
+            except OSError as exc:
+                log_exception(
+                    logger,
+                    "asset_cache_purge_file_failed",
+                    exc,
+                    local_path=str(file_path),
+                    status="failed",
+                )
+
+        log_event(
+            logger,
+            "asset_cache_purged",
+            cache_dir=str(self._cache_dir),
+            deleted_file_count=deleted_files,
+            deleted_bytes=deleted_bytes,
+            status="completed",
+        )
+        return {
+            "before_files": len(file_paths),
+            "after_files": len([path for path in self._cache_dir.glob("*") if path.is_file()]),
+            "deleted_files": deleted_files,
+            "deleted_bytes": deleted_bytes,
+        }
+
     def _load_from_local_path(
         self,
         *,

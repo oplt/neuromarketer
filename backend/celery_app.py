@@ -87,6 +87,10 @@ celery_app.conf.update(
             "queue": settings.celery_scoring_queue,
             "routing_key": settings.celery_scoring_queue,
         },
+        "tasks.process_analysis_asset_promotion": {
+            "queue": settings.celery_scoring_queue,
+            "routing_key": settings.celery_scoring_queue,
+        },
     },
 )
 

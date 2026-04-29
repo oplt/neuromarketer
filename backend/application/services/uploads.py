@@ -242,6 +242,7 @@ class UploadApplicationService:
                         storage_uri=uploaded_object.storage_uri,
                         original_filename=file.filename,
                         mime_type=file.content_type,
+                        media_type=preprocess_result.modality,
                         file_size_bytes=uploaded_object.file_size_bytes,
                         sha256=uploaded_object.sha256,
                         metadata_json={

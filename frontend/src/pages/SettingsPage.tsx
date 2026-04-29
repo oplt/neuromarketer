@@ -57,7 +57,69 @@ type SettingsResponse = {
   fields: SettingField[]
 }
 
+type CacheCleanupResponse = {
+  status: string
+  purge_extractor: boolean
+  purge_runtime?: boolean
+  purge_assets?: boolean
+  summary?: {
+    runtime?: {
+      before_files: number
+      after_files: number
+      before_bytes: number
+      after_bytes: number
+      purged?: boolean
+    }
+    extractor?: {
+      before_files: number
+      after_files: number
+      before_bytes: number
+      after_bytes: number
+      purged: boolean
+    }
+    assets?: {
+      before_files: number
+      after_files: number
+      deleted_files: number
+      deleted_bytes: number
+    }
+  }
+}
+
 type SettingsCategory = 'workspace' | 'model' | 'admin'
+type InferenceConnectivityProfile = 'local' | 'remote'
+
+const MODERN_SAAS_SETTING_KEYS = new Set<string>([
+  'ANALYSIS_MAX_TEXT_CHARACTERS',
+  'UPLOAD_MAX_SIZE_BYTES',
+  'ANALYSIS_ALLOWED_VIDEO_MIME_TYPES',
+  'ANALYSIS_ALLOWED_AUDIO_MIME_TYPES',
+  'ANALYSIS_ALLOWED_TEXT_MIME_TYPES',
+  'LLM_PROVIDER',
+  'LLM_BASE_URL',
+  'LLM_MODEL',
+  'LLM_TIMEOUT_SECONDS',
+  'LLM_MAX_TOKENS',
+  'LLM_TEMPERATURE',
+  'LLM_TOP_P',
+  'LLM_ANALYSIS_SCORING_MAX_TOKENS',
+  'TRIBE_MODEL_REPO_ID',
+  'TRIBE_TEXT_FEATURE_MODEL_NAME',
+  'TRIBE_DEVICE',
+  'TRIBE_VIDEO_FEATURE_FREQUENCY_HZ',
+  'TRIBE_VIDEO_MAX_IMSIZE',
+  'TRIBE_GC_COLLECT_AFTER_INFERENCE',
+  'TRIBE_CUDA_EMPTY_CACHE_BEFORE_INFERENCE',
+  'TRIBE_CUDA_EMPTY_CACHE_AFTER_INFERENCE',
+  'TRIBE_CUDA_ALLOC_EXPANDABLE_SEGMENTS',
+  'HF_TOKEN',
+  'HF_HUB_OFFLINE',
+  'TRANSFORMERS_OFFLINE',
+])
+
+function isModernSaasSetting(field: SettingField): boolean {
+  return MODERN_SAAS_SETTING_KEYS.has(field.key)
+}
 
 const CATEGORY_LABEL: Record<SettingsCategory, string> = {
   workspace: 'Workspace',
@@ -95,20 +157,28 @@ function SettingsPage({ session }: SettingsPageProps) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('workspace')
   const [activeGroupId, setActiveGroupId] = useState('')
   const [hideFieldLabels, setHideFieldLabels] = useState(false)
+  const [showDeveloperControls, setShowDeveloperControls] = useState(false)
   const [visibleSecretFields, setVisibleSecretFields] = useState<Record<string, boolean>>({})
   const [bannerMessage, setBannerMessage] = useState<{ type: 'error' | 'success' | 'info'; message: string } | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  const [isCleaningCaches, setIsCleaningCaches] = useState(false)
+  const [isApplyingConnectivityProfile, setIsApplyingConnectivityProfile] = useState(false)
+
+  const filteredFields = useMemo(
+    () => (settingsResponse?.fields || []).filter(isModernSaasSetting),
+    [settingsResponse],
+  )
 
   const fieldsByGroup = useMemo(() => {
     const grouped = new Map<string, SettingField[]>()
-    for (const field of settingsResponse?.fields || []) {
+    for (const field of filteredFields) {
       const currentItems = grouped.get(field.group_id) || []
       currentItems.push(field)
       grouped.set(field.group_id, currentItems)
     }
     return grouped
-  }, [settingsResponse])
+  }, [filteredFields])
 
   const groupsByCategory = useMemo(() => {
     const out: Record<SettingsCategory, SettingGroup[]> = {
@@ -117,10 +187,13 @@ function SettingsPage({ session }: SettingsPageProps) {
       admin: [],
     }
     for (const group of settingsResponse?.groups || []) {
+      if (!(fieldsByGroup.get(group.id) || []).length) {
+        continue
+      }
       out[classifyGroup(group)].push(group)
     }
     return out
-  }, [settingsResponse])
+  }, [fieldsByGroup, settingsResponse])
 
   const dirtyKeys = useMemo(() => {
     if (!settingsResponse) {
@@ -255,6 +328,120 @@ function SettingsPage({ session }: SettingsPageProps) {
     setVisibleSecretFields((current) => ({ ...current, [key]: !current[key] }))
   }, [])
 
+  const handleCacheCleanup = useCallback(async () => {
+    if (!sessionToken) {
+      return
+    }
+    setIsCleaningCaches(true)
+    try {
+      const response = await apiRequest<CacheCleanupResponse>(
+        '/api/v1/analysis/cache/cleanup?purge_extractor=true&purge_runtime=true&purge_assets=true',
+        {
+          method: 'POST',
+          sessionToken,
+        },
+      )
+      const runtimeSummary = response.summary?.runtime
+      const extractorSummary = response.summary?.extractor
+      const assetSummary = response.summary?.assets
+      const message = [
+        'Local cache purge finished.',
+        runtimeSummary
+          ? `Runtime: ${runtimeSummary.before_files} -> ${runtimeSummary.after_files} files.`
+          : null,
+        extractorSummary
+          ? `Extractor: ${extractorSummary.before_files} -> ${extractorSummary.after_files} files.`
+          : null,
+        assetSummary
+          ? `Assets: ${assetSummary.before_files} -> ${assetSummary.after_files} files.`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(' ')
+      setBannerMessage({
+        type: 'success',
+        message,
+      })
+    } catch (error) {
+      setBannerMessage({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'Unable to clean local caches.',
+      })
+    } finally {
+      setIsCleaningCaches(false)
+    }
+  }, [sessionToken])
+
+  const handleApplyConnectivityProfile = useCallback(
+    async (profile: InferenceConnectivityProfile) => {
+      if (!sessionToken || !settingsResponse) {
+        return
+      }
+
+      const profileEntries: Record<InferenceConnectivityProfile, Record<string, string>> = {
+        local: {
+          HF_HUB_OFFLINE: '1',
+          TRANSFORMERS_OFFLINE: '1',
+          TRIBE_TEXT_FEATURE_MODEL_NAME: '/app/models/phi3-mini-4k-instruct',
+        },
+        remote: {
+          HF_HUB_OFFLINE: '0',
+          TRANSFORMERS_OFFLINE: '0',
+          TRIBE_MODEL_REPO_ID: 'facebook/tribev2',
+          TRIBE_TEXT_FEATURE_MODEL_NAME: 'microsoft/Phi-3-mini-4k-instruct',
+        },
+      }
+
+      const availableKeys = new Set(settingsResponse.fields.map((field) => field.key))
+      const updates = Object.entries(profileEntries[profile])
+        .filter(([key]) => availableKeys.has(key))
+        .map(([key, value]) => ({ key, value }))
+
+      if (updates.length === 0) {
+        setBannerMessage({
+          type: 'error',
+          message: 'No compatible connectivity keys were found in the current environment file.',
+        })
+        return
+      }
+
+      setIsApplyingConnectivityProfile(true)
+      try {
+        await apiRequest('/api/v1/settings/env', {
+          method: 'PUT',
+          sessionToken,
+          body: { entries: updates },
+        })
+
+        const refreshed = await apiRequest<SettingsResponse>('/api/v1/settings/env', { sessionToken })
+        setSettingsResponse(refreshed)
+        setDraftValues(
+          Object.fromEntries(refreshed.fields.map((field) => [field.key, field.value ?? ''])),
+        )
+
+        const needsLocalTribeCheckpointWarning =
+          profile === 'local' &&
+          !(
+            (refreshed.fields.find((field) => field.key === 'TRIBE_MODEL_REPO_ID')?.value || '').trim().startsWith('/')
+          )
+        setBannerMessage({
+          type: needsLocalTribeCheckpointWarning ? 'info' : 'success',
+          message: needsLocalTribeCheckpointWarning
+            ? 'Local mode applied. Set TRIBE_MODEL_REPO_ID to a local snapshot path before restarting.'
+            : `${profile === 'local' ? 'Local' : 'Remote'} connectivity mode applied. Restart backend services to apply.`,
+        })
+      } catch (error) {
+        setBannerMessage({
+          type: 'error',
+          message: error instanceof Error ? error.message : 'Unable to apply connectivity profile.',
+        })
+      } finally {
+        setIsApplyingConnectivityProfile(false)
+      }
+    },
+    [sessionToken, settingsResponse],
+  )
+
   return (
     <Stack spacing={3}>
       <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
@@ -287,7 +474,7 @@ function SettingsPage({ session }: SettingsPageProps) {
             }
           />
           <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            <Chip label={`${settingsResponse?.fields.length || 0} variables`} variant="outlined" />
+            <Chip label={`${filteredFields.length} variables`} variant="outlined" />
             <Chip
               color={dirtyKeys.length ? 'warning' : 'default'}
               label={`${dirtyKeys.length} unsaved`}
@@ -306,6 +493,11 @@ function SettingsPage({ session }: SettingsPageProps) {
       </Paper>
 
       {bannerMessage ? <Alert severity={bannerMessage.type}>{bannerMessage.message}</Alert> : null}
+
+      <Alert severity="info">
+        Showing a curated modern SaaS settings set. Low-level infrastructure and internal runtime
+        knobs are intentionally hidden.
+      </Alert>
 
       {isLoading || isSaving ? <LinearProgress sx={{ borderRadius: 999, height: 6 }} /> : null}
 
@@ -358,12 +550,72 @@ function SettingsPage({ session }: SettingsPageProps) {
               icon={<WarningAmberRounded fontSize="inherit" />}
               severity="warning"
               variant="outlined"
+              action={
+                <Stack direction="row" spacing={1}>
+                  {showDeveloperControls ? (
+                    <Button
+                      color="warning"
+                      disabled={isCleaningCaches}
+                      onClick={() => void handleCacheCleanup()}
+                      size="small"
+                    >
+                      {isCleaningCaches ? 'Cleaning…' : 'Clean local cache'}
+                    </Button>
+                  ) : null}
+                  <Button color="warning" onClick={() => setShowDeveloperControls((current) => !current)} size="small">
+                    {showDeveloperControls ? 'Hide' : 'Show'}
+                  </Button>
+                </Stack>
+              }
             >
-              Developer / Admin settings change infrastructure or credentials. Most edits require a restart and affect every member.
+              Developer / Admin settings are hidden for demos. They can expose infrastructure names,
+              credentials, and restart-sensitive controls.
             </Alert>
           ) : null}
 
-          {visibleGroups.length ? (
+          {activeCategory === 'admin' && showDeveloperControls ? (
+            <Paper
+              elevation={0}
+              sx={{
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 2,
+                p: 2,
+                backgroundColor: 'background.default',
+              }}
+            >
+              <Stack spacing={1.5}>
+                <Typography variant="subtitle1">Inference Connectivity Mode</Typography>
+                <Typography color="text.secondary" variant="body2">
+                  Local mode forces offline Hugging Face behavior and expects local model snapshots.
+                  Remote mode enables HF/remote fetch behavior.
+                </Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                  <Button
+                    disabled={isApplyingConnectivityProfile}
+                    onClick={() => void handleApplyConnectivityProfile('local')}
+                    variant="outlined"
+                  >
+                    {isApplyingConnectivityProfile ? 'Applying…' : 'Use Local Mode'}
+                  </Button>
+                  <Button
+                    disabled={isApplyingConnectivityProfile}
+                    onClick={() => void handleApplyConnectivityProfile('remote')}
+                    variant="contained"
+                  >
+                    {isApplyingConnectivityProfile ? 'Applying…' : 'Use Remote Mode'}
+                  </Button>
+                </Stack>
+              </Stack>
+            </Paper>
+          ) : null}
+
+          {activeCategory === 'admin' && !showDeveloperControls ? (
+            <Alert severity="info">
+              Showing only safe workspace and model controls by default. Reveal developer controls only
+              when configuring a private environment.
+            </Alert>
+          ) : visibleGroups.length ? (
             <>
               <Tabs
                 aria-label="Settings groups"

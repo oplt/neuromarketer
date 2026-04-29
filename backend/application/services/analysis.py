@@ -24,9 +24,11 @@ from backend.core.logging import (
 from backend.core.metrics import metrics
 from backend.db.models import AssetType, InferenceJob, JobStatus, UploadStatus
 from backend.db.repositories import CreativeRepository, UploadRepository
+from backend.db.session import safe_rollback
 from backend.schemas.analysis import (
     AnalysisAssetListResponse,
     AnalysisAssetRead,
+    AnalysisBulkDeleteResponse,
     AnalysisClientEventRequest,
     AnalysisConfigResponse,
     AnalysisGoalPresetsResponse,
@@ -58,6 +60,7 @@ from backend.services.document_text_extractor import (
 )
 from backend.services.preprocess import PreprocessService
 from backend.services.storage import ObjectStorageService, UploadedObject
+from backend.services.tribe_inference_service import TribeInferenceService
 
 logger = get_logger(__name__)
 ASYNC_TEXT_PROMOTION_MIN_BYTES = int(
@@ -95,6 +98,23 @@ class AnalysisApplicationService:
 
     def get_goal_presets(self) -> AnalysisGoalPresetsResponse:
         return AnalysisGoalPresetsResponse.model_validate(get_goal_presets_payload())
+
+    async def cleanup_local_caches(
+        self,
+        *,
+        purge_extractor: bool,
+        purge_runtime: bool,
+        purge_assets: bool,
+    ) -> dict[str, Any]:
+        inference_service = TribeInferenceService()
+        summary = await run_in_threadpool(
+            inference_service.run_cache_cleanup,
+            purge_extractor=purge_extractor,
+            purge_runtime=purge_runtime,
+        )
+        if purge_assets:
+            summary["assets"] = await run_in_threadpool(self.asset_loader.purge_cache)
+        return summary
 
     async def track_client_event(
         self,
@@ -210,6 +230,108 @@ class AnalysisApplicationService:
             )
         return AnalysisJobListResponse(items=items)
 
+    async def delete_jobs(
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+        job_ids: list[UUID],
+    ) -> AnalysisBulkDeleteResponse:
+        unique_job_ids = list(dict.fromkeys(job_ids))
+        jobs = await self.predictions.inference.list_analysis_jobs_by_ids(job_ids=unique_job_ids)
+        jobs_by_id = {job.id: job for job in jobs}
+        missing_ids = [job_id for job_id in unique_job_ids if job_id not in jobs_by_id]
+        if missing_ids:
+            raise NotFoundAppError("Analysis job not found.")
+
+        protected_statuses = {JobStatus.QUEUED, JobStatus.PREPROCESSING, JobStatus.RUNNING}
+        for job in jobs:
+            self._ensure_job_ownership(job, user_id=user_id)
+            if job.project_id != project_id:
+                raise NotFoundAppError("Analysis job not found.")
+            analysis_surface = str(
+                (job.runtime_params or {}).get("analysis_surface") or ""
+            )
+            if analysis_surface != "analysis_dashboard":
+                raise ValidationAppError("Only analysis workspace jobs can be deleted here.")
+            if job.status in protected_statuses:
+                raise ConflictAppError(
+                    "Queued or running analyses cannot be deleted until they finish."
+                )
+
+        deleted_count = await self.predictions.inference.delete_analysis_jobs_by_ids(
+            job_ids=unique_job_ids,
+            project_id=project_id,
+            created_by_user_id=user_id,
+        )
+        await self.session.commit()
+        return AnalysisBulkDeleteResponse(
+            deleted_count=deleted_count,
+            deleted_ids=unique_job_ids,
+        )
+
+    async def delete_assets(
+        self,
+        *,
+        user_id: UUID,
+        project_id: UUID,
+        asset_ids: list[UUID],
+    ) -> AnalysisBulkDeleteResponse:
+        unique_asset_ids = list(dict.fromkeys(asset_ids))
+        assets_by_id = await self.uploads.get_analysis_artifacts_by_ids(
+            artifact_ids=unique_asset_ids,
+            project_id=project_id,
+            created_by_user_id=user_id,
+        )
+        missing_ids = [asset_id for asset_id in unique_asset_ids if asset_id not in assets_by_id]
+        if missing_ids:
+            raise NotFoundAppError("Uploaded asset not found.")
+
+        storage = self._storage()
+        for asset in assets_by_id.values():
+            try:
+                await run_in_threadpool(
+                    storage.delete_object,
+                    bucket_name=asset.bucket_name,
+                    storage_key=asset.storage_key,
+                )
+            except Exception as exc:
+                log_exception(
+                    logger,
+                    "analysis_asset_object_delete_failed",
+                    exc,
+                    level="warning",
+                    artifact_id=str(asset.id),
+                    bucket_name=asset.bucket_name,
+                    storage_key=summarize_storage_reference(asset.storage_key),
+                )
+            finally:
+                try:
+                    await run_in_threadpool(
+                        self.asset_loader.remove_cached_asset,
+                        storage_uri=asset.storage_uri,
+                    )
+                except Exception as exc:
+                    log_exception(
+                        logger,
+                        "analysis_asset_cache_delete_failed",
+                        exc,
+                        level="warning",
+                        artifact_id=str(asset.id),
+                        storage_uri=asset.storage_uri,
+                    )
+
+        deleted_count = await self.uploads.delete_analysis_artifacts_by_ids(
+            artifact_ids=unique_asset_ids,
+            project_id=project_id,
+            created_by_user_id=user_id,
+        )
+        await self.session.commit()
+        return AnalysisBulkDeleteResponse(
+            deleted_count=deleted_count,
+            deleted_ids=unique_asset_ids,
+        )
+
     async def create_upload_session(
         self,
         *,
@@ -248,6 +370,7 @@ class AnalysisApplicationService:
                 storage_uri=f"s3://{storage.bucket_name}/{storage_key}",
                 original_filename=payload.original_filename,
                 mime_type=payload.mime_type,
+                media_type=payload.media_type,
                 file_size_bytes=payload.size_bytes,
                 sha256=None,
                 metadata_json={
@@ -567,6 +690,7 @@ class AnalysisApplicationService:
             asset,
             creative_version_id=None,
             mime_type=resolved_mime_type or asset.mime_type,
+            media_type=preprocess_result.modality,
             file_size_bytes=resolved_file_size_bytes,
             sha256=sha256,
             metadata_json=merged_metadata,
@@ -610,6 +734,10 @@ class AnalysisApplicationService:
             asset,
             creative_version_id=creative_version.id,
             mime_type=asset.mime_type,
+            media_type=str(
+                (asset.metadata_json or {}).get("media_type")
+                or self._detect_media_type(asset.mime_type)
+            ),
             file_size_bytes=asset.file_size_bytes,
             sha256=asset.sha256,
             metadata_json=asset.metadata_json,
@@ -666,6 +794,10 @@ class AnalysisApplicationService:
             asset,
             creative_version_id=None,
             mime_type=asset.mime_type,
+            media_type=str(
+                (asset.metadata_json or {}).get("media_type")
+                or self._detect_media_type(asset.mime_type)
+            ),
             file_size_bytes=asset.file_size_bytes,
             sha256=asset.sha256,
             metadata_json=metadata_json,
@@ -684,6 +816,10 @@ class AnalysisApplicationService:
             asset,
             creative_version_id=creative_version.id,
             mime_type=asset.mime_type,
+            media_type=str(
+                (metadata_json or {}).get("media_type")
+                or self._detect_media_type(asset.mime_type)
+            ),
             file_size_bytes=asset.file_size_bytes,
             sha256=asset.sha256,
             metadata_json={**metadata_json, "promotion_status": "completed"},
@@ -733,7 +869,7 @@ class AnalysisApplicationService:
         asset_id: UUID,
         error_message: str,
     ) -> None:
-        await self.session.rollback()
+        await safe_rollback(self.session)
         persisted_session = await self.uploads.get_upload_session(upload_session_id)
         persisted_asset = await self.uploads.get_stored_artifact(asset_id)
         if persisted_session is not None:
@@ -763,7 +899,8 @@ class AnalysisApplicationService:
 
     def _validate_asset_mime_type(self, *, asset, mime_type: str | None) -> None:
         media_type = str(
-            (asset.metadata_json or {}).get("media_type")
+            getattr(asset, "media_type", None)
+            or (asset.metadata_json or {}).get("media_type")
             or self._detect_media_type(asset.mime_type)
         )
         if mime_type is None:
@@ -796,7 +933,8 @@ class AnalysisApplicationService:
             raise ConflictAppError("The selected asset is not ready for analysis.")
 
         media_type = str(
-            (asset.metadata_json or {}).get("media_type")
+            getattr(asset, "media_type", None)
+            or (asset.metadata_json or {}).get("media_type")
             or self._detect_media_type(asset.mime_type)
         )
         normalized_goal_template = normalize_goal_template(goal_template)
@@ -822,6 +960,10 @@ class AnalysisApplicationService:
                     "analysis_surface": "analysis_dashboard",
                     "asset_id": str(asset.id),
                     "media_type": media_type,
+                    "analysis_execution_phase": {
+                        "phase": "queued",
+                        "updated_at": datetime.now(UTC).isoformat(),
+                    },
                     "analysis_progress": {
                         "stage": "queued",
                         "stage_label": (
@@ -856,8 +998,9 @@ class AnalysisApplicationService:
         user_id: UUID,
         job_id: UUID,
     ) -> AnalysisJobStatusLiteResponse:
-        job = await self.predictions.get_job(job_id)
-        self._ensure_job_ownership(job, user_id=user_id)
+        job = await self.predictions.get_analysis_job_status_light_for_user(
+            job_id=job_id, user_id=user_id
+        )
         return await self._build_job_status_lite_response(job)
 
     async def get_analysis_job_detail(
@@ -974,7 +1117,9 @@ class AnalysisApplicationService:
             creative_id=asset.creative_id,
             creative_version_id=asset.creative_version_id,
             media_type=str(
-                metadata_json.get("media_type") or self._detect_media_type(asset.mime_type)
+                getattr(asset, "media_type", None)
+                or metadata_json.get("media_type")
+                or self._detect_media_type(asset.mime_type)
             ),
             original_filename=asset.original_filename,
             mime_type=asset.mime_type,

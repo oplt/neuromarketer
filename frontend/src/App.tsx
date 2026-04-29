@@ -1,5 +1,5 @@
 import { Suspense, lazy, startTransition, useState } from 'react'
-import { Box, Chip, CircularProgress, CssBaseline, Paper, Stack, ThemeProvider, Typography, createTheme } from '@mui/material'
+import { Box, CircularProgress, CssBaseline, Stack, ThemeProvider, Typography, createTheme } from '@mui/material'
 import {
   clearStoredSession,
   readStoredSession,
@@ -111,32 +111,15 @@ function AppShellFallback({ isSignedIn }: { isSignedIn: boolean }) {
         display: 'grid',
         placeItems: 'center',
         p: 3,
-        background:
-          'radial-gradient(circle at top right, rgba(59, 91, 219, 0.12), transparent 26%), radial-gradient(circle at left bottom, rgba(20, 184, 166, 0.08), transparent 24%), linear-gradient(180deg, #eef3fb 0%, #e8eef8 100%)',
+        bgcolor: 'background.default',
       }}
     >
-      <Paper
-        elevation={0}
-        sx={{
-          width: 'min(100%, 520px)',
-          borderRadius: 4,
-          border: '1px solid rgba(24, 34, 48, 0.08)',
-          background: 'rgba(255, 255, 255, 0.9)',
-          boxShadow: '0 24px 54px rgba(34, 49, 70, 0.08)',
-          p: 3,
-        }}
-      >
-        <Stack spacing={2} alignItems="flex-start">
-          <Chip color="primary" label={isSignedIn ? 'Loading workspace' : 'Loading sign-in'} />
-          <CircularProgress size={28} />
-          <Typography variant="h5">
-            {isSignedIn ? 'Preparing the creative ops console.' : 'Preparing the NeuroMarketer shell.'}
-          </Typography>
-          <Typography color="text.secondary" variant="body2">
-            The next view is being loaded on demand so the initial bundle stays smaller.
-          </Typography>
-        </Stack>
-      </Paper>
+      <Stack alignItems="center" spacing={1.5}>
+        <CircularProgress size={28} />
+        <Typography color="text.secondary" variant="body2">
+          {isSignedIn ? 'Loading workspace…' : 'Loading sign-in…'}
+        </Typography>
+      </Stack>
     </Box>
   )
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,9 +36,32 @@ def test_prepare_text_events_bypasses_whisperx_text_path() -> None:
 
     assert temp_path is None
     assert not events.empty
-    assert set(events["type"].unique()) == {"Word"}
-    assert events["context"].astype(str).str.len().min() > 0
-    assert list(events["text"].head(3)) == ["Hello", "world", "This"]
+    assert "Word" in set(events["type"].unique())
+    word_events = events[events["type"] == "Word"]
+    assert word_events["context"].astype(str).str.len().min() > 0
+    assert list(word_events["text"].head(3)) == ["Hello", "world", "This"]
+
+
+def test_text_events_standardize_without_legacy_missing_class_kwarg(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_standardize_events(events, **kwargs):
+        calls.append(kwargs)
+        return events
+
+    monkeypatch.setitem(sys.modules, "neuralset", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "neuralset.events", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "neuralset.events.utils",
+        SimpleNamespace(standardize_events=fake_standardize_events),
+    )
+
+    runtime = TribeRuntime()
+    events = runtime._build_text_events_dataframe("Read this now. Try the product today.")
+
+    assert not events.empty
+    assert calls == [{}]
 
 
 def test_runtime_config_update_overrides_gated_default_text_model(

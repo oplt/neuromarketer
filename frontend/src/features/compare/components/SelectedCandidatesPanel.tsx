@@ -22,7 +22,7 @@ function SelectedCandidatesPanelBase({
   }
 
   return (
-    <Box className="compare-selected-grid">
+    <Box className="compare-selected-bar">
       {items.map((item) => (
         <SelectedCandidateCard
           baselineJobId={baselineJobId}
@@ -55,13 +55,13 @@ function SelectedCandidateCardBase({
 
   return (
     <Box className={`compare-selected-card ${isBaseline ? 'is-baseline' : ''}`}>
-      <Stack spacing={1.25}>
-        <Stack alignItems="center" direction="row" justifyContent="space-between" spacing={1.5}>
+      <Stack spacing={1}>
+        <Stack alignItems="center" direction="row" spacing={1}>
           <Typography variant="subtitle2">{resolveAnalysisLabel(item)}</Typography>
           {isBaseline ? <Chip color="primary" label="Baseline" size="small" variant="outlined" /> : null}
         </Stack>
         <Typography color="text.secondary" variant="body2">
-          {truncateText(item.job.objective || 'No objective stored.', 92)}
+          {truncateText(item.job.objective || 'No objective stored.', 72)}
         </Typography>
         <Stack direction="row" spacing={1}>
           <Button onClick={handleSetBaseline} size="small" variant="text">

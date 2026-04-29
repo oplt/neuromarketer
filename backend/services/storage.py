@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -217,6 +218,29 @@ class ObjectStorageService:
             storage_uri=f"s3://{bucket_name}/{storage_key}",
             file_size_bytes=total_bytes,
             sha256=hasher.hexdigest(),
+        )
+
+    def put_json_object(
+        self,
+        *,
+        bucket_name: str,
+        storage_key: str,
+        payload: dict | list,
+    ) -> UploadedObject:
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        self.client.put_object(
+            Bucket=bucket_name,
+            Key=storage_key,
+            Body=encoded,
+            ContentType="application/json",
+        )
+        return UploadedObject(
+            bucket_name=bucket_name,
+            storage_key=storage_key,
+            storage_uri=f"s3://{bucket_name}/{storage_key}",
+            file_size_bytes=len(encoded),
+            sha256=digest,
         )
 
     def delete_object(self, *, bucket_name: str, storage_key: str) -> None:

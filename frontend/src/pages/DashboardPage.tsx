@@ -1,18 +1,15 @@
 import { Suspense, lazy, memo, useCallback, useMemo } from 'react'
 import AutoGraphRounded from '@mui/icons-material/AutoGraphRounded'
-import BoltRounded from '@mui/icons-material/BoltRounded'
 import CompareArrowsRounded from '@mui/icons-material/CompareArrowsRounded'
 import HomeRounded from '@mui/icons-material/HomeRounded'
 import LogoutRounded from '@mui/icons-material/LogoutRounded'
 import ManageAccountsRounded from '@mui/icons-material/ManageAccountsRounded'
-import PlayCircleRounded from '@mui/icons-material/PlayCircleRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import {
   Avatar,
   Box,
   Button,
   Chip,
-  LinearProgress,
   List,
   ListItem,
   ListItemButton,
@@ -56,39 +53,6 @@ const footerMenuItems: ReadonlyArray<MenuItem> = [
   { id: 'settings', label: 'Settings', icon: SettingsRounded },
 ]
 
-const homeMetrics = [
-  {
-    label: 'Creative versions under review',
-    value: '18',
-    detail: '6 are queued for prediction today',
-    progress: 72,
-    icon: PlayCircleRounded,
-    tone: '#3b5bdb',
-  },
-  {
-    label: 'Prediction jobs completed',
-    value: '42',
-    detail: 'Average turnaround 14 minutes',
-    progress: 86,
-    icon: AutoGraphRounded,
-    tone: '#0f766e',
-  },
-  {
-    label: 'Optimization opportunities',
-    value: '11',
-    detail: '4 CTA issues to resolve this week',
-    progress: 61,
-    icon: BoltRounded,
-    tone: '#f97316',
-  },
-] as const
-
-const queueItems = [
-  { name: 'Spring launch hero cut', status: 'Running', eta: '09 min', score: 'Attention +12%' },
-  { name: 'Retention email narrative', status: 'Queued', eta: '14 min', score: 'Memory watch' },
-  { name: 'Social proof static set', status: 'Ready', eta: 'Ready', score: 'Compare candidates' },
-] as const
-
 function DashboardPage({
   session,
   activeTab,
@@ -116,7 +80,7 @@ function DashboardPage({
       return <AnalysisPage onOpenCompareWorkspace={() => handleTabChange('compare')} session={session} />
     }
     if (activeTab === 'compare') {
-      return <ComparePage session={session} />
+      return <ComparePage onOpenAnalysis={() => handleTabChange('analysis')} session={session} />
     }
     if (activeTab === 'settings') {
       return <SettingsPage session={session} />
@@ -126,9 +90,6 @@ function DashboardPage({
 
   return (
     <Box className="dashboard-page">
-      <Box className="dashboard-page__glow dashboard-page__glow--left" />
-      <Box className="dashboard-page__glow dashboard-page__glow--right" />
-
       <Box className="dashboard-shell">
         <Paper className="dashboard-sidebar" elevation={0}>
           <Stack spacing={0} sx={{ flex: 1, height: '100%', minHeight: 0, gap: 0 }}>
@@ -136,7 +97,7 @@ function DashboardPage({
               <Chip
                 className="dashboard-chip"
                 color="primary"
-                label="NeuroMarketer"
+                label="NEURALIS"
                 size="small"
                 sx={{ borderRadius: 999, fontWeight: 700 }}
               />
@@ -257,53 +218,17 @@ type HomeTabProps = {
 function HomeTabBase({ onTabChange }: HomeTabProps) {
   return (
     <Stack spacing={3}>
-      <Box className="dashboard-grid dashboard-grid--metrics">
-        {homeMetrics.map((metric) => {
-          const Icon = metric.icon
-          return (
-            <Paper className="dashboard-card dashboard-card--metric" elevation={0} key={metric.label}>
-              <Stack direction="row" justifyContent="space-between" spacing={2}>
-                <Box>
-                  <Typography color="text.secondary" variant="overline">
-                    {metric.label}
-                  </Typography>
-                  <Typography variant="h3">{metric.value}</Typography>
-                </Box>
-                <Avatar sx={{ bgcolor: `${metric.tone}1a`, color: metric.tone }}>
-                  <Icon />
-                </Avatar>
-              </Stack>
-              <Typography color="text.secondary" variant="body2">
-                {metric.detail}
-              </Typography>
-              <LinearProgress
-                aria-label={`${metric.label} progress`}
-                sx={{
-                  height: 8,
-                  borderRadius: 999,
-                  bgcolor: `${metric.tone}14`,
-                  '& .MuiLinearProgress-bar': { bgcolor: metric.tone },
-                }}
-                value={metric.progress}
-                variant="determinate"
-              />
-            </Paper>
-          )
-        })}
-      </Box>
-
       <Box className="dashboard-grid dashboard-grid--content">
         <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
           <Stack spacing={2.5}>
-            <Chip color="primary" label="Workspace home" sx={{ alignSelf: 'flex-start' }} />
-            <Typography variant="h4">Creative testing at a glance.</Typography>
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25} useFlexGap flexWrap="wrap">
-              <Chip label="Attention" />
-              <Chip label="Emotion" />
-              <Chip label="Memory" />
-              <Chip label="Cognitive load" />
-              <Chip label="Conversion proxy" />
-            </Stack>
+            <Typography color="primary" variant="overline">
+              Start here
+            </Typography>
+            <Typography variant="h4">Run a pre-flight check before you spend ad budget.</Typography>
+            <Typography color="text.secondary" variant="body1">
+              Upload one creative or compare a few variants. The product is strongest when it helps you decide:
+              ship, fix, or kill.
+            </Typography>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.25}>
               <Button
                 onClick={() => onTabChange('analysis')}
@@ -328,31 +253,16 @@ function HomeTabBase({ onTabChange }: HomeTabProps) {
         <Paper className="dashboard-card" elevation={0}>
           <Stack spacing={2}>
             <Stack alignItems="center" direction="row" spacing={0.5}>
-              <Typography variant="h6">Active queue</Typography>
-              <HelpTooltip title="Most recent prediction jobs and their progress." />
+              <Typography variant="h6">No fake workspace stats</Typography>
+              <HelpTooltip title="This panel stays intentionally empty until it is connected to real API-backed activity." />
             </Stack>
-            <Stack spacing={1.5}>
-              {queueItems.map((item) => (
-                <Box className="queue-row" key={item.name}>
-                  <Box>
-                    <Typography variant="subtitle1">{item.name}</Typography>
-                    <Typography color="text.secondary" variant="body2">
-                      {item.score}
-                    </Typography>
-                  </Box>
-                  <Stack alignItems="flex-end" spacing={0.5}>
-                    <Chip
-                      color={item.status === 'Running' ? 'primary' : item.status === 'Ready' ? 'success' : 'default'}
-                      label={item.status}
-                      size="small"
-                    />
-                    <Typography color="text.secondary" variant="caption">
-                      {item.eta}
-                    </Typography>
-                  </Stack>
-                </Box>
-              ))}
-            </Stack>
+            <Typography color="text.secondary" variant="body2">
+              Queue totals, recent wins, and calibration confidence should only appear here after they come from
+              real workspace data.
+            </Typography>
+            <Button onClick={() => onTabChange('analysis')} startIcon={<AutoGraphRounded />} variant="outlined">
+              Analyze first creative
+            </Button>
           </Stack>
         </Paper>
       </Box>
@@ -368,7 +278,6 @@ function DashboardTabFallback({ tab }: { tab: DashboardTab }) {
     <Stack spacing={3}>
       <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
         <Stack spacing={2.5}>
-          <Chip color="primary" label={`Loading ${title}`} sx={{ alignSelf: 'flex-start' }} />
           <Typography variant="h4">Preparing the {title.toLowerCase()} workspace.</Typography>
           <Skeleton animation="wave" height={24} sx={{ borderRadius: 999, maxWidth: 280 }} variant="rounded" />
           <Skeleton animation="wave" height={18} sx={{ borderRadius: 999, maxWidth: 360 }} variant="rounded" />

@@ -371,4 +371,5 @@ logs/*
 AGENTS.md
 CLAUDE.md
 /skills
+/logs/*
 

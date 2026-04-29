@@ -125,6 +125,15 @@ class AnalysisAssetListResponse(BaseModel):
     items: list[AnalysisAssetRead] = Field(default_factory=list)
 
 
+class AnalysisBulkDeleteRequest(APIBaseSchema):
+    ids: list[UUID] = Field(min_length=1, max_length=50)
+
+
+class AnalysisBulkDeleteResponse(BaseModel):
+    deleted_count: int
+    deleted_ids: list[UUID] = Field(default_factory=list)
+
+
 class AnalysisUploadSessionRead(BaseModel):
     id: UUID
     upload_token: str

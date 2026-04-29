@@ -14,7 +14,7 @@ from backend.core.exceptions import UnauthorizedAppError
 from backend.core.log_context import bind_log_context
 from backend.core.security import SessionClaims, hash_token, verify_session_token
 from backend.db.models import UserSession
-from backend.db.repositories import crud
+from backend.db.repositories import AuthRepository
 from backend.db.session import get_db
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -191,10 +191,10 @@ async def require_authenticated_session(
     db: AsyncSession = Depends(get_db),
 ) -> AuthenticatedSessionContext:
     claims = auth_claims.claims
+    auth_repo = AuthRepository(db)
     cached_entry = _get_cached_auth(user_id=claims.user_id, organization_id=claims.organization_id)
     if cached_entry is None:
-        user, organization = await crud.get_user_and_organization(
-            db,
+        user, organization = await auth_repo.get_user_and_organization(
             user_id=claims.user_id,
             organization_id=claims.organization_id,
         )
@@ -251,16 +251,15 @@ async def require_project_context(
     db: AsyncSession = Depends(get_db),
 ) -> AuthenticatedProjectContext:
     claims = auth_session.claims
+    auth_repo = AuthRepository(db)
     cached_entry = _get_cached_auth(user_id=claims.user_id, organization_id=claims.organization_id)
     cached_project = cached_entry.default_project if cached_entry is not None else None
     if cached_project is None:
-        default_project = await crud.get_default_project_for_organization(
-            db,
-            organization_id=auth_session.organization.id,
+        default_project = await auth_repo.get_default_project_for_organization(
+            auth_session.organization.id
         )
         if default_project is None:
-            default_project = await crud.get_or_create_default_project_for_organization(
-                db,
+            default_project = await auth_repo.get_or_create_default_project_for_organization(
                 organization_id=auth_session.organization.id,
                 created_by_user_id=auth_session.user.id,
             )

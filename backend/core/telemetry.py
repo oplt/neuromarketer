@@ -6,6 +6,7 @@ import re
 from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
+
 _TRACEPARENT_RE = re.compile(r"^[0-9a-f]+$")
 _TELEMETRY_CONFIGURED = False
 

@@ -1,20 +1,23 @@
-import CompareArrowsRounded from '@mui/icons-material/CompareArrowsRounded'
+import CloseRounded from '@mui/icons-material/CloseRounded'
 import HistoryRounded from '@mui/icons-material/HistoryRounded'
 import LaunchRounded from '@mui/icons-material/LaunchRounded'
-import SwapHorizRounded from '@mui/icons-material/SwapHorizRounded'
+import SettingsRounded from '@mui/icons-material/SettingsRounded'
+import UploadFileRounded from '@mui/icons-material/UploadFileRounded'
 import {
   Alert,
   Box,
   Button,
-  Chip,
+  Collapse,
+  Drawer,
+  IconButton,
   LinearProgress,
+  MenuItem,
   Paper,
   Stack,
   TextField,
   Typography,
 } from '@mui/material'
-import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useState } from 'react'
-import HelpTooltip from '../components/layout/HelpTooltip'
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   CompareCandidateList,
   ComparisonHistoryPanel,
@@ -43,10 +46,11 @@ import type { AuthSession } from '../lib/session'
 const CollaborationPanel = lazy(() => import('../components/collaboration/CollaborationPanel'))
 
 type ComparePageProps = {
+  onOpenAnalysis?: () => void
   session: AuthSession
 }
 
-function ComparePage({ session }: ComparePageProps) {
+function ComparePage({ onOpenAnalysis, session }: ComparePageProps) {
   const sessionToken = session.sessionToken
   const storageScope = session.defaultProjectId || session.email
   const storageKey = useMemo(() => buildCompareWorkspaceStorageKey(storageScope), [storageScope])
@@ -58,6 +62,10 @@ function ComparePage({ session }: ComparePageProps) {
     storedSnapshot.activeComparisonId,
   )
   const [comparisonName, setComparisonName] = useState('')
+  const [comparisonType, setComparisonType] = useState('overall_decision')
+  const [assetSearch, setAssetSearch] = useState('')
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
   const [banner, setBanner] = useState<CompareBanner | null>(null)
   const [isCreatingComparison, setIsCreatingComparison] = useState(false)
 
@@ -87,6 +95,19 @@ function ComparePage({ session }: ComparePageProps) {
     () => completedAnalyses.filter((item) => selectedJobIds.includes(item.job.id)),
     [completedAnalyses, selectedJobIds],
   )
+
+  const filteredAnalyses = useMemo(() => {
+    const query = assetSearch.trim().toLowerCase()
+    if (!query) {
+      return completedAnalyses
+    }
+    return completedAnalyses.filter((item) => {
+      const label = resolveAnalysisLabel(item).toLowerCase()
+      const objective = item.job.objective?.toLowerCase() || ''
+      const channel = item.job.channel?.toLowerCase() || ''
+      return label.includes(query) || objective.includes(query) || channel.includes(query)
+    })
+  }, [assetSearch, completedAnalyses])
 
   const baselineCandidate = useMemo(
     () => selectedAnalyses.find((item) => item.job.id === baselineJobId) ?? selectedAnalyses[0] ?? null,
@@ -194,7 +215,10 @@ function ComparePage({ session }: ComparePageProps) {
           name: comparisonName.trim() || null,
           analysis_job_ids: selectedJobIds,
           baseline_job_id: baselineJobId || selectedJobIds[0],
-          comparison_context: { workspace_source: 'compare_tab' },
+          comparison_context: {
+            workspace_source: 'compare_tab',
+            comparison_type: comparisonType,
+          },
         },
       })
       applyActiveComparison(comparison)
@@ -218,7 +242,15 @@ function ComparePage({ session }: ComparePageProps) {
     } finally {
       setIsCreatingComparison(false)
     }
-  }, [applyActiveComparison, baselineJobId, comparisonName, selectedJobIds, sessionToken, setComparisonHistory])
+  }, [
+    applyActiveComparison,
+    baselineJobId,
+    comparisonName,
+    comparisonType,
+    selectedJobIds,
+    sessionToken,
+    setComparisonHistory,
+  ])
 
   const handleOpenComparison = useCallback(
     (comparisonId: string) => {
@@ -235,87 +267,103 @@ function ComparePage({ session }: ComparePageProps) {
     void reloadComparisonHistory()
   }, [reloadComparisonHistory])
 
+  const handleNewComparison = useCallback(() => {
+    setActiveComparison(null)
+    setActiveComparisonId(null)
+    setBanner(null)
+  }, [setActiveComparison])
+
   return (
-    <Stack spacing={3}>
-      <Paper className="dashboard-card dashboard-card--hero" elevation={0}>
-        <Stack spacing={2.5}>
-          <Chip color="primary" label="Compare workspace" sx={{ alignSelf: 'flex-start' }} />
-          <Stack alignItems="center" direction="row" spacing={0.75}>
-            <Typography variant="h4">Pick a winner across 2 to 5 analyses.</Typography>
-            <HelpTooltip title="Each comparison ranks selected analyses with weighted scores, deltas, scene-level changes, and recommendation overlap against your chosen baseline." />
-          </Stack>
-          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            <Chip icon={<CompareArrowsRounded />} label={`${selectedJobIds.length} selected`} variant="outlined" />
-            <Chip
-              icon={<SwapHorizRounded />}
-              label={baselineCandidate ? `Baseline: ${resolveAnalysisLabel(baselineCandidate)}` : 'Pick a baseline'}
-              variant="outlined"
-            />
-            <Chip icon={<HistoryRounded />} label={`${comparisonHistory.length} saved`} variant="outlined" />
-          </Stack>
-        </Stack>
-      </Paper>
-
-      {banner ? <Alert severity={banner.type}>{banner.message}</Alert> : null}
-
-      <Box className="dashboard-grid dashboard-grid--content">
-        <Paper className="dashboard-card" elevation={0}>
-          <Stack spacing={2}>
-            <Stack
-              alignItems={{ xs: 'stretch', md: 'center' }}
-              direction={{ xs: 'column', md: 'row' }}
-              justifyContent="space-between"
-              spacing={1.5}
-            >
-              <Stack alignItems="center" direction="row" spacing={0.5}>
-                <Typography variant="h6">Build a comparison</Typography>
-                <HelpTooltip title="Select 2 to 5 completed analyses. The baseline controls delta views and recommendation overlap." />
-              </Stack>
-              <Button
-                disabled={selectedJobIds.length === 0}
-                onClick={handleClearSelection}
-                size="small"
-                variant="outlined"
-              >
-                Clear selection
+    <Stack className="compare-page" spacing={3}>
+      <Box className="compare-shell">
+        <Stack spacing={3}>
+          <CompareStepper activeStep={activeComparison ? 3 : selectedJobIds.length >= 2 ? 2 : 1} />
+          <Stack
+            alignItems={{ xs: 'stretch', md: 'center' }}
+            direction={{ xs: 'column', md: 'row' }}
+            justifyContent="space-between"
+            spacing={2}
+          >
+            <Box>
+              <Typography variant="h4">Compare assets</Typography>
+              <Typography color="text.secondary" variant="body2">
+                Select at least two completed analyses. Compare highlights winner, deltas, insights, next steps.
+              </Typography>
+            </Box>
+            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+              {activeComparison ? (
+                <Button onClick={handleNewComparison} variant="outlined">
+                  New comparison
+                </Button>
+              ) : null}
+              <Button onClick={() => setDetailsOpen(true)} startIcon={<HistoryRounded />} variant="text">
+                View details
               </Button>
             </Stack>
-
-            <TextField
-              label="Comparison name"
-              onChange={(event) => setComparisonName(event.target.value)}
-              placeholder="Example: Spring launch hooks"
-              value={comparisonName}
-            />
-
-            <SelectedCandidatesPanel
-              baselineJobId={baselineCandidate?.job.id ?? null}
-              items={selectedAnalyses}
-              onRemove={handleToggleAnalysis}
-              onSetBaseline={setBaselineJobId}
-            />
-
-            <Button
-              data-testid="create-analysis-comparison"
-              disabled={selectedJobIds.length < 2 || isCreatingComparison}
-              onClick={() => void handleCreateComparison()}
-              startIcon={<LaunchRounded />}
-              variant="contained"
-            >
-              {isCreatingComparison ? 'Creating comparison…' : 'Create comparison'}
-            </Button>
-
-            <CompareCandidateList
-              baselineJobId={baselineCandidate?.job.id ?? null}
-              isLoading={isLoadingAnalyses}
-              items={completedAnalyses}
-              onSetBaseline={setBaselineJobId}
-              onToggle={handleToggleAnalysis}
-              selectedJobIds={selectedJobIds}
-            />
           </Stack>
-        </Paper>
 
+          {banner ? <Alert severity={banner.type}>{banner.message}</Alert> : null}
+
+          {activeComparison ? (
+            <ComparisonResults comparison={activeComparison} />
+          ) : (
+            <Stack spacing={2.5}>
+              <AssetSelector
+                assetSearch={assetSearch}
+                baselineJobId={baselineCandidate?.job.id ?? null}
+                isLoading={isLoadingAnalyses}
+                items={filteredAnalyses}
+                onAssetSearchChange={setAssetSearch}
+                onClearSelection={handleClearSelection}
+                onSetBaseline={setBaselineJobId}
+                onToggle={handleToggleAnalysis}
+                onUpload={onOpenAnalysis}
+                selectedAnalyses={selectedAnalyses}
+                selectedJobIds={selectedJobIds}
+              />
+
+              <ComparisonSettings
+                comparisonName={comparisonName}
+                comparisonType={comparisonType}
+                onComparisonNameChange={setComparisonName}
+                onComparisonTypeChange={setComparisonType}
+                onToggleAdvanced={() => setShowAdvancedSettings((current) => !current)}
+                showAdvancedSettings={showAdvancedSettings}
+              />
+
+              <Paper className="compare-action-panel" elevation={0}>
+                <Stack spacing={1.5}>
+                  <Button
+                    data-testid="create-analysis-comparison"
+                    disabled={selectedJobIds.length < 2 || isCreatingComparison}
+                    onClick={() => void handleCreateComparison()}
+                    size="large"
+                    startIcon={<LaunchRounded />}
+                    variant="contained"
+                  >
+                    {isCreatingComparison ? 'Analyzing differences…' : 'Run comparison'}
+                  </Button>
+                  {selectedJobIds.length < 2 ? (
+                    <Typography color="text.secondary" variant="body2">
+                      Select at least 2 assets to compare.
+                    </Typography>
+                  ) : null}
+                  {isCreatingComparison ? (
+                    <Stack spacing={1}>
+                      <LinearProgress sx={{ borderRadius: 999, height: 8 }} />
+                      <Typography color="text.secondary" variant="body2">
+                        Processing → Scoring → Insights
+                      </Typography>
+                    </Stack>
+                  ) : null}
+                </Stack>
+              </Paper>
+            </Stack>
+          )}
+        </Stack>
+      </Box>
+
+      <TechnicalDetailsDrawer onClose={() => setDetailsOpen(false)} open={detailsOpen}>
         <ComparisonHistoryPanel
           activeComparisonId={activeComparisonId}
           comparisonLoadingId={comparisonLoadingId}
@@ -324,20 +372,224 @@ function ComparePage({ session }: ComparePageProps) {
           onOpenComparison={handleOpenComparison}
           onRefresh={handleRefreshHistory}
         />
-      </Box>
 
-      {activeComparison ? <ComparisonResults comparison={activeComparison} /> : null}
-
-      <Suspense fallback={<DeferredPanelFallback title="Comparison review ops" />}>
-        <CollaborationPanel
-          entityId={activeComparison?.id ?? null}
-          entityType="analysis_comparison"
-          session={session}
-          subtitle="Attach comments, ownership, and approval state to the saved comparison decision."
-          title="Comparison review ops"
-        />
-      </Suspense>
+        <Suspense fallback={<DeferredPanelFallback title="Comparison review ops" />}>
+          <CollaborationPanel
+            entityId={activeComparison?.id ?? null}
+            entityType="analysis_comparison"
+            session={session}
+            subtitle="Attach comments, ownership, and approval state to the saved comparison decision."
+            title="Comparison review ops"
+          />
+        </Suspense>
+      </TechnicalDetailsDrawer>
     </Stack>
+  )
+}
+
+type CompareStepperProps = {
+  activeStep: 1 | 2 | 3
+}
+
+function CompareStepperBase({ activeStep }: CompareStepperProps) {
+  const steps = [
+    { id: 1, label: 'Select items' },
+    { id: 2, label: 'Configure' },
+    { id: 3, label: 'Results' },
+  ] as const
+
+  return (
+    <Box className="compare-stepper" aria-label="Compare workflow">
+      {steps.map((step) => (
+        <Box
+          className={`compare-stepper__item ${activeStep === step.id ? 'is-active' : ''} ${
+            activeStep > step.id ? 'is-complete' : ''
+          }`}
+          key={step.id}
+        >
+          <span>{step.id}</span>
+          <Typography variant="subtitle2">{step.label}</Typography>
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
+type AssetSelectorProps = {
+  assetSearch: string
+  baselineJobId: string | null
+  isLoading: boolean
+  items: AnalysisJobListItem[]
+  onAssetSearchChange: (value: string) => void
+  onClearSelection: () => void
+  onSetBaseline: (jobId: string) => void
+  onToggle: (item: AnalysisJobListItem) => void
+  onUpload?: () => void
+  selectedAnalyses: AnalysisJobListItem[]
+  selectedJobIds: string[]
+}
+
+function AssetSelectorBase({
+  assetSearch,
+  baselineJobId,
+  isLoading,
+  items,
+  onAssetSearchChange,
+  onClearSelection,
+  onSetBaseline,
+  onToggle,
+  onUpload,
+  selectedAnalyses,
+  selectedJobIds,
+}: AssetSelectorProps) {
+  return (
+    <Paper className="compare-flow-section" elevation={0}>
+      <Stack spacing={2}>
+        <SectionHeader eyebrow="Step 1" title="Select items" />
+        <SelectedAssetsBar
+          baselineJobId={baselineJobId}
+          items={selectedAnalyses}
+          onRemove={onToggle}
+          onSetBaseline={onSetBaseline}
+        />
+        <Stack
+          alignItems={{ xs: 'stretch', md: 'center' }}
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          spacing={1.5}
+        >
+          <TextField
+            label="Find assets"
+            onChange={(event) => onAssetSearchChange(event.target.value)}
+            placeholder="Search filename, objective, channel"
+            size="small"
+            value={assetSearch}
+          />
+          <Stack direction="row" spacing={1}>
+            <Button onClick={onUpload} startIcon={<UploadFileRounded />} variant="outlined">
+              Upload
+            </Button>
+            <Button disabled={selectedJobIds.length === 0} onClick={onClearSelection} variant="text">
+              Clear
+            </Button>
+          </Stack>
+        </Stack>
+        <CompareCandidateList
+          baselineJobId={baselineJobId}
+          isLoading={isLoading}
+          items={items}
+          onSetBaseline={onSetBaseline}
+          onToggle={onToggle}
+          selectedJobIds={selectedJobIds}
+        />
+      </Stack>
+    </Paper>
+  )
+}
+
+type SelectedAssetsBarProps = {
+  baselineJobId: string | null
+  items: AnalysisJobListItem[]
+  onRemove: (item: AnalysisJobListItem) => void
+  onSetBaseline: (jobId: string) => void
+}
+
+function SelectedAssetsBarBase(props: SelectedAssetsBarProps) {
+  return <SelectedCandidatesPanel {...props} />
+}
+
+type ComparisonSettingsProps = {
+  comparisonName: string
+  comparisonType: string
+  onComparisonNameChange: (value: string) => void
+  onComparisonTypeChange: (value: string) => void
+  onToggleAdvanced: () => void
+  showAdvancedSettings: boolean
+}
+
+function ComparisonSettingsBase({
+  comparisonName,
+  comparisonType,
+  onComparisonNameChange,
+  onComparisonTypeChange,
+  onToggleAdvanced,
+  showAdvancedSettings,
+}: ComparisonSettingsProps) {
+  return (
+    <Paper className="compare-flow-section" elevation={0}>
+      <Stack spacing={2}>
+        <SectionHeader eyebrow="Step 2" title="Configure comparison" />
+        <TextField
+          label="Comparison type"
+          onChange={(event) => onComparisonTypeChange(event.target.value)}
+          select
+          size="small"
+          value={comparisonType}
+        >
+          <MenuItem value="overall_decision">Overall winner</MenuItem>
+          <MenuItem value="hook_performance">Hook performance</MenuItem>
+          <MenuItem value="engagement">Engagement</MenuItem>
+          <MenuItem value="structure">Structure</MenuItem>
+        </TextField>
+        <Button
+          onClick={onToggleAdvanced}
+          size="small"
+          startIcon={<SettingsRounded />}
+          sx={{ alignSelf: 'flex-start' }}
+          variant="text"
+        >
+          Advanced settings
+        </Button>
+        <Collapse in={showAdvancedSettings}>
+          <TextField
+            fullWidth
+            label="Comparison name"
+            onChange={(event) => onComparisonNameChange(event.target.value)}
+            placeholder="Spring launch hooks"
+            size="small"
+            value={comparisonName}
+          />
+        </Collapse>
+      </Stack>
+    </Paper>
+  )
+}
+
+type SectionHeaderProps = {
+  eyebrow: string
+  title: string
+}
+
+function SectionHeader({ eyebrow, title }: SectionHeaderProps) {
+  return (
+    <Box>
+      <Typography color="primary" variant="overline">
+        {eyebrow}
+      </Typography>
+      <Typography variant="h6">{title}</Typography>
+    </Box>
+  )
+}
+
+type TechnicalDetailsDrawerProps = {
+  children: ReactNode
+  onClose: () => void
+  open: boolean
+}
+
+function TechnicalDetailsDrawerBase({ children, onClose, open }: TechnicalDetailsDrawerProps) {
+  return (
+    <Drawer anchor="right" onClose={onClose} open={open}>
+      <Box className="compare-details-drawer" role="presentation">
+        <Stack alignItems="center" direction="row" justifyContent="space-between" spacing={2}>
+          <Typography variant="h6">Details</Typography>
+          <IconButton aria-label="Close details" onClick={onClose}>
+            <CloseRounded />
+          </IconButton>
+        </Stack>
+        <Stack spacing={2}>{children}</Stack>
+      </Box>
+    </Drawer>
   )
 }
 
@@ -353,5 +605,10 @@ function DeferredPanelFallbackBase({ title }: { title: string }) {
 }
 
 const DeferredPanelFallback = memo(DeferredPanelFallbackBase)
+const CompareStepper = memo(CompareStepperBase)
+const AssetSelector = memo(AssetSelectorBase)
+const SelectedAssetsBar = memo(SelectedAssetsBarBase)
+const ComparisonSettings = memo(ComparisonSettingsBase)
+const TechnicalDetailsDrawer = memo(TechnicalDetailsDrawerBase)
 
 export default ComparePage

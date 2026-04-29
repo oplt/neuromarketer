@@ -1,4 +1,4 @@
-import { Avatar, Box, Chip, Divider, Paper, Stack, Typography } from '@mui/material'
+import { Avatar, Box, Divider, Paper, Stack, Typography } from '@mui/material'
 import HelpTooltip from '../components/layout/HelpTooltip'
 import type { AuthSession } from '../lib/session'
 
@@ -28,9 +28,9 @@ function ProfilePage({ session }: ProfilePageProps) {
           <Divider />
           <DetailRow label="Default workspace" value={session.organizationName || 'Primary workspace'} />
           <DetailRow label="Profile status" value="Active" />
-          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-            <Chip color="primary" label="Account → Members for role and access" size="small" variant="outlined" />
-          </Stack>
+          <Typography color="text.secondary" variant="body2">
+            Manage roles and member access from the Account page.
+          </Typography>
         </Stack>
       </Paper>
     </Box>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -13,6 +14,7 @@ from backend.application.services.analysis_job_processor import PERSISTED_PROGRE
 from backend.core.exceptions import ConflictAppError
 from backend.db.models import UploadStatus
 from backend.db.repositories.account_admin import ControlCenterStats
+from backend.schemas.analysis import AnalysisAssetRead, AnalysisUploadSessionRead
 
 
 class TestComparisonCandidateOrder(unittest.IsolatedAsyncioTestCase):
@@ -141,8 +143,27 @@ class TestDeferredAssetPromotion(unittest.IsolatedAsyncioTestCase):
         )
         service.uploads.mark_artifact_stored = AsyncMock()
         service.uploads.mark_stored = AsyncMock()
-        service._build_upload_session_read = lambda _: SimpleNamespace()
-        service._build_asset_read = lambda _: SimpleNamespace()
+        service._build_upload_session_read = lambda _: AnalysisUploadSessionRead(
+            id=upload_session_id,
+            upload_token="token",
+            upload_status="uploaded",
+            created_at=datetime.now(UTC),
+        )
+        service._build_asset_read = lambda _: AnalysisAssetRead(
+            id=artifact_id,
+            creative_id=asset.creative_id,
+            creative_version_id=None,
+            media_type="text",
+            original_filename="doc.pdf",
+            mime_type="application/pdf",
+            size_bytes=asset.file_size_bytes,
+            bucket="bucket",
+            object_key="key",
+            object_uri="s3://bucket/key",
+            checksum=None,
+            upload_status="uploaded",
+            created_at=datetime.now(UTC),
+        )
         service._extract_asset_text = AsyncMock(side_effect=AssertionError("must not extract sync"))
         import backend.tasks as tasks_module
 
@@ -197,6 +218,66 @@ class TestAnalysisJobReadiness(unittest.IsolatedAsyncioTestCase):
             )
 
 
+class TestAnalysisJobCreationContext(unittest.IsolatedAsyncioTestCase):
+    async def test_create_analysis_job_normalizes_campaign_context(self) -> None:
+        session = AsyncMock()
+        service = AnalysisApplicationService(session)
+        user_id = uuid4()
+        project_id = uuid4()
+        asset_id = uuid4()
+        creative_id = uuid4()
+        creative_version_id = uuid4()
+
+        asset = SimpleNamespace(
+            id=asset_id,
+            created_by_user_id=user_id,
+            project_id=project_id,
+            upload_status=UploadStatus.STORED,
+            creative_id=creative_id,
+            creative_version_id=creative_version_id,
+            mime_type="video/mp4",
+            metadata_json={"media_type": "video"},
+        )
+        service.uploads.get_stored_artifact = AsyncMock(return_value=asset)
+
+        captured_payload = {}
+
+        async def _fake_create_prediction_job(payload):
+            captured_payload["payload"] = payload
+            return SimpleNamespace(
+                id=uuid4(),
+                created_by_user_id=user_id,
+                request_payload={"campaign_context": payload.campaign_context},
+                runtime_params=payload.runtime_params,
+                status=SimpleNamespace(value="queued"),
+                started_at=None,
+                completed_at=None,
+                error_message=None,
+                created_at=datetime.now(UTC),
+                analysis_result_record=None,
+            )
+
+        service.predictions.create_prediction_job = _fake_create_prediction_job
+        service._build_job_status_lite_response = AsyncMock(return_value=SimpleNamespace())
+
+        await service.create_analysis_job(
+            user_id=user_id,
+            asset_id=asset_id,
+            project_id=project_id,
+            objective="  Ship more demos  ",
+            goal_template="PAID_SOCIAL_HOOK",
+            channel="META_FEED",
+            audience_segment="  founders  ",
+        )
+
+        payload = captured_payload["payload"]
+        self.assertEqual(payload.campaign_context["objective"], "Ship more demos")
+        self.assertEqual(payload.campaign_context["goal_template"], "paid_social_hook")
+        self.assertEqual(payload.campaign_context["channel"], "meta_feed")
+        self.assertEqual(payload.campaign_context["audience_segment"], "founders")
+        self.assertEqual(payload.runtime_params["analysis_execution_phase"]["phase"], "queued")
+
+
 class TestPersistedProgressStages(unittest.TestCase):
     def test_expected_progress_stages_are_persisted(self) -> None:
         self.assertIn("worker_started", PERSISTED_PROGRESS_STAGES)
@@ -204,6 +285,28 @@ class TestPersistedProgressStages(unittest.TestCase):
         self.assertIn("primary_scoring_ready", PERSISTED_PROGRESS_STAGES)
         self.assertIn("recommendations_ready", PERSISTED_PROGRESS_STAGES)
         self.assertIn("completed", PERSISTED_PROGRESS_STAGES)
+
+
+class TestAnalysisStatusPollingReadPath(unittest.IsolatedAsyncioTestCase):
+    async def test_get_analysis_job_uses_light_repository_path(self) -> None:
+        session = AsyncMock()
+        service = AnalysisApplicationService(session)
+        user_id = uuid4()
+        job_id = uuid4()
+        job = SimpleNamespace(id=job_id)
+        expected = SimpleNamespace(kind="lite_status_response")
+
+        service.predictions.get_analysis_job_status_light_for_user = AsyncMock(return_value=job)
+        service.predictions.get_job = AsyncMock(side_effect=AssertionError("full job read path not expected"))
+        service._build_job_status_lite_response = AsyncMock(return_value=expected)
+
+        result = await service.get_analysis_job(user_id=user_id, job_id=job_id)
+
+        self.assertEqual(result, expected)
+        service.predictions.get_analysis_job_status_light_for_user.assert_awaited_once_with(
+            job_id=job_id,
+            user_id=user_id,
+        )
 
 
 if __name__ == "__main__":

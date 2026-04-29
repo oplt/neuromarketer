@@ -59,9 +59,10 @@ class TestPredictionServiceRerun(unittest.IsolatedAsyncioTestCase):
         job = _FakeJob(JobStatus.RUNNING)
         job.created_by_user_id = None
 
-        with patch.object(svc.inference, "get_job_with_prediction", return_value=job):
-            with self.assertRaises(ConflictAppError):
-                await svc.rerun_job(job_id=job.id, user_id=uuid4())
+        with patch.object(
+            svc.inference, "get_job_status_light", new_callable=AsyncMock, return_value=job
+        ), self.assertRaises(ConflictAppError):
+            await svc.rerun_job(job_id=job.id, user_id=uuid4())
 
     async def test_rerun_raises_for_succeeded_job(self):
         from backend.application.services.predictions import PredictionApplicationService
@@ -71,9 +72,10 @@ class TestPredictionServiceRerun(unittest.IsolatedAsyncioTestCase):
         svc = PredictionApplicationService(session)
         job = _FakeJob(JobStatus.SUCCEEDED)
 
-        with patch.object(svc.inference, "get_job_with_prediction", return_value=job):
-            with self.assertRaises(ConflictAppError):
-                await svc.rerun_job(job_id=job.id, user_id=uuid4())
+        with patch.object(
+            svc.inference, "get_job_status_light", new_callable=AsyncMock, return_value=job
+        ), self.assertRaises(ConflictAppError):
+            await svc.rerun_job(job_id=job.id, user_id=uuid4())
 
     async def test_rerun_succeeds_for_failed_job(self):
         from backend.application.services.predictions import PredictionApplicationService
@@ -83,13 +85,17 @@ class TestPredictionServiceRerun(unittest.IsolatedAsyncioTestCase):
         job = _FakeJob(JobStatus.FAILED)
         reset_job = _FakeJob(JobStatus.QUEUED)
 
-        with patch.object(svc.inference, "get_job_with_prediction", side_effect=[job, reset_job]):
-            with patch.object(
-                svc.inference, "reset_job_for_rerun", new_callable=AsyncMock
-            ) as mock_reset:
-                result = await svc.rerun_job(job_id=job.id, user_id=uuid4())
-                mock_reset.assert_awaited_once_with(job)
-                self.assertEqual(result.status, JobStatus.QUEUED)
+        with patch.object(
+            svc.inference,
+            "get_job_status_light",
+            new_callable=AsyncMock,
+            side_effect=[job, reset_job],
+        ), patch.object(
+            svc.inference, "reset_job_for_rerun", new_callable=AsyncMock
+        ) as mock_reset:
+            result = await svc.rerun_job(job_id=job.id, user_id=uuid4())
+            mock_reset.assert_awaited_once_with(job)
+            self.assertEqual(result.status, JobStatus.QUEUED)
 
     async def test_rerun_raises_not_found_for_missing_job(self):
         from backend.application.services.predictions import PredictionApplicationService
@@ -98,9 +104,10 @@ class TestPredictionServiceRerun(unittest.IsolatedAsyncioTestCase):
         session = AsyncMock()
         svc = PredictionApplicationService(session)
 
-        with patch.object(svc.inference, "get_job_with_prediction", return_value=None):
-            with self.assertRaises(NotFoundAppError):
-                await svc.rerun_job(job_id=uuid4(), user_id=uuid4())
+        with patch.object(
+            svc.inference, "get_job_status_light", new_callable=AsyncMock, return_value=None
+        ), self.assertRaises(NotFoundAppError):
+            await svc.rerun_job(job_id=uuid4(), user_id=uuid4())
 
 
 if __name__ == "__main__":

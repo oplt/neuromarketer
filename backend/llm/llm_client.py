@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
@@ -110,6 +110,11 @@ def parse_json_object(raw_text: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise LLMResponseFormatError("Model output JSON must be an object.", raw_text=cleaned)
     return parsed
+
+
+def _base_url_has_openai_v1_path(base_url: str) -> bool:
+    normalized = (base_url or "").rstrip("/")
+    return normalized.endswith("/v1")
 
 
 class BaseLLMClient(ABC):
@@ -353,6 +358,20 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
 
 def create_llm_client(config: LLMClientConfig) -> BaseLLMClient:
     if config.provider == "ollama":
+        if _base_url_has_openai_v1_path(config.base_url):
+            compatible_config = replace(config, provider="openai_compatible")
+            log_event(
+                logger,
+                "llm_provider_auto_switch_openai_compatible",
+                level="warning",
+                configured_provider=config.provider,
+                resolved_provider=compatible_config.provider,
+                base_url=config.base_url,
+                model=config.model,
+                status="fallback",
+                provider_id=config.provider_id or config.provider,
+            )
+            return OpenAICompatibleLLMClient(compatible_config)
         return OllamaLLMClient(config)
     if config.provider in {"openai_compatible", "vllm", "lm_studio"}:
         return OpenAICompatibleLLMClient(config)

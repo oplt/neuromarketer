@@ -113,8 +113,14 @@ class EvaluationService:
                 f"LLM evaluation failed: {exc}", telemetry=exc.telemetry
             ) from exc
 
+        normalized_result = self._normalize_generation_payload(
+            raw_payload=generation.parsed_json,
+            mode=request.mode,
+            metadata=generation.metadata,
+        )
+
         try:
-            validated_result = EvaluationResult.model_validate(generation.parsed_json)
+            validated_result = EvaluationResult.model_validate(normalized_result)
         except ValidationError as exc:
             log_event(
                 logger,
@@ -142,20 +148,6 @@ class EvaluationService:
             ) from exc
 
         normalized_result = validated_result.model_dump(mode="json")
-        normalized_result["mode"] = request.mode.value
-        normalized_result["model_metadata"] = {
-            "provider": generation.metadata["provider"],
-            "model": generation.metadata["model"],
-            "tokens_in": generation.metadata["tokens_in"],
-            "tokens_out": generation.metadata["tokens_out"],
-            "provider_id": generation.metadata.get("provider_id"),
-            "attempts": generation.metadata.get("attempts"),
-            "fallback_count": generation.metadata.get("fallback_count"),
-            "latency_ms": generation.metadata.get("latency_ms"),
-            "estimated_cost_usd": generation.metadata.get("estimated_cost_usd"),
-            "actual_cost_usd": generation.metadata.get("actual_cost_usd"),
-            "budget_usd": generation.metadata.get("budget_usd"),
-        }
 
         try:
             final_result = EvaluationResult.model_validate(normalized_result)
@@ -203,6 +195,209 @@ class EvaluationService:
             f"{preview.model}:{context_hash}"
         )
         return hashlib.sha256(key_payload.encode("utf-8")).hexdigest()
+
+    def _normalize_generation_payload(
+        self,
+        *,
+        raw_payload: Any,
+        mode: EvaluationMode,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+        summary = self._first_text(
+            payload,
+            [
+                "summary",
+                f"{mode.value}_summary",
+                "educational_summary",
+                "defence_summary",
+                "marketing_summary",
+                "social_summary",
+            ],
+            fallback=f"{mode.value.replace('_', ' ').title()} evaluation completed.",
+        )
+
+        normalized = {
+            **payload,
+            "mode": mode.value,
+            "overall_verdict": self._first_text(
+                payload,
+                ["overall_verdict", "verdict", "headline", "judgement", "judgment"],
+                fallback=summary[:240],
+            ),
+            "summary": summary,
+            "scores": self._normalize_scores(payload.get("scores") or payload.get("score")),
+            "scorecard": self._normalize_scorecard(payload.get("scorecard")),
+            "strengths": self._normalize_text_list(payload.get("strengths")),
+            "weaknesses": self._normalize_text_list(payload.get("weaknesses")),
+            "risks": self._normalize_risks(payload.get("risks")),
+            "recommendations": self._normalize_recommendations(payload.get("recommendations")),
+            "model_metadata": self._build_model_metadata(metadata),
+        }
+        return normalized
+
+    def _build_model_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "provider": str(metadata.get("provider") or "unknown"),
+            "model": str(metadata.get("model") or "unknown"),
+            "tokens_in": self._coerce_non_negative_int(metadata.get("tokens_in")),
+            "tokens_out": self._coerce_non_negative_int(metadata.get("tokens_out")),
+            "provider_id": metadata.get("provider_id"),
+            "attempts": metadata.get("attempts"),
+            "fallback_count": metadata.get("fallback_count"),
+            "latency_ms": metadata.get("latency_ms"),
+            "estimated_cost_usd": metadata.get("estimated_cost_usd"),
+            "actual_cost_usd": metadata.get("actual_cost_usd"),
+            "budget_usd": metadata.get("budget_usd"),
+        }
+
+    def _normalize_scores(self, value: Any) -> dict[str, int]:
+        source = value if isinstance(value, dict) else {}
+        return {
+            "clarity": self._coerce_score(source.get("clarity"), fallback=50),
+            "engagement": self._coerce_score(source.get("engagement"), fallback=50),
+            "retention": self._coerce_score(source.get("retention"), fallback=50),
+            "fit_for_purpose": self._coerce_score(
+                source.get("fit_for_purpose") or source.get("fit"), fallback=50
+            ),
+            "risk": self._coerce_score(source.get("risk"), fallback=50),
+        }
+
+    def _normalize_scorecard(self, value: Any) -> dict[str, dict[str, Any]]:
+        source = value if isinstance(value, dict) else {}
+        return {
+            "hook_or_opening": self._normalize_score_reason(
+                source.get("hook_or_opening") or source.get("hook"), "Opening evidence was limited."
+            ),
+            "message_clarity": self._normalize_score_reason(
+                source.get("message_clarity") or source.get("clarity"),
+                "Message clarity evidence was limited.",
+            ),
+            "pacing": self._normalize_score_reason(
+                source.get("pacing"),
+                "Pacing evidence was limited.",
+            ),
+            "attention_alignment": self._normalize_score_reason(
+                source.get("attention_alignment"), "Attention-alignment evidence was limited."
+            ),
+            "domain_effectiveness": self._normalize_score_reason(
+                source.get("domain_effectiveness") or source.get("fit_for_purpose"),
+                "Domain effectiveness evidence was limited.",
+            ),
+        }
+
+    def _normalize_score_reason(self, value: Any, fallback_reason: str) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return {
+                "score": self._coerce_score(value.get("score"), fallback=50),
+                "reason": self._coerce_text(value.get("reason"), fallback=fallback_reason),
+            }
+        return {
+            "score": self._coerce_score(value, fallback=50),
+            "reason": fallback_reason,
+        }
+
+    def _normalize_text_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip()[:800] for item in value if str(item).strip()][:8]
+
+    def _normalize_risks(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in value[:8]:
+            if isinstance(item, dict):
+                severity = (
+                    item.get("severity")
+                    if item.get("severity") in {"low", "medium", "high"}
+                    else "medium"
+                )
+                normalized.append(
+                    {
+                        "severity": severity,
+                        "label": self._coerce_text(
+                            item.get("label"), fallback="Evaluation risk"
+                        )[:160],
+                        "description": self._coerce_text(
+                            item.get("description"), fallback="Risk detail was limited."
+                        ),
+                        "timestamp_start": item.get("timestamp_start"),
+                        "timestamp_end": item.get("timestamp_end"),
+                    }
+                )
+            elif str(item).strip():
+                normalized.append(
+                    {
+                        "severity": "medium",
+                        "label": str(item).strip()[:160],
+                        "description": str(item).strip()[:1000],
+                    }
+                )
+        return normalized
+
+    def _normalize_recommendations(self, value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in value[:8]:
+            if isinstance(item, dict):
+                priority = (
+                    item.get("priority")
+                    if item.get("priority") in {"low", "medium", "high"}
+                    else "medium"
+                )
+                normalized.append(
+                    {
+                        "priority": priority,
+                        "action": self._coerce_text(
+                            item.get("action"), fallback="Review the asset."
+                        ),
+                        "reason": self._coerce_text(
+                            item.get("reason"), fallback="Evidence was limited."
+                        ),
+                        "timestamp_start": item.get("timestamp_start"),
+                        "timestamp_end": item.get("timestamp_end"),
+                    }
+                )
+            elif str(item).strip():
+                normalized.append(
+                    {
+                        "priority": "medium",
+                        "action": str(item).strip()[:300],
+                        "reason": "Recommended by the evaluation model.",
+                    }
+                )
+        return normalized
+
+    def _first_text(self, payload: dict[str, Any], keys: list[str], *, fallback: str) -> str:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return fallback
+
+    def _coerce_text(self, value: Any, *, fallback: str) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:1000]
+        return fallback
+
+    def _coerce_score(self, value: Any, *, fallback: int) -> int:
+        if isinstance(value, dict):
+            value = value.get("score")
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        if numeric <= 1:
+            numeric *= 100
+        return max(0, min(100, round(numeric)))
+
+    def _coerce_non_negative_int(self, value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _cache_get(self, cache_key: str) -> EvaluationResponse | None:
         ttl_seconds = int(getattr(settings, "llm_evaluation_cache_ttl_seconds", 0) or 0)

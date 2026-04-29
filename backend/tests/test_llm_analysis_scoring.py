@@ -326,7 +326,7 @@ def test_analysis_scoring_service_caps_ollama_output_tokens(monkeypatch) -> None
         AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]})
     )
 
-    assert router.last_options == {"num_predict": 222}
+    assert router.last_options == {"num_predict": 1200}
 
 
 def test_analysis_scoring_service_caps_openai_compatible_output_tokens(monkeypatch) -> None:
@@ -339,7 +339,73 @@ def test_analysis_scoring_service_caps_openai_compatible_output_tokens(monkeypat
         AnalysisScoringService(router).score({"modality": "video", "segment_features": [1]})
     )
 
-    assert router.last_options == {"max_tokens": 111}
+    assert router.last_options == {"max_tokens": 1200}
+
+
+def test_analysis_scoring_service_recovers_legacy_timeline_payload() -> None:
+    from backend.llm.analysis_scoring_service import AnalysisScoringService
+
+    class _LegacyPayloadRouterStub(_RouterStub):
+        async def generate_structured(self, *, mode, messages, response_schema, options=None):
+            self.last_options = options
+            return type(
+                "Generation",
+                (),
+                {
+                    "parsed_json": {
+                        "timeline": [
+                            {
+                                "timestamp_ms": 0,
+                                "explanation": "Strong opening hook.",
+                            },
+                            {
+                                "timestamp_ms": 4000,
+                                "recommendation": "Clarify the CTA to increase engagement.",
+                            },
+                        ],
+                        "recommendations": [
+                            {
+                                "type": "cta",
+                                "recommendation": "Clarify CTA wording.",
+                                "timestamp_ms": 4000,
+                            }
+                        ],
+                    },
+                    "metadata": {
+                        "provider_id": "primary",
+                        "provider": "openai_compatible",
+                        "model": "test-model",
+                        "tokens_in": 10,
+                        "tokens_out": 10,
+                        "attempts": 1,
+                        "fallback_count": 0,
+                        "latency_ms": 1,
+                        "estimated_cost_usd": 0.0,
+                        "actual_cost_usd": 0.0,
+                        "budget_usd": 0.0,
+                        "provider_attempts": [],
+                    },
+                },
+            )()
+
+    router = _LegacyPayloadRouterStub(provider="openai_compatible")
+    response = asyncio.run(
+        AnalysisScoringService(router).score(
+            {
+                "modality": "video",
+                "segment_features": [
+                    {"segment_index": 0, "start_ms": 0},
+                    {"segment_index": 1, "start_ms": 4000},
+                ],
+            }
+        )
+    )
+
+    assert response.result.overall_summary.startswith("Scoring output was normalized")
+    assert response.result.scores.attention.score == 50
+    assert len(response.result.timeline_points) == 2
+    assert response.result.timeline_points[1].timestamp_ms == 4000
+    assert response.result.suggestions[0].suggestion_type == "cta"
 
 
 def test_analysis_postprocessor_uses_llm_outputs_without_threshold_intervals() -> None:
@@ -385,3 +451,37 @@ def test_analysis_postprocessor_uses_llm_outputs_without_threshold_intervals() -
         for metric in payload.metrics_json
     )
     assert payload.segments_json[0]["note"] == "The opening segment captures attention quickly."
+
+
+def test_analysis_postprocessor_uses_modality_aware_text_presentation() -> None:
+    response = _fake_scoring_response()
+    scoring_service = NeuroScoringService(
+        analysis_scoring_service=_FakeAnalysisScoringService(response)
+    )
+    runtime_output = _runtime_output()
+    bundle = asyncio.run(
+        scoring_service.score(
+            reduced_feature_vector=runtime_output.reduced_feature_vector,
+            region_activation_summary=runtime_output.region_activation_summary,
+            context={},
+            modality="text",
+        )
+    )
+
+    payload = AnalysisPostprocessor().build_dashboard_payload(
+        runtime_output=runtime_output,
+        scoring_bundle=bundle,
+        modality="text",
+        objective=None,
+        goal_template=None,
+        channel=None,
+        audience_segment=None,
+        source_label="brief.pdf",
+    )
+
+    assert payload.summary_json["metadata"]["segment_label"] == "Passage"
+    assert payload.summary_json["metadata"]["visualization_mode"] == "text_signal_grid"
+    assert payload.segments_json[0]["label"] == "Passage 01"
+    assert payload.visualizations_json["visualization_mode"] == "text_signal_grid"
+    assert payload.visualizations_json["presentation"]["timeline_label"] == "Text sequence"
+    assert payload.visualizations_json["heatmap_frames"][0]["label"].startswith("Copy signal")

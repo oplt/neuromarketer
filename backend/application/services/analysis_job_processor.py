@@ -37,13 +37,18 @@ PERSISTED_PROGRESS_STAGES = frozenset(
 
 
 class AnalysisJobProcessor:
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession | None = None) -> None:
         self.session = session
-        self.creatives = CreativeRepository(session)
-        self.inference = InferenceRepository(session)
+        self.creatives = CreativeRepository(session) if session is not None else None
+        self.inference = InferenceRepository(session) if session is not None else None
         self.tribe_inference = TribeInferenceService()
         self.scoring = NeuroScoringService()
         self.postprocessor = AnalysisPostprocessor()
+
+    def _require_session(self) -> AsyncSession:
+        if self.session is None:
+            raise RuntimeError("AnalysisJobProcessor requires an active database session.")
+        return self.session
 
     async def _store_progress(
         self,
@@ -82,7 +87,7 @@ class AnalysisJobProcessor:
         runtime_params["analysis_progress"] = next_progress
         job.runtime_params = runtime_params
         if persist:
-            await self.session.flush()
+            await self._require_session().flush()
         return next_progress
 
     async def _publish_progress_event(
@@ -131,7 +136,7 @@ class AnalysisJobProcessor:
             persist=persist,
         )
         if persist:
-            await self.session.commit()
+            await self._require_session().commit()
         await self._publish_progress_event(
             job_id=job.id,
             stage=stage,
@@ -158,6 +163,9 @@ class AnalysisJobProcessor:
         return self.tribe_inference.runtime_output_from_prediction(prediction)
 
     async def process(self, job_id: UUID) -> None:
+        session = self._require_session()
+        self.creatives = self.creatives or CreativeRepository(session)
+        self.inference = self.inference or InferenceRepository(session)
         acquisition_started_at = time.perf_counter()
         job = await self.inference.acquire_job(
             job_id,
@@ -171,6 +179,7 @@ class AnalysisJobProcessor:
         if job is None:
             log_event(logger, "prediction_job_skipped", job_id=str(job_id), status="skipped")
             return
+        await session.commit()
 
         with bound_log_context(
             job_id=str(job.id),
@@ -234,6 +243,11 @@ class AnalysisJobProcessor:
                 is_partial=False,
             )
 
+            # End any open transaction before TRIBE runs for a long time; otherwise the
+            # connection stays idle-in-transaction (dirty ORM state from non-persisted
+            # progress rows) and Postgres may kill it (idle_in_transaction_session_timeout).
+            await session.commit()
+
             inference_started_at = time.perf_counter()
             execution = await run_in_threadpool(
                 self.tribe_inference.run_for_version,
@@ -296,6 +310,7 @@ class AnalysisJobProcessor:
                 runtime_output=execution.runtime_output,
                 model_name=self.tribe_inference.runtime.model_name,
             )
+            await self.inference.mark_job_inference_completed(job)
             await self.inference.mark_job_scoring_queued(job)
             await self._record_progress(
                 job=job,
@@ -324,6 +339,9 @@ class AnalysisJobProcessor:
             return
 
     async def process_scoring(self, job_id: UUID) -> None:
+        session = self._require_session()
+        self.creatives = self.creatives or CreativeRepository(session)
+        self.inference = self.inference or InferenceRepository(session)
         acquisition_started_at = time.perf_counter()
         job = await self.inference.acquire_scoring_job(
             job_id,
@@ -339,6 +357,7 @@ class AnalysisJobProcessor:
                 logger, "prediction_scoring_job_skipped", job_id=str(job_id), status="skipped"
             )
             return
+        await session.commit()
 
         with bound_log_context(
             job_id=str(job.id),
@@ -378,6 +397,8 @@ class AnalysisJobProcessor:
                 is_partial=True,
             )
 
+            await session.commit()
+
             scoring_started_at = time.perf_counter()
             scoring_bundle = await self.scoring.score(
                 reduced_feature_vector=runtime_output.reduced_feature_vector,
@@ -399,6 +420,10 @@ class AnalysisJobProcessor:
                 scoring_finished_at - scoring_started_at,
                 labels={"stage": "llm_scoring", "modality": modality},
             )
+
+            # Commit before CPU-heavy dashboard build so we never hold an implicit txn
+            # across LLM scoring + threadpool work (see DATABASE_IDLE_IN_TRANSACTION_*).
+            await session.commit()
 
             preview_started_at = time.perf_counter()
             preview_payload = await run_in_threadpool(
@@ -460,6 +485,8 @@ class AnalysisJobProcessor:
                 is_partial=True,
             )
 
+            await session.commit()
+
             postprocess_started_at = time.perf_counter()
             dashboard_payload = await run_in_threadpool(
                 self.postprocessor.with_recommendations,
@@ -512,7 +539,6 @@ class AnalysisJobProcessor:
             await self.inference.mark_job_succeeded(job)
             persistence_finished_at = time.perf_counter()
 
-            total_finished_at = time.perf_counter()
             log_event(
                 logger,
                 "prediction_persist_finished",
@@ -566,10 +592,49 @@ class AnalysisJobProcessor:
                         "queue_wait_ms": queue_wait_ms,
                         "processing_duration_ms": total_processing_duration_ms,
                         "time_to_first_result_ms": first_result_time_ms,
-                        "result_delivery_ms": (queue_wait_ms or 0) + total_processing_duration_ms,
+                        "result_delivery_ms": (queue_wait_ms or 0)
+                        + total_processing_duration_ms,
                         "postprocess_duration_ms": duration_ms(
                             postprocess_started_at, postprocess_finished_at
                         ),
                     },
                 },
             )
+
+    # Compatibility helpers for the lightweight worker module.
+    async def acquire_job(self, db: AsyncSession, job_id: UUID):
+        self.session = db
+        self.creatives = CreativeRepository(db)
+        self.inference = InferenceRepository(db)
+        return await self.inference.acquire_job(
+            job_id,
+            stale_after_seconds=settings.celery_job_stale_after_seconds,
+        )
+
+    async def run_inference(self, job):
+        creative_version = getattr(job, "creative_version", None)
+        if creative_version is None:
+            raise NotFoundAppError("Creative version not found for analysis job.")
+
+        execution = await run_in_threadpool(
+            self.tribe_inference.run_for_version,
+            creative_version=creative_version,
+            request_payload=job.request_payload or {},
+            runtime_params=job.runtime_params or {},
+        )
+        return execution
+
+    async def persist_inference(self, db: AsyncSession, job_id: UUID, execution):
+        self.session = db
+        self.inference = InferenceRepository(db)
+
+        job = await self.inference.get_job(job_id)
+        if job is None:
+            raise NotFoundAppError("Inference job not found.")
+
+        await self.inference.store_prediction_handoff(
+            job=job,
+            runtime_output=execution.runtime_output,
+            model_name=self.tribe_inference.runtime.model_name,
+        )
+        await self.inference.mark_job_scoring_queued(job)

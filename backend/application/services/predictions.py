@@ -61,7 +61,7 @@ class PredictionApplicationService:
                 runtime_params=payload.runtime_params,
             )
             await self.session.commit()
-            hydrated = await self.inference.get_job_with_prediction(job.id)
+            hydrated = await self.inference.get_job_status_light(job.id)
             log_event(
                 logger,
                 "prediction_job_created",
@@ -74,7 +74,19 @@ class PredictionApplicationService:
             return hydrated or job
 
     async def get_job(self, job_id: UUID):
-        job = await self.inference.get_job_with_prediction(job_id)
+        job = await self.inference.get_job_result_full(job_id)
+        if job is None:
+            raise NotFoundAppError("Job not found.")
+        return job
+
+    async def get_job_status_light(self, job_id: UUID):
+        job = await self.inference.get_job_status_light(job_id)
+        if job is None:
+            raise NotFoundAppError("Job not found.")
+        return job
+
+    async def get_analysis_job_status_light_for_user(self, *, job_id: UUID, user_id: UUID):
+        job = await self.inference.get_analysis_job_light_for_user(job_id=job_id, user_id=user_id)
         if job is None:
             raise NotFoundAppError("Job not found.")
         return job
@@ -97,7 +109,7 @@ class PredictionApplicationService:
         Only FAILED and CANCELED jobs may be rerun.  RUNNING/QUEUED jobs are
         rejected to prevent duplicate workers on the same job.
         """
-        job = await self.inference.get_job_with_prediction(job_id)
+        job = await self.inference.get_job_status_light(job_id)
         if job is None:
             raise NotFoundAppError("Job not found.")
         if job.created_by_user_id is not None and job.created_by_user_id != user_id:
@@ -114,7 +126,7 @@ class PredictionApplicationService:
             user_id=str(user_id),
             status=JobStatus.QUEUED.value,
         )
-        return await self.inference.get_job_with_prediction(job_id)
+        return await self.inference.get_job_status_light(job_id)
 
     async def mark_job_failed(self, job_id: UUID, error_message: str) -> None:
         job = await self.inference.get_job(job_id)

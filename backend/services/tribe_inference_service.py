@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ from backend.services.tribe_runtime import (
 
 logger = get_logger(__name__)
 CACHE_FORMAT_VERSION = 1
+CACHE_TOUCH_MIN_INTERVAL = timedelta(minutes=5)
 
 
 @dataclass(slots=True)
@@ -36,6 +38,8 @@ class TribeInferenceExecution:
 
 class TribeInferenceService:
     _last_cache_cleanup_monotonic: float = 0.0
+    _last_extractor_cache_cleanup_monotonic: float = 0.0
+    _extractor_cache_startup_purged: bool = False
 
     def __init__(self) -> None:
         self.asset_loader: AssetLoader | None = None
@@ -53,6 +57,18 @@ class TribeInferenceService:
             0,
             settings.tribe_runtime_output_cache_cleanup_interval_minutes * 60,
         )
+        self.extractor_cache_cleanup_enabled = settings.tribe_extractor_cache_cleanup_enabled
+        self.extractor_cache_root = self.runtime.cache_folder.resolve(strict=False)
+        self.extractor_cache_max_bytes = max(0, settings.tribe_extractor_cache_max_bytes)
+        self.extractor_cache_max_age = timedelta(
+            hours=max(0, settings.tribe_extractor_cache_max_age_hours)
+        )
+        self.extractor_cache_cleanup_interval_seconds = max(
+            0,
+            settings.tribe_extractor_cache_cleanup_interval_minutes * 60,
+        )
+        self.extractor_cache_purge_on_startup = settings.tribe_extractor_cache_purge_on_startup
+        self._purge_extractor_cache_on_startup_if_enabled()
 
     def _asset_loader(self) -> AssetLoader:
         if self.asset_loader is None:
@@ -106,6 +122,7 @@ class TribeInferenceService:
             modality=modality,
         ):
             try:
+                self._maybe_cleanup_extractor_cache()
                 cache_key = self._build_runtime_cache_key(
                     creative_version=creative_version,
                     modality=modality,
@@ -206,6 +223,12 @@ class TribeInferenceService:
                     loaded_asset.cleanup()
 
     def _build_runtime_cache_key(self, *, creative_version: CreativeVersion, modality: str) -> str:
+        preprocessing_summary = dict(creative_version.preprocessing_summary or {})
+        preprocessing_version = (
+            preprocessing_summary.get("preprocessing_version")
+            or preprocessing_summary.get("schema_version")
+            or preprocessing_summary.get("version")
+        )
         cache_identity = {
             "creative_version_id": str(creative_version.id),
             "sha256": creative_version.sha256,
@@ -215,8 +238,7 @@ class TribeInferenceService:
             ).hexdigest(),
             "mime_type": creative_version.mime_type,
             "modality": modality,
-            "extracted_metadata": creative_version.extracted_metadata or {},
-            "preprocessing_summary": creative_version.preprocessing_summary or {},
+            "preprocessing_version": preprocessing_version,
             "model_repo_id": self.runtime.model_repo_id,
             "checkpoint_name": self.runtime.checkpoint_name,
             "requested_device": self.runtime.get_requested_device(),
@@ -282,10 +304,11 @@ class TribeInferenceService:
         cache_path = self._resolve_runtime_cache_path(cache_key)
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
+            now_iso = datetime.now(UTC).isoformat()
             payload = {
                 "cache_version": CACHE_FORMAT_VERSION,
-                "created_at": datetime.now(UTC).isoformat(),
-                "last_accessed_at": datetime.now(UTC).isoformat(),
+                "created_at": now_iso,
+                "last_accessed_at": now_iso,
                 "payload": {
                     "raw_brain_response_uri": runtime_output.raw_brain_response_uri,
                     "raw_brain_response_summary": runtime_output.raw_brain_response_summary,
@@ -294,9 +317,9 @@ class TribeInferenceService:
                     "provenance_json": runtime_output.provenance_json,
                 },
             }
-            cache_path.write_text(
-                self._encode_runtime_cache_document(payload),
-                encoding="utf-8",
+            self._write_runtime_cache_document_atomic(
+                cache_path=cache_path,
+                encoded_payload=self._encode_runtime_cache_document(payload),
             )
             self._maybe_cleanup_runtime_cache()
         except Exception as exc:
@@ -314,11 +337,20 @@ class TribeInferenceService:
         if "payload" not in payload:
             return
 
+        last_accessed_at = self._parse_cache_timestamp(payload.get("last_accessed_at"))
+        now = datetime.now(UTC)
+        if (
+            last_accessed_at is not None
+            and now - last_accessed_at < CACHE_TOUCH_MIN_INTERVAL
+        ):
+            return
+
         try:
             next_payload = dict(payload)
-            next_payload["last_accessed_at"] = datetime.now(UTC).isoformat()
-            cache_path.write_text(
-                self._encode_runtime_cache_document(next_payload), encoding="utf-8"
+            next_payload["last_accessed_at"] = now.isoformat()
+            self._write_runtime_cache_document_atomic(
+                cache_path=cache_path,
+                encoded_payload=self._encode_runtime_cache_document(next_payload),
             )
         except Exception as exc:
             log_exception(
@@ -330,19 +362,88 @@ class TribeInferenceService:
                 status="ignored",
             )
 
-    def _maybe_cleanup_runtime_cache(self) -> None:
+    def run_cache_cleanup(
+        self,
+        *,
+        purge_extractor: bool = False,
+        purge_runtime: bool = False,
+    ) -> dict[str, Any]:
+        runtime_before = self._collect_runtime_cache_entries()
+        extractor_before = self._collect_extractor_cache_entries()
+
+        if purge_runtime:
+            self._purge_runtime_cache(reason="manual_purge")
+        else:
+            self._maybe_cleanup_runtime_cache(force=True)
+        if purge_extractor:
+            self._purge_extractor_cache(reason="manual_purge")
+        else:
+            self._maybe_cleanup_extractor_cache(force=True)
+
+        runtime_after = self._collect_runtime_cache_entries()
+        extractor_after = self._collect_extractor_cache_entries()
+        return {
+            "runtime": {
+                "before_files": len(runtime_before),
+                "after_files": len(runtime_after),
+                "before_bytes": sum(item["size_bytes"] for item in runtime_before),
+                "after_bytes": sum(item["size_bytes"] for item in runtime_after),
+                "purged": purge_runtime,
+            },
+            "extractor": {
+                "before_files": len(extractor_before),
+                "after_files": len(extractor_after),
+                "before_bytes": sum(item["size_bytes"] for item in extractor_before),
+                "after_bytes": sum(item["size_bytes"] for item in extractor_after),
+                "purged": purge_extractor,
+            },
+        }
+
+    def _purge_runtime_cache(self, *, reason: str) -> None:
+        cleanup_started_at = time.perf_counter()
+        evicted_files = 0
+        evicted_bytes = 0
+        try:
+            for entry in self._collect_runtime_cache_entries():
+                evicted_files += 1
+                evicted_bytes += entry["size_bytes"]
+                self._delete_runtime_cache_path(entry["path"], reason=reason)
+            log_event(
+                logger,
+                "tribe_runtime_cache_manual_purge_completed",
+                cache_folder=str(self.runtime_output_cache_folder),
+                evicted_file_count=evicted_files,
+                evicted_bytes=evicted_bytes,
+                duration_ms=duration_ms(cleanup_started_at, time.perf_counter()),
+                status="completed",
+            )
+        except Exception as exc:
+            log_exception(
+                logger,
+                "tribe_runtime_cache_manual_purge_failed",
+                exc,
+                cache_folder=str(self.runtime_output_cache_folder),
+                level="warning",
+                status="ignored",
+            )
+
+    def _maybe_cleanup_runtime_cache(self, *, force: bool = False) -> None:
         if not self.runtime_output_cache_enabled:
             return
 
         now_monotonic = time.monotonic()
         last_cleanup = self.__class__._last_cache_cleanup_monotonic
         if (
-            self.runtime_output_cache_cleanup_interval_seconds > 0
+            not force
+            and self.runtime_output_cache_cleanup_interval_seconds > 0
             and now_monotonic - last_cleanup < self.runtime_output_cache_cleanup_interval_seconds
         ):
             return
 
         self.__class__._last_cache_cleanup_monotonic = now_monotonic
+        self._cleanup_runtime_cache_entries()
+
+    def _cleanup_runtime_cache_entries(self) -> None:
         cleanup_started_at = time.perf_counter()
         evicted_files = 0
         evicted_bytes = 0
@@ -404,6 +505,208 @@ class TribeInferenceService:
                 level="warning",
                 status="ignored",
             )
+
+    def _purge_extractor_cache_on_startup_if_enabled(self) -> None:
+        if not self.extractor_cache_cleanup_enabled or not self.extractor_cache_purge_on_startup:
+            return
+        if self.__class__._extractor_cache_startup_purged:
+            return
+
+        self.__class__._extractor_cache_startup_purged = True
+        self._purge_extractor_cache(reason="startup_purge")
+
+    def _maybe_cleanup_extractor_cache(self, *, force: bool = False) -> None:
+        if not self.extractor_cache_cleanup_enabled:
+            return
+
+        now_monotonic = time.monotonic()
+        last_cleanup = self.__class__._last_extractor_cache_cleanup_monotonic
+        if (
+            not force
+            and self.extractor_cache_cleanup_interval_seconds > 0
+            and now_monotonic - last_cleanup < self.extractor_cache_cleanup_interval_seconds
+        ):
+            return
+
+        self.__class__._last_extractor_cache_cleanup_monotonic = now_monotonic
+        self._cleanup_extractor_cache_entries()
+
+    def _cleanup_extractor_cache_entries(self) -> None:
+        cleanup_started_at = time.perf_counter()
+        evicted_files = 0
+        evicted_bytes = 0
+
+        try:
+            entries = self._collect_extractor_cache_entries()
+            now = datetime.now(UTC)
+            retained_entries: list[dict[str, Any]] = []
+
+            for entry in entries:
+                if (
+                    self.extractor_cache_max_age > timedelta(0)
+                    and now - entry["last_accessed_at"] > self.extractor_cache_max_age
+                ):
+                    evicted_files += 1
+                    evicted_bytes += entry["size_bytes"]
+                    self._delete_extractor_cache_path(entry["path"], reason="expired")
+                    continue
+                retained_entries.append(entry)
+
+            total_bytes = sum(entry["size_bytes"] for entry in retained_entries)
+            if self.extractor_cache_max_bytes > 0 and total_bytes > self.extractor_cache_max_bytes:
+                for entry in sorted(
+                    retained_entries,
+                    key=lambda item: (item["last_accessed_at"], item["created_at"]),
+                ):
+                    if total_bytes <= self.extractor_cache_max_bytes:
+                        break
+                    total_bytes -= entry["size_bytes"]
+                    evicted_files += 1
+                    evicted_bytes += entry["size_bytes"]
+                    self._delete_extractor_cache_path(entry["path"], reason="size_limit")
+
+            self._cleanup_empty_extractor_dirs()
+            metrics.observe(
+                "tribe_extractor_cache_cleanup_seconds",
+                time.perf_counter() - cleanup_started_at,
+            )
+            remaining_entries = self._collect_extractor_cache_entries()
+            log_event(
+                logger,
+                "tribe_extractor_cache_cleanup_completed",
+                cache_root=str(self.extractor_cache_root),
+                retained_file_count=len(remaining_entries),
+                evicted_file_count=evicted_files,
+                evicted_bytes=evicted_bytes,
+                max_bytes=self.extractor_cache_max_bytes,
+                max_age_hours=int(self.extractor_cache_max_age.total_seconds() // 3600),
+                duration_ms=duration_ms(cleanup_started_at, time.perf_counter()),
+                status="completed",
+            )
+        except Exception as exc:
+            log_exception(
+                logger,
+                "tribe_extractor_cache_cleanup_failed",
+                exc,
+                cache_root=str(self.extractor_cache_root),
+                level="warning",
+                status="ignored",
+            )
+
+    def _purge_extractor_cache(self, *, reason: str) -> None:
+        cleanup_started_at = time.perf_counter()
+        evicted_files = 0
+        evicted_bytes = 0
+        event_name = (
+            "tribe_extractor_cache_startup_purge_completed"
+            if reason == "startup_purge"
+            else "tribe_extractor_cache_manual_purge_completed"
+        )
+        failed_event_name = (
+            "tribe_extractor_cache_startup_purge_failed"
+            if reason == "startup_purge"
+            else "tribe_extractor_cache_manual_purge_failed"
+        )
+
+        try:
+            for entry in self._collect_extractor_cache_entries():
+                evicted_files += 1
+                evicted_bytes += entry["size_bytes"]
+                self._delete_extractor_cache_path(entry["path"], reason=reason)
+            self._cleanup_empty_extractor_dirs()
+            log_event(
+                logger,
+                event_name,
+                cache_root=str(self.extractor_cache_root),
+                evicted_file_count=evicted_files,
+                evicted_bytes=evicted_bytes,
+                duration_ms=duration_ms(cleanup_started_at, time.perf_counter()),
+                status="completed",
+            )
+        except Exception as exc:
+            log_exception(
+                logger,
+                failed_event_name,
+                exc,
+                cache_root=str(self.extractor_cache_root),
+                level="warning",
+                status="ignored",
+            )
+
+    def _collect_extractor_cache_entries(self) -> list[dict[str, Any]]:
+        if not self.extractor_cache_root.exists():
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for extractor_root in self._extractor_cache_directories():
+            for cache_path in extractor_root.rglob("*"):
+                resolved_path = cache_path.resolve()
+                if not self._is_extractor_cache_path_safe(resolved_path):
+                    continue
+                if not resolved_path.is_file():
+                    continue
+                stat = resolved_path.stat()
+                entries.append(
+                    {
+                        "path": resolved_path,
+                        "created_at": datetime.fromtimestamp(stat.st_ctime, tz=UTC),
+                        "last_accessed_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC),
+                        "size_bytes": max(int(stat.st_size), 0),
+                    }
+                )
+        return entries
+
+    def _extractor_cache_directories(self) -> list[Path]:
+        if not self.extractor_cache_root.exists():
+            return []
+        return [
+            entry.resolve()
+            for entry in self.extractor_cache_root.glob("neuralset.extractors.*")
+            if entry.is_dir()
+        ]
+
+    def _cleanup_empty_extractor_dirs(self) -> None:
+        for extractor_root in self._extractor_cache_directories():
+            nested_paths = sorted(
+                extractor_root.rglob("*"),
+                key=lambda path: len(path.parts),
+                reverse=True,
+            )
+            for candidate in nested_paths:
+                if not candidate.is_dir():
+                    continue
+                if any(candidate.iterdir()):
+                    continue
+                candidate.rmdir()
+            if extractor_root.exists() and not any(extractor_root.iterdir()):
+                extractor_root.rmdir()
+
+    def _delete_extractor_cache_path(self, cache_path: Path, *, reason: str) -> None:
+        resolved_path = cache_path.resolve()
+        if not self._is_extractor_cache_path_safe(resolved_path):
+            log_event(
+                logger,
+                "tribe_extractor_cache_delete_blocked",
+                cache_path=str(resolved_path),
+                reason=reason,
+                level="warning",
+                status="blocked",
+            )
+            return
+
+        resolved_path.unlink(missing_ok=True)
+        metrics.increment("tribe_extractor_cache_evictions_total", labels={"reason": reason})
+
+    def _is_extractor_cache_path_safe(self, cache_path: Path) -> bool:
+        try:
+            cache_path.relative_to(self.extractor_cache_root)
+            return any(
+                cache_path.relative_to(root).parts
+                for root in self._extractor_cache_directories()
+                if cache_path.is_relative_to(root)
+            )
+        except ValueError:
+            return False
 
     def _collect_runtime_cache_entries(self) -> list[dict[str, Any]]:
         cache_root = self.runtime_output_cache_folder.resolve()
@@ -468,6 +771,18 @@ class TribeInferenceService:
         encoded = json.dumps(next_payload, sort_keys=True)
         next_payload["size_bytes"] = len(encoded.encode("utf-8"))
         return json.dumps(next_payload, sort_keys=True)
+
+    def _write_runtime_cache_document_atomic(
+        self,
+        *,
+        cache_path: Path,
+        encoded_payload: str,
+    ) -> None:
+        temp_path = cache_path.with_suffix(
+            f"{cache_path.suffix}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+        )
+        temp_path.write_text(encoded_payload, encoding="utf-8")
+        temp_path.replace(cache_path)
 
     def _is_runtime_cache_path_safe(self, cache_path: Path) -> bool:
         try:

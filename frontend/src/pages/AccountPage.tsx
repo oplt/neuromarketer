@@ -2,20 +2,18 @@ import { Box, Stack, Tab, Tabs } from '@mui/material'
 import { memo, useState, type SyntheticEvent } from 'react'
 
 import PageHeader from '../components/layout/PageHeader'
-import {
-  AccountFeedback,
-  ApiKeysPanel,
-  AuditLogTable,
-  InvitesPanel,
-  MembersTable,
-  MfaPanel,
-  OverviewPanel,
-  SessionsTable,
-  SsoPanel,
-  WebhooksPanel,
-  useAccountWorkspace,
-  type AccountTabId,
-} from '../features/account'
+import AccountFeedback from '../features/account/components/AccountFeedback'
+import ApiKeysPanel from '../features/account/components/ApiKeysPanel'
+import AuditLogTable from '../features/account/components/AuditLogTable'
+import InvitesPanel from '../features/account/components/InvitesPanel'
+import MembersTable from '../features/account/components/MembersTable'
+import MfaPanel from '../features/account/components/MfaPanel'
+import OverviewPanel from '../features/account/components/OverviewPanel'
+import SessionsTable from '../features/account/components/SessionsTable'
+import SsoPanel from '../features/account/components/SsoPanel'
+import WebhooksPanel from '../features/account/components/WebhooksPanel'
+import { useAccountWorkspace } from '../features/account/hooks/useAccountWorkspace'
+import type { AccountTabId } from '../features/account/types'
 import type { AuthSession } from '../lib/session'
 
 type AccountPageProps = {

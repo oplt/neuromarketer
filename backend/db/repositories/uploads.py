@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import desc, or_, select
+from sqlalchemy import and_, delete, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import StoredArtifact, UploadSession, UploadStatus
@@ -85,6 +85,7 @@ class UploadRepository:
         storage_uri: str,
         original_filename: str | None,
         mime_type: str | None,
+        media_type: str | None,
         file_size_bytes: int | None,
         sha256: str | None,
         metadata_json: dict,
@@ -102,6 +103,7 @@ class UploadRepository:
             storage_uri=storage_uri,
             original_filename=original_filename,
             mime_type=mime_type,
+            media_type=media_type,
             file_size_bytes=file_size_bytes,
             sha256=sha256,
             upload_status=upload_status,
@@ -138,6 +140,33 @@ class UploadRepository:
             )
         )
         return {artifact.id: artifact for artifact in result.scalars().all()}
+
+    async def delete_analysis_artifacts_by_ids(
+        self,
+        *,
+        artifact_ids: Iterable[UUID],
+        project_id: UUID,
+        created_by_user_id: UUID,
+    ) -> int:
+        artifact_ids = tuple(dict.fromkeys(artifact_ids))
+        if not artifact_ids:
+            return 0
+        result = await self.session.execute(
+            select(StoredArtifact.id).where(
+                StoredArtifact.id.in_(artifact_ids),
+                StoredArtifact.project_id == project_id,
+                StoredArtifact.created_by_user_id == created_by_user_id,
+                StoredArtifact.artifact_kind == "analysis_source",
+            )
+        )
+        deletable_ids = [row[0] for row in result.all()]
+        if not deletable_ids:
+            return 0
+        await self.session.execute(
+            delete(StoredArtifact).where(StoredArtifact.id.in_(deletable_ids))
+        )
+        await self.session.flush()
+        return len(deletable_ids)
 
     async def list_analysis_artifacts(
         self,
@@ -177,12 +206,22 @@ class UploadRepository:
             }.get(media_type, StoredArtifact.mime_type.like("video/%"))
             query = query.where(
                 or_(
-                    StoredArtifact.metadata_json["media_type"].astext == media_type,
-                    or_(
-                        StoredArtifact.metadata_json["media_type"].astext.is_(None),
-                        StoredArtifact.metadata_json["media_type"].astext == "",
-                    )
-                    & mime_fallback_filter,
+                    StoredArtifact.media_type == media_type,
+                    # Back-compat fallback for legacy rows that predate
+                    # the denormalized media_type column.
+                    and_(
+                        StoredArtifact.media_type.is_(None),
+                        or_(
+                            StoredArtifact.metadata_json["media_type"].astext == media_type,
+                            and_(
+                                or_(
+                                    StoredArtifact.metadata_json["media_type"].astext.is_(None),
+                                    StoredArtifact.metadata_json["media_type"].astext == "",
+                                ),
+                                mime_fallback_filter,
+                            ),
+                        ),
+                    ),
                 )
             )
         result = await self.session.execute(query)
@@ -219,12 +258,14 @@ class UploadRepository:
         *,
         creative_version_id: UUID | None,
         mime_type: str | None,
+        media_type: str | None,
         file_size_bytes: int | None,
         sha256: str | None,
         metadata_json: dict,
     ) -> StoredArtifact:
         artifact.creative_version_id = creative_version_id
         artifact.mime_type = mime_type
+        artifact.media_type = media_type
         artifact.file_size_bytes = file_size_bytes
         artifact.sha256 = sha256
         artifact.upload_status = UploadStatus.STORED
